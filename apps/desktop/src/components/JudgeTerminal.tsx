@@ -11,13 +11,17 @@ function token(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+interface JudgeTerminalProps {
+  sessionId: string;
+}
+
 /**
- * The judge's terminal inside the orchestrator panel. Unlike workspace
- * tiles, the PTY is spawned by main when the session opens (the judge runs
- * the configured CLI, not a bare shell); this component only connects the
- * xterm to the 'orchestrator' PTY channel and mirrors size changes.
+ * The judge's terminal. Unlike workspace tiles, the PTY is spawned by main
+ * when the session opens (the judge runs the configured CLI, not a bare
+ * shell); this component only connects the xterm to the session's
+ * 'orchestrator' PTY channel and mirrors size changes.
  */
-export function JudgeTerminal(): React.JSX.Element {
+export function JudgeTerminal({ sessionId }: JudgeTerminalProps): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Xterm | null>(null);
   const palette = useXtermPalette();
@@ -52,17 +56,17 @@ export function JudgeTerminal(): React.JSX.Element {
     };
     fitVisible();
     const { cols, rows } = term;
-    bridge.ptyResize(JUDGE_TILE_ID, cols, rows);
+    bridge.ptyResize(sessionId, JUDGE_TILE_ID, cols, rows);
 
-    const unsubscribeData = bridge.onPtyData(JUDGE_TILE_ID, (data) => term.write(data));
+    const unsubscribeData = bridge.onPtyData(sessionId, JUDGE_TILE_ID, (data) => term.write(data));
     // applying options.theme makes xterm emit the palette as OSC sequences
     // through onData — injected into the judge's PTY this would be terminal
     // input for the CLI agent, which can kill it. Suppress while applying.
     const termDisposable = term.onData((data) => {
-      if (!applyingThemeRef.current) bridge.ptyWrite(JUDGE_TILE_ID, data);
+      if (!applyingThemeRef.current) bridge.ptyWrite(sessionId, JUDGE_TILE_ID, data);
     });
     const resizeDisposable = term.onResize(({ cols: c, rows: r }) => {
-      if (Date.now() <= resizeUntilRef.current) bridge.ptyResize(JUDGE_TILE_ID, c, r);
+      if (Date.now() <= resizeUntilRef.current) bridge.ptyResize(sessionId, JUDGE_TILE_ID, c, r);
     });
 
     const ro = new ResizeObserver(() => {

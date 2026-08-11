@@ -58,7 +58,13 @@ export class SessionStore {
     for (const entry of entries) {
       try {
         const session = await this.load(entry.id);
-        summaries.push({ id: entry.id, name: entry.name, updatedAt: entry.updatedAt, agentCount: session.tiles.length });
+        summaries.push({
+          id: entry.id,
+          name: entry.name,
+          updatedAt: entry.updatedAt,
+          agentCount: session.tiles.length,
+          projectPath: session.projectPath,
+        });
       } catch {
         // a corrupt/missing session.json must not hide every other session
       }
@@ -84,7 +90,7 @@ export class SessionStore {
     await this.ensureSessionDirs(id);
     await this.persist(this.sessionFile(id), session);
     await this.touchIndex(id, session.name, now);
-    return { session, agents: [] };
+    return { session, agents: [], state: 'running' };
   }
 
   async rename(id: string, name: string): Promise<SessionFile> {

@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { bridge, type SessionSummary } from '../ipc.js';
 import type { FraktoleMessage, SendMessageArgs, SessionSnapshot } from '../ipc.js';
 import type { TileId } from '../window-tree.js';
-import { JudgeTerminal } from './JudgeTerminal.js';
 
 export type JudgeStatus = 'offline' | 'running' | 'exited';
 
@@ -17,7 +16,6 @@ interface OrchestratorPanelProps {
   sessions: SessionSummary[];
   agents: FleetAgent[];
   messages: FraktoleMessage[];
-  judgeStatus: JudgeStatus;
   onSend(args: SendMessageArgs): Promise<boolean>;
   onSnapshot(agentId: string, text: string): Promise<SessionSnapshot>;
   onGetSnapshot(id: string): Promise<SessionSnapshot | null>;
@@ -27,7 +25,8 @@ interface OrchestratorPanelProps {
   onOpenSession(id: string): void;
   onRenameSession(name: string): void;
   onDeleteSession(id: string): void;
-  onRetryJudge(): void;
+  onStopSession(id: string): void;
+  onStartSession(id: string): void;
 }
 
 type KindFilter = 'all' | FraktoleMessage['kind'];
@@ -50,7 +49,6 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): React.JSX.Elem
     sessions,
     agents,
     messages,
-    judgeStatus,
     onSend,
     onSnapshot,
     onGetSnapshot,
@@ -60,7 +58,8 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): React.JSX.Elem
     onOpenSession,
     onRenameSession,
     onDeleteSession,
-    onRetryJudge,
+    onStopSession,
+    onStartSession,
   } = props;
 
   const [to, setTo] = useState('');
@@ -91,9 +90,13 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): React.JSX.Elem
           setSwitcherOpen(false);
           onDeleteSession(action.id);
         }
+      } else if (action.action === 'stop' && action.id) {
+        onStopSession(action.id);
+      } else if (action.action === 'start' && action.id) {
+        onStartSession(action.id);
       }
     });
-  }, [session, sessions, onOpenSession, onDeleteSession]);
+  }, [session, sessions, onOpenSession, onDeleteSession, onStopSession, onStartSession]);
 
   const agentOptions = useMemo(
     () => agents.filter((a) => a.agentId !== null) as Array<FleetAgent & { agentId: string }>,
@@ -144,20 +147,37 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): React.JSX.Elem
               <div className="orch-switcher">
                 <div className="orch-switcher-label">sessions</div>
                 {sessions.map((s) => (
-                  <button
+                  <div
                     key={s.id}
-                    type="button"
                     className={`orch-switcher-item${s.id === session.id ? ' orch-switcher-current' : ''}`}
-                    onClick={() => {
-                      setSwitcherOpen(false);
-                      if (s.id !== session.id) onOpenSession(s.id);
-                    }}
                   >
-                    {s.name}
-                    <span className="orch-switcher-meta">
-                      {s.agentCount} agents · {timeOf(s.updatedAt)}
-                    </span>
-                  </button>
+                    <button
+                      type="button"
+                      className="orch-switcher-open"
+                      onClick={() => {
+                        setSwitcherOpen(false);
+                        if (s.id !== session.id) onOpenSession(s.id);
+                      }}
+                    >
+                      {s.name}
+                      <span className="orch-switcher-meta">
+                        {s.state ?? ''} · {s.agentCount} agents · {timeOf(s.updatedAt)}
+                      </span>
+                    </button>
+                    {s.id !== session.id && (
+                      <button
+                        type="button"
+                        className="orch-btn orch-btn-danger"
+                        title={s.state === 'stopped' ? 'start session' : 'stop session'}
+                        onClick={() => {
+                          if (s.state === 'stopped') onStartSession(s.id);
+                          else onStopSession(s.id);
+                        }}
+                      >
+                        {s.state === 'stopped' ? 'start' : 'stop'}
+                      </button>
+                    )}
+                  </div>
                 ))}
                 <div className="orch-switcher-actions">
                   <button type="button" className="orch-btn" onClick={() => setNameForm({ mode: 'new', value: '' })}>
@@ -408,19 +428,6 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): React.JSX.Elem
             send
           </button>
         </div>
-      </section>
-
-      <section className="orch-section orch-judge-section">
-        <div className="orch-section-title">
-          judge
-          <span className={`orch-judge-status orch-judge-${judgeStatus}`}>{judgeStatus}</span>
-          {judgeStatus !== 'running' && (
-            <button type="button" className="orch-btn" onClick={onRetryJudge}>
-              retry
-            </button>
-          )}
-        </div>
-        <JudgeTerminal />
       </section>
     </div>
   );

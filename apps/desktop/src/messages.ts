@@ -21,12 +21,12 @@ export function useMessages(sessionId: string | null): MessagesState {
     }
     let live = true;
     void bridge
-      .listMessages()
+      .listMessages(sessionId)
       .then((m) => {
         if (live) setMessages(m);
       })
       .catch(() => undefined);
-    const unsub = bridge.onMessageEvent((msg) => {
+    const unsub = bridge.onMessageEvent(sessionId, (msg) => {
       setMessages((prev) => [msg, ...prev.filter((m) => m.id !== msg.id)]);
     });
     return () => {
@@ -35,9 +35,13 @@ export function useMessages(sessionId: string | null): MessagesState {
     };
   }, [sessionId]);
 
-  const send = useCallback(async (args: SendMessageArgs): Promise<boolean> => {
-    return bridge.sendMessage(args);
-  }, []);
+  const send = useCallback(
+    async (args: SendMessageArgs): Promise<boolean> => {
+      if (sessionId === null) return false;
+      return bridge.sendMessage(sessionId, args);
+    },
+    [sessionId],
+  );
 
   return { messages, send };
 }

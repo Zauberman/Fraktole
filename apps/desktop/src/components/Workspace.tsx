@@ -10,6 +10,7 @@ export interface WorkspaceTileMeta {
 }
 
 interface WorkspaceProps {
+  sessionId: string;
   tree: TileNode | null;
   zoomedId: TileId | null;
   focusedId: TileId | null;
@@ -58,7 +59,7 @@ function useFlip(rectMap: Map<TileId, Rect>, elRefs: React.MutableRefObject<Map<
 }
 
 export function Workspace(props: WorkspaceProps): React.JSX.Element {
-  const { tree, zoomedId, focusedId, tiles, onFocus, onClose, onZoom, onSwap, onSpawned } = props;
+  const { sessionId, tree, zoomedId, focusedId, tiles, onFocus, onClose, onZoom, onSwap, onSpawned } = props;
   const hostRef = useRef<HTMLDivElement | null>(null);
   const elRefs = useRef<Map<TileId, HTMLDivElement | null>>(new Map());
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -131,6 +132,7 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
             }}
           >
             <Tile
+              sessionId={sessionId}
               id={id}
               cwd={meta?.cwd ?? id}
               zoomed={zoomed}

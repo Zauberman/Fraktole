@@ -1,6 +1,8 @@
 import type {
   AppInfo,
   FraktoleMessage,
+  FsEntry,
+  FsStat,
   MenuSessionAction,
   OpenedSession,
   Project,
@@ -18,6 +20,8 @@ import type {
 export type {
   AppInfo,
   FraktoleMessage,
+  FsEntry,
+  FsStat,
   MenuSessionAction,
   OpenedSession,
   Project,
@@ -31,38 +35,46 @@ export type {
   SessionSnapshot,
   Settings,
 };
+export type SessionStatus = 'running' | 'idle' | 'stopped';
 
 export interface FraktoleBridge {
   getAppInfo(): Promise<AppInfo>;
   ptySpawn(args: PtySpawnArgs): Promise<PtySpawnResult>;
-  ptyWrite(tileId: string, data: string): void;
-  ptyResize(tileId: string, cols: number, rows: number): void;
-  ptyKill(tileId: string): void;
-  onPtyData(tileId: string, cb: (data: string) => void): () => void;
-  onTileExit(tileId: string, cb: (payload: PtyExitPayload) => void): () => void;
+  ptyWrite(sessionId: string, tileId: string, data: string): void;
+  ptyResize(sessionId: string, tileId: string, cols: number, rows: number): void;
+  ptyKill(sessionId: string, tileId: string): void;
+  onPtyData(sessionId: string, tileId: string, cb: (data: string) => void): () => void;
+  onTileExit(sessionId: string, tileId: string, cb: (payload: PtyExitPayload) => void): () => void;
   onMenuNewTile(cb: () => void): () => void;
   onMenuTheme(cb: (id: string) => void): () => void;
   onMenuSession(cb: (action: MenuSessionAction) => void): () => void;
   listProjects(): Promise<Project[]>;
   addProject(path: string): Promise<Project>;
-  removeProject(path: string): Promise<void>;
+  removeProject(path: string): Promise<boolean>;
   pickFolder(): Promise<string | null>;
   getSettings(): Promise<Settings>;
   setSettings(patch: Partial<Settings>): Promise<Settings>;
   listSessions(): Promise<SessionSummary[]>;
   newSession(name: string): Promise<OpenedSession>;
   saveSessionAs(id: string, name: string): Promise<SessionFile>;
-  saveSession(payload: SessionSavePayload): Promise<SessionFile | null>;
+  saveSession(sessionId: string, payload: SessionSavePayload): Promise<SessionFile | null>;
   openSession(id: string): Promise<OpenedSession>;
   deleteSession(id: string): Promise<void>;
-  sendMessage(args: SendMessageArgs): Promise<boolean>;
-  listMessages(): Promise<FraktoleMessage[]>;
-  onMessageEvent(cb: (msg: FraktoleMessage) => void): () => void;
-  onJudgeExit(cb: (payload: PtyExitPayload) => void): () => void;
-  judgeRestart(): Promise<boolean>;
-  createSnapshot(args: { agentId: string; text: string }): Promise<SessionSnapshot>;
-  getSnapshot(id: string): Promise<SessionSnapshot | null>;
-  getScrollback(agentId: string): Promise<string[] | null>;
+  stopSession(id: string): Promise<void>;
+  startSession(id: string): Promise<void>;
+  openProject(path: string): Promise<OpenedSession>;
+  sendMessage(sessionId: string, args: SendMessageArgs): Promise<boolean>;
+  listMessages(sessionId: string): Promise<FraktoleMessage[]>;
+  onMessageEvent(sessionId: string, cb: (msg: FraktoleMessage) => void): () => void;
+  onJudgeExit(sessionId: string, cb: (payload: PtyExitPayload) => void): () => void;
+  judgeRestart(sessionId: string): Promise<boolean>;
+  createSnapshot(sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot>;
+  getSnapshot(sessionId: string, id: string): Promise<SessionSnapshot | null>;
+  getScrollback(sessionId: string, agentId: string): Promise<string[] | null>;
+  listDir(path: string): Promise<FsEntry[]>;
+  readFile(path: string): Promise<{ content: string; size: number }>;
+  writeFile(path: string, content: string): Promise<void>;
+  statFile(path: string): Promise<FsStat>;
 }
 
 export const bridge: FraktoleBridge = window.fraktole;

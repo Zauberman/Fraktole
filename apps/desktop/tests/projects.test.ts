@@ -78,4 +78,27 @@ describe('ProjectsStore', () => {
     expect(await store.remove(repo)).toBe(false);
     await rm(parent, { recursive: true, force: true });
   });
+
+  it('binds a session to a project and preserves it across adds', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'frakt-bind-'));
+    const repo = await makeRepo(parent, 'bind');
+    const file = join(parent, 'data', 'projects.json');
+    const store = new ProjectsStore(file);
+    await store.add(repo);
+    const bound = await store.bindSession(repo, 's-abc');
+    expect(bound?.sessionId).toBe('s-abc');
+    // add() keeps the binding (recency touch only)
+    await store.add(repo);
+    const all = await store.list();
+    expect(all[0]?.sessionId).toBe('s-abc');
+    await rm(parent, { recursive: true, force: true });
+  });
+
+  it('bindSession is a no-op for unknown projects', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'frakt-bind2-'));
+    const file = join(parent, 'data', 'projects.json');
+    const store = new ProjectsStore(file);
+    expect(await store.bindSession(join(parent, 'ghost'), 's-x')).toBeNull();
+    await rm(parent, { recursive: true, force: true });
+  });
 });

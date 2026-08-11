@@ -20,6 +20,13 @@ export const IPC = {
   sessionSave: 'session:save',
   sessionOpen: 'session:open',
   sessionDelete: 'session:delete',
+  sessionStop: 'session:stop',
+  sessionStart: 'session:start',
+  projectOpen: 'project:open',
+  fsListDir: 'fs:list-dir',
+  fsReadFile: 'fs:read-file',
+  fsWriteFile: 'fs:write-file',
+  fsStat: 'fs:stat',
   messageSend: 'message:send',
   messageList: 'message:list',
   messageEvent: 'message:event',
@@ -32,7 +39,7 @@ export const IPC = {
 } as const;
 
 export interface MenuSessionAction {
-  action: 'new' | 'save-as' | 'open' | 'delete';
+  action: 'new' | 'save-as' | 'open' | 'delete' | 'stop' | 'start';
   id?: string;
 }
 
@@ -44,6 +51,7 @@ export interface AppInfo {
 }
 
 export interface PtySpawnArgs {
+  sessionId: string;
   tileId: string;
   cwd: string;
   cols: number;
@@ -65,6 +73,8 @@ export interface Project {
   path: string;
   name: string;
   lastUsed: number;
+  /** The session bound to this project (1:1); opened with the project. */
+  sessionId?: string;
 }
 
 export interface Settings {
@@ -95,18 +105,41 @@ export interface SessionFile {
   tiles: SessionAgentMeta[];
   zoomedAgentId?: string;
   focusedAgentId?: string;
+  /** The project root this session belongs to (bound 1:1). */
+  projectPath?: string;
 }
+
+export type SessionState = 'running' | 'idle' | 'stopped';
 
 export interface SessionSummary {
   id: string;
   name: string;
   updatedAt: number;
   agentCount: number;
+  projectPath?: string;
+  /** Live runtime state, merged in by main (refresh via sessions:list). */
+  state?: SessionState;
 }
 
 export interface OpenedSession {
   session: SessionFile;
   agents: SessionAgentMeta[];
+  state: SessionState;
+}
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+}
+
+export interface FsStat {
+  path: string;
+  isDir: boolean;
+  isFile: boolean;
+  size: number;
+  mtimeMs: number;
 }
 
 /** Mailbox message between the orchestrator and an agent. The same shape is

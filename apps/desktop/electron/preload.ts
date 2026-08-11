@@ -3,6 +3,8 @@ import {
   IPC,
   type AppInfo,
   type FraktoleMessage,
+  type FsEntry,
+  type FsStat,
   type MenuSessionAction,
   type OpenedSession,
   type Project,
@@ -21,21 +23,23 @@ const api = {
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke(IPC.appInfo),
 
   ptySpawn: (args: PtySpawnArgs): Promise<PtySpawnResult> => ipcRenderer.invoke(IPC.ptySpawn, args),
-  ptyWrite: (tileId: string, data: string): void => ipcRenderer.send(IPC.ptyWrite, tileId, data),
-  ptyResize: (tileId: string, cols: number, rows: number): void =>
-    ipcRenderer.send(IPC.ptyResize, tileId, cols, rows),
-  ptyKill: (tileId: string): void => ipcRenderer.send(IPC.ptyKill, tileId),
+  ptyWrite: (sessionId: string, tileId: string, data: string): void =>
+    ipcRenderer.send(IPC.ptyWrite, sessionId, tileId, data),
+  ptyResize: (sessionId: string, tileId: string, cols: number, rows: number): void =>
+    ipcRenderer.send(IPC.ptyResize, sessionId, tileId, cols, rows),
+  ptyKill: (sessionId: string, tileId: string): void =>
+    ipcRenderer.send(IPC.ptyKill, sessionId, tileId),
 
-  onPtyData: (tileId: string, cb: (data: string) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, id: string, data: string): void => {
-      if (id === tileId) cb(data);
+  onPtyData: (sessionId: string, tileId: string, cb: (data: string) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, id: string, data: string): void => {
+      if (sid === sessionId && id === tileId) cb(data);
     };
     ipcRenderer.on(IPC.ptyData, listener);
     return () => ipcRenderer.removeListener(IPC.ptyData, listener);
   },
-  onTileExit: (tileId: string, cb: (payload: PtyExitPayload) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, id: string, payload: PtyExitPayload): void => {
-      if (id === tileId) cb(payload);
+  onTileExit: (sessionId: string, tileId: string, cb: (payload: PtyExitPayload) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, id: string, payload: PtyExitPayload): void => {
+      if (sid === sessionId && id === tileId) cb(payload);
     };
     ipcRenderer.on(IPC.tileExit, listener);
     return () => ipcRenderer.removeListener(IPC.tileExit, listener);
@@ -57,42 +61,58 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.menuSession, listener);
   },
 
-  listSessions: (): Promise<SessionSummary[]> => ipcRenderer.invoke(IPC.sessionsList),
-  newSession: (name: string): Promise<OpenedSession> => ipcRenderer.invoke(IPC.sessionNew, name),
-  saveSessionAs: (id: string, name: string): Promise<SessionFile> =>
-    ipcRenderer.invoke(IPC.sessionSaveAs, id, name),
-  saveSession: (payload: SessionSavePayload): Promise<SessionFile | null> =>
-    ipcRenderer.invoke(IPC.sessionSave, payload),
-  openSession: (id: string): Promise<OpenedSession> => ipcRenderer.invoke(IPC.sessionOpen, id),
-  deleteSession: (id: string): Promise<void> => ipcRenderer.invoke(IPC.sessionDelete, id),
-
-  sendMessage: (args: SendMessageArgs): Promise<boolean> => ipcRenderer.invoke(IPC.messageSend, args),
-  listMessages: (): Promise<FraktoleMessage[]> => ipcRenderer.invoke(IPC.messageList),
-  onMessageEvent: (cb: (msg: FraktoleMessage) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, msg: FraktoleMessage): void => cb(msg);
-    ipcRenderer.on(IPC.messageEvent, listener);
-    return () => ipcRenderer.removeListener(IPC.messageEvent, listener);
-  },
-  onJudgeExit: (cb: (payload: PtyExitPayload) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: PtyExitPayload): void => cb(payload);
-    ipcRenderer.on(IPC.judgeExit, listener);
-    return () => ipcRenderer.removeListener(IPC.judgeExit, listener);
-  },
-  judgeRestart: (): Promise<boolean> => ipcRenderer.invoke(IPC.judgeRestart),
-
-  createSnapshot: (args: { agentId: string; text: string }): Promise<SessionSnapshot> =>
-    ipcRenderer.invoke(IPC.snapshotCreate, args),
-  getSnapshot: (id: string): Promise<SessionSnapshot | null> =>
-    ipcRenderer.invoke(IPC.snapshotGet, id),
-  getScrollback: (agentId: string): Promise<string[] | null> =>
-    ipcRenderer.invoke(IPC.scrollbackGet, agentId),
-
   listProjects: (): Promise<Project[]> => ipcRenderer.invoke(IPC.projectsList),
   addProject: (path: string): Promise<Project> => ipcRenderer.invoke(IPC.projectsAdd, path),
   removeProject: (path: string): Promise<boolean> => ipcRenderer.invoke(IPC.projectsRemove, path),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke(IPC.pickFolder),
   getSettings: (): Promise<Settings> => ipcRenderer.invoke(IPC.settingsGet),
   setSettings: (patch: Partial<Settings>): Promise<Settings> => ipcRenderer.invoke(IPC.settingsSet, patch),
+
+  listSessions: (): Promise<SessionSummary[]> => ipcRenderer.invoke(IPC.sessionsList),
+  newSession: (name: string): Promise<OpenedSession> => ipcRenderer.invoke(IPC.sessionNew, name),
+  saveSessionAs: (id: string, name: string): Promise<SessionFile> =>
+    ipcRenderer.invoke(IPC.sessionSaveAs, id, name),
+  saveSession: (sessionId: string, payload: SessionSavePayload): Promise<SessionFile | null> =>
+    ipcRenderer.invoke(IPC.sessionSave, sessionId, payload),
+  openSession: (id: string): Promise<OpenedSession> => ipcRenderer.invoke(IPC.sessionOpen, id),
+  deleteSession: (id: string): Promise<void> => ipcRenderer.invoke(IPC.sessionDelete, id),
+  stopSession: (id: string): Promise<void> => ipcRenderer.invoke(IPC.sessionStop, id),
+  startSession: (id: string): Promise<void> => ipcRenderer.invoke(IPC.sessionStart, id),
+  openProject: (path: string): Promise<OpenedSession> => ipcRenderer.invoke(IPC.projectOpen, path),
+
+  sendMessage: (sessionId: string, args: SendMessageArgs): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.messageSend, sessionId, args),
+  listMessages: (sessionId: string): Promise<FraktoleMessage[]> =>
+    ipcRenderer.invoke(IPC.messageList, sessionId),
+  onMessageEvent: (sessionId: string, cb: (msg: FraktoleMessage) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, msg: FraktoleMessage): void => {
+      if (sid === sessionId) cb(msg);
+    };
+    ipcRenderer.on(IPC.messageEvent, listener);
+    return () => ipcRenderer.removeListener(IPC.messageEvent, listener);
+  },
+  onJudgeExit: (sessionId: string, cb: (payload: PtyExitPayload) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, payload: PtyExitPayload): void => {
+      if (sid === sessionId) cb(payload);
+    };
+    ipcRenderer.on(IPC.judgeExit, listener);
+    return () => ipcRenderer.removeListener(IPC.judgeExit, listener);
+  },
+  judgeRestart: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.judgeRestart, sessionId),
+
+  createSnapshot: (sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot> =>
+    ipcRenderer.invoke(IPC.snapshotCreate, sessionId, args),
+  getSnapshot: (sessionId: string, id: string): Promise<SessionSnapshot | null> =>
+    ipcRenderer.invoke(IPC.snapshotGet, sessionId, id),
+  getScrollback: (sessionId: string, agentId: string): Promise<string[] | null> =>
+    ipcRenderer.invoke(IPC.scrollbackGet, sessionId, agentId),
+
+  listDir: (path: string): Promise<FsEntry[]> => ipcRenderer.invoke(IPC.fsListDir, path),
+  readFile: (path: string): Promise<{ content: string; size: number }> =>
+    ipcRenderer.invoke(IPC.fsReadFile, path),
+  writeFile: (path: string, content: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.fsWriteFile, path, content),
+  statFile: (path: string): Promise<FsStat> => ipcRenderer.invoke(IPC.fsStat, path),
 };
 
 contextBridge.exposeInMainWorld('fraktole', api);

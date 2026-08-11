@@ -40,6 +40,17 @@ export class ProjectsStore {
     return project;
   }
 
+  /** Binds a project to its session (1:1). */
+  async bindSession(path: string, sessionId: string): Promise<Project | null> {
+    const root = await this.gitTopLevel(path).catch(() => resolve(path));
+    const all = await this.list();
+    const existing = all.find((p) => p.path === root);
+    if (!existing) return null;
+    const bound: Project = { ...existing, sessionId };
+    await this.persist(all.map((p) => (p.path === root ? bound : p)));
+    return bound;
+  }
+
   async remove(path: string): Promise<boolean> {
     const root = await this.gitTopLevel(path).catch(() => resolve(path));
     const all = await this.list();

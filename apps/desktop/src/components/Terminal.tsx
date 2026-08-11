@@ -7,6 +7,7 @@ import { useXtermPalette } from '../theme-context.js';
 import { replayText } from '../scrollback.js';
 
 interface TerminalProps {
+  sessionId: string;
   tileId: string;
   cwd: string;
   /** Durable session agent id; provided on restore, omitted on live spawns. */
@@ -24,7 +25,7 @@ function token(name: string): string {
  * forward keys to the main process and stream data back. One PTY per tile,
  * spawned on mount.
  */
-export function Terminal({ tileId, cwd, agentId, onSpawned }: TerminalProps): React.JSX.Element {
+export function Terminal({ sessionId, tileId, cwd, agentId, onSpawned }: TerminalProps): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Xterm | null>(null);
   const palette = useXtermPalette();
@@ -67,7 +68,7 @@ export function Terminal({ tileId, cwd, agentId, onSpawned }: TerminalProps): Re
     const cols = term.cols;
     const rows = term.rows;
     void bridge
-      .ptySpawn({ tileId, cwd, cols, rows, agentId: agentIdRef.current ?? undefined })
+      .ptySpawn({ sessionId, tileId, cwd, cols, rows, agentId: agentIdRef.current ?? undefined })
       .then((res) => {
         onSpawnedRef.current?.(res.agentId);
       })
@@ -79,7 +80,7 @@ export function Terminal({ tileId, cwd, agentId, onSpawned }: TerminalProps): Re
     // where the user left; the live shell continues below the separator
     if (agentIdRef.current !== null && agentIdRef.current !== undefined) {
       void bridge
-        .getScrollback(agentIdRef.current)
+        .getScrollback(sessionId, agentIdRef.current)
         .then((lines) => {
           if (!lines || lines.length === 0) return;
           term.write(replayText(lines, agentIdRef.current ?? ''));
@@ -92,15 +93,15 @@ export function Terminal({ tileId, cwd, agentId, onSpawned }: TerminalProps): Re
     (window as unknown as { __fraktTerms: Map<string, Xterm> }).__fraktTerms = terms;
     terms.set(tileId, term);
 
-    const unsubscribeData = bridge.onPtyData(tileId, (data) => term.write(data));
+    const unsubscribeData = bridge.onPtyData(sessionId, tileId, (data) => term.write(data));
 
     // applying options.theme makes xterm emit the palette as OSC sequences
     // through onData — that would inject terminal input into the PTY (harmless
     // for a shell, fatal for a TUI agent). Suppress forwarding while applying.
     const termDisposable = term.onData((data) => {
-      if (!applyingThemeRef.current) bridge.ptyWrite(tileId, data);
+      if (!applyingThemeRef.current) bridge.ptyWrite(sessionId, tileId, data);
     });
-    const resizeDisposable = term.onResize(({ cols: c, rows: r }) => bridge.ptyResize(tileId, c, r));
+    const resizeDisposable = term.onResize(({ cols: c, rows: r }) => bridge.ptyResize(sessionId, tileId, c, r));
 
     const ro = new ResizeObserver(() => {
       fitVisible();
@@ -112,7 +113,7 @@ export function Terminal({ tileId, cwd, agentId, onSpawned }: TerminalProps): Re
       termDisposable.dispose();
       resizeDisposable.dispose();
       unsubscribeData();
-      bridge.ptyKill(tileId);
+      bridge.ptyKill(sessionId, tileId);
       (window as unknown as { __fraktTerms?: Map<string, Xterm> }).__fraktTerms?.delete(tileId);
       term.dispose();
       termRef.current = null;
