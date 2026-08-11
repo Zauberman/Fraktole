@@ -1,0 +1,49 @@
+{
+  "name": "@fraktole/desktop",
+  "desktopName": "Fraktole",
+  "version": "0.2.0",
+  "description": "Tiling command center for AI agents",
+  "homepage": "https://fraktole.dev",
+  "author": "Fraktole",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k -s first \"vite\" \"bash scripts/launcher.sh ./node_modules/.bin/electron .\"",
+    "build:renderer": "vite build",
+    "build:main": "node scripts/build-main.mjs",
+    "build": "pnpm build:main && pnpm build:renderer",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint electron src tests --no-error-on-unmatched-pattern",
+    "postinstall": "electron-rebuild -f -w node-pty",
+    "icon": "node scripts/icon.mjs",
+    "installer": "bash scripts/make-installer.sh",
+    "fonts": "node scripts/fetch-fonts.mjs",
+    "dist:linux": "pnpm build && electron-builder --linux AppImage deb"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "node-pty": "^1.0.0",
+    "react": "catalog:",
+    "react-dom": "^18.3.1",
+    "xterm": "^5.3.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.0",
+    "@eslint/js": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "^36.4.0",
+    "electron-builder": "^26.0.12",
+    "eslint": "catalog:",
+    "sharp": "^0.34.1",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vite": "^6.1.0",
+    "vitest": "catalog:"
+  }
+}

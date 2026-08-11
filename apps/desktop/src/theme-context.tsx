@@ -1,0 +1,27 @@
+import React, { createContext, useContext } from 'react';
+import { DEFAULT_THEME, themeById, type ThemeId } from './themes.js';
+
+interface ThemeContextValue {
+  themeId: ThemeId;
+  setTheme(id: ThemeId): void;
+}
+
+const ThemeContext = createContext<ThemeContextValue>({
+  themeId: DEFAULT_THEME,
+  setTheme: () => undefined,
+});
+
+export function ThemeProvider(props: { themeId: ThemeId; setTheme: (id: ThemeId) => void; children: React.ReactNode }): React.JSX.Element {
+  const { themeId, setTheme, children } = props;
+  const value = { themeId, setTheme };
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+}
+
+export function useTheme(): ThemeContextValue {
+  return useContext(ThemeContext);
+}
+
+export function useXtermPalette(): ReturnType<typeof themeById>['xterm'] {
+  const { themeId } = useTheme();
+  return themeById(themeId).xterm;
+}

@@ -1,0 +1,31 @@
+{
+  "name": "@fraktole/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fraktole": "./dist/fraktole.mjs"
+  },
+  "dependencies": {
+    "@fraktole/core": "workspace:*",
+    "@fraktole/daemon": "workspace:*",
+    "ws": "catalog:",
+    "@fraktole/tui": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint src",
+    "test": "vitest run --passWithNoTests",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@eslint/js": "catalog:",
+    "@types/node": "catalog:",
+    "@types/ws": "catalog:",
+    "eslint": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vitest": "catalog:"
+  }
+}

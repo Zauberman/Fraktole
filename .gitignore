@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+data/
+.env
+
+# desktop app build artifacts
+apps/desktop/release/
+apps/desktop/dist-electron/
+apps/desktop/dist-renderer/

@@ -1,0 +1,44 @@
+{
+  "name": "@fraktole/daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./server.js": {
+      "types": "./src/server.ts",
+      "default": "./src/server.ts"
+    },
+    "./spawn-daemon.js": {
+      "types": "./src/spawn-daemon.ts",
+      "default": "./src/spawn-daemon.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "fraktole-daemon": "./bin/fraktole-daemon.js"
+  },
+  "dependencies": {
+    "@fraktole/core": "workspace:*",
+    "ws": "catalog:"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint src",
+    "test": "vitest run --passWithNoTests",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@eslint/js": "catalog:",
+    "@types/node": "catalog:",
+    "@types/ws": "catalog:",
+    "eslint": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vitest": "catalog:"
+  }
+}
