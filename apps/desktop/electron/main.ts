@@ -16,7 +16,6 @@ import {
   type FsEntry,
   type FsStat,
   type OpenedSession,
-  type Project,
   type PtySpawnArgs,
   type PtySpawnResult,
   type SendMessageArgs,
@@ -228,6 +227,32 @@ if (!app.requestSingleInstanceLock()) {
       return { session: rt.session, agents: rt.session.tiles, state: rt.state };
     };
 
+    /** One in-flight project open per raw path: a double-click must not race
+     *  into two session creations for the same project. Keyed before any
+     *  await so concurrent clicks for the same path share one promise. */
+    const pendingProjectOpens = new Map<string, Promise<OpenedSession>>();
+    const openProjectSession = async (projectPath: string): Promise<OpenedSession> => {
+      let project =
+        (await projects.list()).find((p) => p.path === projectPath) ??
+        (await projects.add(projectPath));
+      if (project.sessionId) {
+        try {
+          return await openSession(project.sessionId);
+        } catch {
+          // stale binding (session deleted) — fall through and recreate
+        }
+      }
+      const opened = await sessions.newSession(project.name);
+      project = (await projects.bindSession(projectPath, opened.session.id)) ?? project;
+      opened.session.projectPath = projectPath;
+      opened.session.name = project.name;
+      opened.session.judge = { command: judgeCommand, cwd: projectPath };
+      await sessions.save(opened.session);
+      const rt = registry!.open(opened.session.id, opened.session);
+      refreshMenu();
+      return { session: rt.session, agents: rt.session.tiles, state: rt.state };
+    };
+
     ipcMain.handle(IPC.appInfo, (): AppInfo => ({
       version: app.getVersion(),
       shell: process.env.SHELL ?? '/bin/bash',
@@ -317,19 +342,18 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle(IPC.sessionStop, (_e, id: string) => registry?.stop(id));
     ipcMain.handle(IPC.sessionStart, (_e, id: string) => registry?.start(id));
     ipcMain.handle(IPC.projectOpen, async (_e, path: string): Promise<OpenedSession> => {
-      let project: Project = await projects.add(path);
-      if (!project.sessionId) {
-        const opened = await sessions.newSession(project.name);
-        project = (await projects.bindSession(path, opened.session.id)) ?? project;
-        opened.session.projectPath = project.path;
-        opened.session.name = project.name;
-        opened.session.judge = { command: judgeCommand, cwd: project.path };
-        await sessions.save(opened.session);
-        const rt = registry!.open(opened.session.id, opened.session);
-        refreshMenu();
-        return { session: rt.session, agents: rt.session.tiles, state: rt.state };
+      const pending = pendingProjectOpens.get(path);
+      if (pending) return pending;
+      const p = (async (): Promise<OpenedSession> => {
+        const project = await projects.add(path);
+        return openProjectSession(project.path);
+      })();
+      pendingProjectOpens.set(path, p);
+      try {
+        return await p;
+      } finally {
+        pendingProjectOpens.delete(path);
       }
-      return openSession(project.sessionId);
     });
     ipcMain.handle(IPC.sessionSave, async (_e, sessionId: string, payload: SessionSavePayload) => {
       const rt = registry?.get(sessionId) ?? null;
@@ -413,8 +437,15 @@ if (!app.requestSingleInstanceLock()) {
       if (!rt) return false;
       rt.judge.kill();
       const started = rt.spawnJudge();
-      if (!started) mainWindow?.webContents.send(IPC.judgeExit, { code: -1 });
+      if (!started) mainWindow?.webContents.send(IPC.judgeExit, sessionId, { code: -1 });
       return started;
+    });
+    ipcMain.handle(IPC.judgeEnsure, async (_e, sessionId: string): Promise<boolean> => {
+      const rt = registry?.get(sessionId) ?? null;
+      if (!rt) return false;
+      const ok = rt.ensureJudge();
+      if (!ok) mainWindow?.webContents.send(IPC.judgeExit, sessionId, { code: -1 });
+      return ok;
     });
     ipcMain.handle(IPC.scrollbackGet, async (_e, sessionId: string, agentId: string): Promise<string[] | null> => {
       const rt = registry?.get(sessionId) ?? null;

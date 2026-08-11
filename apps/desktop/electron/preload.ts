@@ -99,6 +99,7 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.judgeExit, listener);
   },
   judgeRestart: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.judgeRestart, sessionId),
+  judgeEnsure: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.judgeEnsure, sessionId),
 
   createSnapshot: (sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot> =>
     ipcRenderer.invoke(IPC.snapshotCreate, sessionId, args),

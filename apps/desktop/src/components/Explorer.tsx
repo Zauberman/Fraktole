@@ -141,7 +141,10 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
                 title={p.path}
                 onMouseDown={(e) => {
                   e.stopPropagation();
-                  onOpenProject(p.path);
+                  // clicking the already-active project toggles its file
+                  // tree; clicking another project switches to it
+                  if (isActiveProject) setTreeOpen((v) => !v);
+                  else onOpenProject(p.path);
                 }}
               >
                 <div className="explorer-item-main">

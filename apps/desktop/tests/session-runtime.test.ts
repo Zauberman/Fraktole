@@ -61,7 +61,7 @@ function makeRegistry(logs: string[] = []) {
 }
 
 describe('SessionRuntime lifecycle', () => {
-  it('starts running and spawns the judge on activate', () => {
+  it('activate does not spawn the judge (lazy, on reviewer visit)', () => {
     const { host, judge, router } = fakes();
     const rt = new SessionRuntime({
       session: session('s1'),
@@ -72,18 +72,34 @@ describe('SessionRuntime lifecycle', () => {
       judgeCwd: () => '/home',
     });
     expect(rt.state).toBe('running');
-    expect(judge.spawn).not.toHaveBeenCalled();
     rt.activate();
-    expect(judge.spawn).toHaveBeenCalledTimes(1);
+    expect(judge.spawn).not.toHaveBeenCalled();
     expect(rt.state).toBe('running');
   });
 
-  it('does not respawn the judge when already running', () => {
+  it('ensureJudge spawns the judge when not running', () => {
+    const { host, judge, router } = fakes();
+    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
+    expect(rt.ensureJudge()).toBe(true);
+    expect(judge.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('ensureJudge is a no-op when the judge is already running', () => {
     const { host, judge, router } = fakes();
     judge.status = 'running';
     const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
-    rt.activate();
+    expect(rt.ensureJudge()).toBe(true);
     expect(judge.spawn).not.toHaveBeenCalled();
+  });
+
+  it('ensureJudge revives a stopped session before spawning', () => {
+    const { host, judge, router } = fakes();
+    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
+    rt.stop();
+    expect(rt.ensureJudge()).toBe(true);
+    expect(rt.state).toBe('running');
+    expect(router.start).toHaveBeenCalled();
+    expect(judge.spawn).toHaveBeenCalled();
   });
 
   it('stop kills ptys and judge and stops the router', () => {
@@ -96,14 +112,14 @@ describe('SessionRuntime lifecycle', () => {
     expect(rt.state).toBe('stopped');
   });
 
-  it('start revives a stopped session: router + judge', () => {
+  it('start revives a stopped session (router only; judge spawns on visit)', () => {
     const { host, judge, router } = fakes();
     const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
     rt.stop();
     rt.start();
     expect(rt.state).toBe('running');
     expect(router.start).toHaveBeenCalled();
-    expect(judge.spawn).toHaveBeenCalled();
+    expect(judge.spawn).not.toHaveBeenCalled();
   });
 
   it('idle timer shuts the judge down but keeps tiles alive', async () => {

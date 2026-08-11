@@ -35,6 +35,7 @@ export const IPC = {
   scrollbackGet: 'scrollback:get',
   judgeExit: 'judge:exit',
   judgeRestart: 'judge:restart',
+  judgeEnsure: 'judge:ensure',
   menuSession: 'menu:session',
 } as const;
 

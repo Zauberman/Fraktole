@@ -107,9 +107,6 @@ export class SessionRuntime {
     this.lastActiveAt = Date.now();
     this.clearIdleTimer();
     if (this.state === 'stopped') this.state = 'running';
-    if (this.opts.judge.status !== 'running') {
-      this.spawnJudge();
-    }
   }
 
   /** Called when another session becomes active. */
@@ -124,6 +121,15 @@ export class SessionRuntime {
     return started;
   }
 
+  /** The judge spawns only when its tab is actually visited: a freshly
+   *  spawned CLI tolerates the initial fit resize, so its PTY ends up sized
+   *  to the reviewer tab. Revives a stopped session first. */
+  ensureJudge(): boolean {
+    if (this.state === 'stopped') this.start();
+    if (this.opts.judge.status !== 'running') return this.spawnJudge();
+    return true;
+  }
+
   /** Explicit off switch: kills every PTY and the judge. */
   stop(): void {
     this.clearIdleTimer();
@@ -133,12 +139,12 @@ export class SessionRuntime {
     this.state = 'stopped';
   }
 
-  /** Revives a stopped session; the renderer re-spawns the tiles. */
+  /** Revives a stopped session; the renderer re-spawns the tiles and the
+   *  judge comes back on the next reviewer visit. */
   start(): void {
     if (this.state !== 'stopped') return;
     this.state = 'running';
     this.opts.router.start(this.sessionRef.id);
-    this.spawnJudge();
   }
 
   /** Full teardown (session deleted). */

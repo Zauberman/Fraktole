@@ -171,7 +171,9 @@ export function App(): React.JSX.Element {
     async (path: string): Promise<void> => {
       try {
         const opened = await bridge.openProject(path);
-        activate(opened.session.id);
+        if (opened.session.id !== activeSessionIdRef.current) {
+          activate(opened.session.id);
+        }
         await refreshSessions();
       } catch {
         // project/session load failure — keep the current view

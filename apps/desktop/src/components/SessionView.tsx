@@ -61,15 +61,23 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
   const { messages, send } = useMessages(sessionId);
   const snapshots = useSnapshots();
   const [judgeStatus, setJudgeStatus] = useState<JudgeStatus>('offline');
+  const [spawnTick, setSpawnTick] = useState(0);
 
   // (re)activate when this view becomes the active session
   useEffect(() => {
-    if (active) {
-      void ws.reactivate();
-      // main spawns the judge on activation
-      setJudgeStatus('running');
-    }
+    if (active) void ws.reactivate();
   }, [active, ws.reactivate]);
+
+  // the judge spawns lazily, when its tab is visited: a fresh CLI tolerates
+  // the initial fit resize, so its PTY ends up sized to the reviewer tab
+  useEffect(() => {
+    if (active && tab === 'reviewer') {
+      void bridge.judgeEnsure(sessionId).then((ok) => {
+        setJudgeStatus(ok ? 'running' : 'exited');
+        setSpawnTick((t) => t + 1);
+      });
+    }
+  }, [active, tab, sessionId]);
 
   // expose this session's state for the global keydown handler + app mirrors
   const registerRef = useRef(registerState);
@@ -160,8 +168,12 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
         sessionId={sessionId}
         messages={messages}
         judgeStatus={judgeStatus}
+        spawnTick={spawnTick}
         onRetryJudge={() => {
-          void bridge.judgeRestart(sessionId).then((ok) => setJudgeStatus(ok ? 'running' : 'exited'));
+          void bridge.judgeRestart(sessionId).then((ok) => {
+            setJudgeStatus(ok ? 'running' : 'exited');
+            setSpawnTick((t) => t + 1);
+          });
         }}
       />
     </section>

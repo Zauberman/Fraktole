@@ -7,6 +7,9 @@ interface ReviewerTabProps {
   sessionId: string;
   messages: FraktoleMessage[];
   judgeStatus: JudgeStatus;
+  /** Bumped whenever the judge (re)spawns; refits the terminal so the PTY
+   *  matches the tab while the fresh CLI still tolerates resizes. */
+  spawnTick: number;
   onRetryJudge(): void;
 }
 
@@ -22,7 +25,7 @@ function timeOf(at: number): string {
  * the messages exchanged with the agents (its side of the conversation).
  */
 export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
-  const { sessionId, messages, judgeStatus, onRetryJudge } = props;
+  const { sessionId, messages, judgeStatus, spawnTick, onRetryJudge } = props;
   const judgeThread = messages.filter((m) => m.from === 'orchestrator' || m.to === 'orchestrator');
 
   return (
@@ -39,7 +42,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         </div>
       </header>
       <div className="reviewer-term">
-        <JudgeTerminal sessionId={sessionId} />
+        <JudgeTerminal sessionId={sessionId} spawnTick={spawnTick} />
       </div>
       <section className="reviewer-log">
         <div className="orch-section-title">judge messages</div>

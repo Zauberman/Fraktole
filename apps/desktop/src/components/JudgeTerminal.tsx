@@ -13,24 +13,29 @@ function token(name: string): string {
 
 interface JudgeTerminalProps {
   sessionId: string;
+  /** Bumped whenever the judge (re)spawns: refits and re-arms the resize
+   *  window — a fresh CLI tolerates the initial fit, so its PTY ends up
+   *  sized to whatever the tab currently is. */
+  spawnTick?: number;
 }
 
 /**
- * The judge's terminal. Unlike workspace tiles, the PTY is spawned by main
- * when the session opens (the judge runs the configured CLI, not a bare
- * shell); this component only connects the xterm to the session's
- * 'orchestrator' PTY channel and mirrors size changes.
+ * The judge's terminal. The PTY is spawned lazily by main when the reviewer
+ * tab is visited (the judge runs the configured CLI, not a bare shell);
+ * this component connects the xterm to the session's 'orchestrator' PTY
+ * channel and mirrors size changes while the CLI is young.
  */
-export function JudgeTerminal({ sessionId }: JudgeTerminalProps): React.JSX.Element {
+export function JudgeTerminal({ sessionId, spawnTick }: JudgeTerminalProps): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Xterm | null>(null);
   const palette = useXtermPalette();
   const applyingThemeRef = useRef(false);
   // opencode (and TUIs in general) exit on a resize once their layout has
-  // settled; only the boot-time fit (within the first seconds of life) is
+  // settled; only resizes within the first seconds of the CLI's life are
   // tolerated. After that window the PTY size is frozen — the display still
   // adapts, the judge's viewport does not.
   const resizeUntilRef = useRef(Date.now() + 5_000);
+  const fitRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -54,6 +59,7 @@ export function JudgeTerminal({ sessionId }: JudgeTerminalProps): React.JSX.Elem
     const fitVisible = (): void => {
       if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit();
     };
+    fitRef.current = fitVisible;
     fitVisible();
     const { cols, rows } = term;
     bridge.ptyResize(sessionId, JUDGE_TILE_ID, cols, rows);
@@ -95,6 +101,13 @@ export function JudgeTerminal({ sessionId }: JudgeTerminalProps): React.JSX.Elem
     const timer = window.setTimeout(clear, 60);
     return () => window.clearTimeout(timer);
   }, [palette]);
+
+  // judge (re)spawned: re-arm the resize window and refit, so the fresh CLI
+  // gets its PTY sized to the tab while it still tolerates resizes
+  useEffect(() => {
+    resizeUntilRef.current = Date.now() + 5_000;
+    fitRef.current();
+  }, [spawnTick]);
 
   return <div className="judge-term" ref={hostRef} />;
 }

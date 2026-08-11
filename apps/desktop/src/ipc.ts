@@ -68,6 +68,7 @@ export interface FraktoleBridge {
   onMessageEvent(sessionId: string, cb: (msg: FraktoleMessage) => void): () => void;
   onJudgeExit(sessionId: string, cb: (payload: PtyExitPayload) => void): () => void;
   judgeRestart(sessionId: string): Promise<boolean>;
+  judgeEnsure(sessionId: string): Promise<boolean>;
   createSnapshot(sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot>;
   getSnapshot(sessionId: string, id: string): Promise<SessionSnapshot | null>;
   getScrollback(sessionId: string, agentId: string): Promise<string[] | null>;
