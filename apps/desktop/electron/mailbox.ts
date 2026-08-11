@@ -1,0 +1,224 @@
+import { watch, type FSWatcher } from 'node:fs';
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { FraktoleMessage, SessionFile } from '../src/shared/ipc.js';
+
+export const ORCHESTRATOR_ID = 'orchestrator';
+
+/** Message ids must be unique per session; a per-process counter keeps
+ *  m-<ts>-<seq> distinct even when two messages land in the same ms. */
+let seq = 0;
+export function messageId(): string {
+  seq += 1;
+  return `m-${Date.now()}-${seq}`;
+}
+
+/** Star topology + kind whitelist. The orchestrator may message any agent;
+ *  an agent may only message the orchestrator. */
+export function routeMessage(msg: FraktoleMessage, srcRole: 'agent' | 'judge'): 'ok' | 'forbidden' | 'malformed' {
+  if (!msg || typeof msg !== 'object') return 'malformed';
+  if (typeof msg.from !== 'string' || typeof msg.to !== 'string') return 'malformed';
+  if (typeof msg.body !== 'string' || typeof msg.at !== 'number') return 'malformed';
+  if (msg.kind !== 'task' && msg.kind !== 'result' && msg.kind !== 'note') return 'malformed';
+  if (srcRole === 'agent' && msg.to !== ORCHESTRATOR_ID) return 'forbidden';
+  if (msg.to === msg.from) return 'forbidden';
+  return 'ok';
+}
+
+/** Visible text injected into the target's terminal so a human or TUI agent
+ *  sees the message; the panel log and mailbox files are the canonical copy. */
+export function echoText(from: string, to: string, kind: string, body: string): string {
+  return `\r\n\x1b[36m[fraktole]\x1b[0m ${from} \x1b[2m\u2192\x1b[0m ${to} \x1b[2m(${kind})\x1b[0m: ${body}\r\n`;
+}
+
+export interface MailboxRouterOpts {
+  /** Root that holds session dirs (userData/sessions). */
+  root: string;
+  currentSession: () => SessionFile | null;
+  /** Live tileId for an agent id; 'orchestrator' maps to the judge tile. */
+  tileOfAgent: (agentId: string) => string | null;
+  write: (tileId: string, text: string) => void;
+  emit: (msg: FraktoleMessage) => void;
+  logger?: (line: string) => void;
+}
+
+function log(opts: MailboxRouterOpts, line: string): void {
+  (opts.logger ?? console.log)(line);
+}
+
+/**
+ * File mailboxes: agents write m-*.json files into their outbox, Fraktole
+ * routes them to the target's inbox and echoes them into the target's
+ * terminal. The canonical, append-only message log is messages.jsonl inside
+ * the session dir. Detection = recursive fs.watch (fast path) plus a 2s
+ * outbox scan (safety net — inotify can drop events on busy trees).
+ */
+export class MailboxRouter {
+  private watcher: FSWatcher | null = null;
+  private scanTimer: NodeJS.Timeout | null = null;
+  private scanPending = false;
+
+  constructor(private readonly opts: MailboxRouterOpts) {}
+
+  start(sessionId: string): void {
+    this.stop();
+    const agentsDir = join(this.opts.root, sessionId, 'agents');
+    try {
+      this.watcher = watch(agentsDir, { recursive: true }, () => this.scheduleScan());
+    } catch (err) {
+      log(this.opts, `mailbox watcher unavailable (${String(err)}); relying on the scan`);
+    }
+    this.scanTimer = setInterval(() => this.scanOutboxes(), 2_000);
+    this.scanTimer.unref();
+    this.scheduleScan();
+  }
+
+  stop(): void {
+    this.watcher?.close();
+    this.watcher = null;
+    if (this.scanTimer) clearInterval(this.scanTimer);
+    this.scanTimer = null;
+  }
+
+  private scheduleScan(): void {
+    if (this.scanPending) return;
+    this.scanPending = true;
+    setTimeout(() => {
+      this.scanPending = false;
+      void this.scanOutboxes();
+    }, 150);
+  }
+
+  /** Reads every outbox and ingests new message files. */
+  async scanOutboxes(): Promise<void> {
+    const session = this.opts.currentSession();
+    if (!session) return;
+    const agentsDir = join(this.opts.root, session.id, 'agents');
+    let agents: string[];
+    try {
+      agents = (await readdir(agentsDir, { withFileTypes: true }))
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+    } catch {
+      return;
+    }
+    for (const agentId of agents) {
+      const outbox = join(agentsDir, agentId, 'outbox');
+      let files: string[];
+      try {
+        files = await readdir(outbox);
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        if (!/^m-\d+-\d+\.json$/.test(file)) continue;
+        await this.ingestOutboxFile(join(outbox, file), agentId);
+      }
+    }
+  }
+
+  /** Reads one outbox file, delivers it, then consumes it. */
+  async ingestOutboxFile(file: string, sourceAgentId: string): Promise<void> {
+    const session = this.opts.currentSession();
+    if (!session) return;
+    let raw: string;
+    try {
+      raw = await readFile(file, 'utf8');
+    } catch {
+      return; // already consumed elsewhere
+    }
+    let msg: FraktoleMessage;
+    try {
+      msg = JSON.parse(raw) as FraktoleMessage;
+    } catch {
+      log(this.opts, `mailbox: dropping malformed ${file}`);
+      await unlink(file).catch(() => undefined);
+      return;
+    }
+    const verdict = routeMessage(msg, sourceAgentId === ORCHESTRATOR_ID ? 'judge' : 'agent');
+    if (verdict !== 'ok') {
+      log(this.opts, `mailbox: ${file} rejected (${verdict})`);
+      await unlink(file).catch(() => undefined);
+      return;
+    }
+    msg.from = sourceAgentId;
+    await this.deliver(msg, sourceAgentId);
+    await unlink(file).catch(() => undefined);
+  }
+
+  /** Validates + writes a message produced inside Fraktole (the composer). */
+  async sendFromOrchestrator(msg: FraktoleMessage): Promise<boolean> {
+    const session = this.opts.currentSession();
+    if (!session) return false;
+    if (routeMessage(msg, 'judge') !== 'ok') return false;
+    if (!session.tiles.some((t) => t.agentId === msg.to)) return false;
+    await this.deliver(msg, ORCHESTRATOR_ID);
+    return true;
+  }
+
+  /** Routes a message to the target's inbox, appends the canonical log and
+   *  echoes it into the target's terminal. Idempotent by message id. */
+  async deliver(msg: FraktoleMessage, sourceAgentId: string): Promise<void> {
+    const session = this.opts.currentSession();
+    if (!session) return;
+    if (await this.alreadyLogged(session.id, msg.id)) return;
+    if (sourceAgentId !== ORCHESTRATOR_ID) msg.from = sourceAgentId;
+    if (msg.from === ORCHESTRATOR_ID && msg.at === 0) msg.at = Date.now();
+
+    const agentsDir = join(this.opts.root, session.id, 'agents');
+    const targetDir = join(agentsDir, msg.to);
+    await mkdir(join(targetDir, 'inbox'), { recursive: true });
+    await this.appendLog(session.id, msg);
+    await writeFile(join(targetDir, 'inbox', `${msg.id}.json`), JSON.stringify(msg, null, 2), 'utf8');
+
+    const tileId = this.opts.tileOfAgent(msg.to);
+    if (tileId) this.opts.write(tileId, echoText(msg.from, msg.to, msg.kind, msg.body));
+    this.opts.emit(msg);
+  }
+
+  private async alreadyLogged(sessionId: string, id: string): Promise<boolean> {
+    try {
+      const raw = await readFile(this.logFile(sessionId), 'utf8');
+      return raw.includes(id);
+    } catch {
+      return false;
+    }
+  }
+
+  private logFile(sessionId: string): string {
+    return join(this.opts.root, sessionId, 'messages.jsonl');
+  }
+
+  /** Append-only log with tmp+rename so a crash never truncates history. */
+  private async appendLog(sessionId: string, msg: FraktoleMessage): Promise<void> {
+    const file = this.logFile(sessionId);
+    let raw = '';
+    try {
+      raw = await readFile(file, 'utf8');
+    } catch {
+      // first message in this session
+    }
+    const next = raw.length === 0 ? raw : raw.endsWith('\n') ? raw : `${raw}\n`;
+    const tmp = `${file}.tmp`;
+    await writeFile(tmp, `${next}${JSON.stringify(msg)}\n`, 'utf8');
+    await rename(tmp, file);
+  }
+
+  async listMessages(sessionId: string): Promise<FraktoleMessage[]> {
+    try {
+      const raw = await readFile(this.logFile(sessionId), 'utf8');
+      const messages: FraktoleMessage[] = [];
+      for (const line of raw.split('\n')) {
+        if (line.trim().length === 0) continue;
+        try {
+          messages.push(JSON.parse(line) as FraktoleMessage);
+        } catch {
+          // a corrupt line must not hide the rest of the history
+        }
+      }
+      return messages.sort((a, b) => b.at - a.at);
+    } catch {
+      return [];
+    }
+  }
+}

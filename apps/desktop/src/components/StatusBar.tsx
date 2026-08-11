@@ -1,16 +1,18 @@
 import React from 'react';
 
 interface StatusBarProps {
+  sessionName: string | null;
   tileCount: number;
   focusedCwd: string | null;
   info: string;
 }
 
 export function StatusBar(props: StatusBarProps): React.JSX.Element {
-  const { tileCount, focusedCwd, info } = props;
+  const { sessionName, tileCount, focusedCwd, info } = props;
   return (
     <footer className="status-bar">
       <span>
+        {sessionName !== null ? `${sessionName} · ` : ''}
         {tileCount} {tileCount === 1 ? 'tile' : 'tiles'}
         {focusedCwd ? ` · ${focusedCwd}` : ''}
       </span>

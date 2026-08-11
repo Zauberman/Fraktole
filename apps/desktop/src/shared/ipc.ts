@@ -14,7 +14,27 @@ export const IPC = {
   settingsSet: 'settings:set',
   menuNewTile: 'menu:new-tile',
   menuTheme: 'menu:theme',
+  sessionsList: 'sessions:list',
+  sessionNew: 'session:new',
+  sessionSaveAs: 'session:save-as',
+  sessionSave: 'session:save',
+  sessionOpen: 'session:open',
+  sessionDelete: 'session:delete',
+  messageSend: 'message:send',
+  messageList: 'message:list',
+  messageEvent: 'message:event',
+  snapshotCreate: 'snapshot:create',
+  snapshotGet: 'snapshot:get',
+  scrollbackGet: 'scrollback:get',
+  judgeExit: 'judge:exit',
+  judgeRestart: 'judge:restart',
+  menuSession: 'menu:session',
 } as const;
+
+export interface MenuSessionAction {
+  action: 'new' | 'save-as' | 'open' | 'delete';
+  id?: string;
+}
 
 export interface AppInfo {
   version: string;
@@ -28,6 +48,13 @@ export interface PtySpawnArgs {
   cwd: string;
   cols: number;
   rows: number;
+  /** Durable agent id. Omitted on live spawns (main allocates and registers
+   *  one); provided on session restore so mailboxes stay intact. */
+  agentId?: string;
+}
+
+export interface PtySpawnResult {
+  agentId: string;
 }
 
 export interface PtyExitPayload {
@@ -42,4 +69,82 @@ export interface Project {
 
 export interface Settings {
   theme: string;
+  judgeCommand: string;
+}
+
+/** Window-tree serialized with durable agent ids on the leaves. The live
+ *  tree uses ephemeral tile ids; this shape is what session.json persists. */
+export type SerNode =
+  | { k: 'leaf'; agentId: string }
+  | { k: 'split'; dir: 'h' | 'v'; ratio: number; a: SerNode; b: SerNode };
+
+export interface SessionAgentMeta {
+  agentId: string;
+  cwd: string;
+}
+
+export interface SessionFile {
+  version: 1;
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  nextAgentSeq: number;
+  judge: { command: string; cwd: string } | null;
+  tree: SerNode | null;
+  tiles: SessionAgentMeta[];
+  zoomedAgentId?: string;
+  focusedAgentId?: string;
+}
+
+export interface SessionSummary {
+  id: string;
+  name: string;
+  updatedAt: number;
+  agentCount: number;
+}
+
+export interface OpenedSession {
+  session: SessionFile;
+  agents: SessionAgentMeta[];
+}
+
+/** Mailbox message between the orchestrator and an agent. The same shape is
+ *  the JSON file format in inbox/outbox dirs and one JSON line in
+ *  messages.jsonl. */
+export interface FraktoleMessage {
+  id: string;
+  from: string; // 'orchestrator' | agentId
+  to: string; // 'orchestrator' | agentId
+  kind: 'task' | 'result' | 'note';
+  body: string;
+  at: number;
+  ref?: string; // snapshotId attached to a result
+}
+
+export interface SendMessageArgs {
+  to: string;
+  kind: FraktoleMessage['kind'];
+  body: string;
+  ref?: string;
+}
+
+export interface SessionSnapshot {
+  id: string;
+  agentId: string;
+  at: number;
+  lineCount: number;
+  text: string;
+}
+
+/** Renderer → main on every save: the live arrangement serialized as agent
+ *  ids, the live agent set (prunes the session's tile list), focus/zoom,
+ *  the judge's working dir, and optional scrollback captures. */
+export interface SessionSavePayload {
+  tree: SerNode | null;
+  agents: string[];
+  zoomedAgentId?: string | null;
+  focusedAgentId?: string | null;
+  judgeCwd?: string | null;
+  scrollback?: Record<string, string[]>;
 }

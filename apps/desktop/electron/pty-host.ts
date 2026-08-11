@@ -7,6 +7,17 @@ export interface PtySession {
   cwd: string;
 }
 
+export interface PtySpawnOpts {
+  cwd: string;
+  cols: number;
+  rows: number;
+  /** Program to run; defaults to $SHELL. The judge spawns a CLI agent here. */
+  command?: string;
+  args?: string[];
+  /** Extra env for the child: the FRAKTOLE_* mailbox contract. */
+  envExt?: Record<string, string>;
+}
+
 interface PtyHostOpts {
   send: (channel: string, tileId: string, payload: unknown) => void;
 }
@@ -21,14 +32,19 @@ export class PtyHost {
 
   constructor(private readonly opts: PtyHostOpts) {}
 
-  spawn(tileId: string, cwd: string, cols: number, rows: number): PtySession {
+  spawn(tileId: string, opts: PtySpawnOpts): PtySession {
     const shell = process.env.SHELL ?? '/bin/bash';
-    const term = pty.spawn(shell, [], {
+    const term = pty.spawn(opts.command ?? shell, opts.args ?? [], {
       name: 'xterm-256color',
-      cols: Math.max(cols, 2),
-      rows: Math.max(rows, 2),
-      cwd,
-      env: { ...process.env, TERM: 'xterm-256color', PWD: cwd },
+      cols: Math.max(opts.cols, 2),
+      rows: Math.max(opts.rows, 2),
+      cwd: opts.cwd,
+      env: {
+        ...process.env,
+        TERM: 'xterm-256color',
+        PWD: opts.cwd,
+        ...opts.envExt,
+      },
     });
     term.onData((data) => this.opts.send(IPC.ptyData, tileId, data));
     term.onExit(({ exitCode }) => {
@@ -36,12 +52,16 @@ export class PtyHost {
       this.opts.send(IPC.tileExit, tileId, payload);
       this.sessions.delete(tileId);
     });
-    this.sessions.set(tileId, { pty: term, cwd });
-    return { pid: term.pid, cwd };
+    this.sessions.set(tileId, { pty: term, cwd: opts.cwd });
+    return { pid: term.pid, cwd: opts.cwd };
   }
 
   write(tileId: string, data: string): void {
     this.sessions.get(tileId)?.pty.write(data);
+  }
+
+  cwdOf(tileId: string): string | null {
+    return this.sessions.get(tileId)?.cwd ?? null;
   }
 
   resize(tileId: string, cols: number, rows: number): void {

@@ -6,6 +6,7 @@ import { Tile, TILE_DRAG_TYPE } from './Tile.js';
 export interface WorkspaceTileMeta {
   id: TileId;
   cwd: string;
+  agentId: string | null;
 }
 
 interface WorkspaceProps {
@@ -17,6 +18,7 @@ interface WorkspaceProps {
   onClose(id: TileId): void;
   onZoom(id: TileId): void;
   onSwap(a: TileId, b: TileId): void;
+  onSpawned(tileId: TileId, agentId: string): void;
 }
 
 const GAP = 8;
@@ -56,7 +58,7 @@ function useFlip(rectMap: Map<TileId, Rect>, elRefs: React.MutableRefObject<Map<
 }
 
 export function Workspace(props: WorkspaceProps): React.JSX.Element {
-  const { tree, zoomedId, focusedId, tiles, onFocus, onClose, onZoom, onSwap } = props;
+  const { tree, zoomedId, focusedId, tiles, onFocus, onClose, onZoom, onSwap, onSpawned } = props;
   const hostRef = useRef<HTMLDivElement | null>(null);
   const elRefs = useRef<Map<TileId, HTMLDivElement | null>>(new Map());
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -132,6 +134,8 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
               id={id}
               cwd={meta?.cwd ?? id}
               zoomed={zoomed}
+              agentId={meta?.agentId ?? null}
+              onSpawned={(agentId) => onSpawned(id, agentId)}
               onClose={onClose}
               onZoom={onZoom}
               onDragStart={(dragged) => {

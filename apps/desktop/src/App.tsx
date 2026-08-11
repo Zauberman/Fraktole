@@ -1,17 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Workspace, type WorkspaceTileMeta } from './components/Workspace.js';
+import { Workspace } from './components/Workspace.js';
 import { Explorer } from './components/Explorer.js';
 import { NewTileDialog } from './components/NewTileDialog.js';
 import { Divider } from './components/Divider.js';
-import { PlannerPanel } from './components/PlannerPanel.js';
+import { OrchestratorPanel, type JudgeStatus } from './components/OrchestratorPanel.js';
 import { StatusBar } from './components/StatusBar.js';
 import { TopBar } from './components/TopBar.js';
 import { ViewMenu } from './components/ViewMenu.js';
 import { ThemeProvider } from './theme-context.js';
 import { applyTheme, DEFAULT_THEME, THEME_IDS, type ThemeId } from './themes.js';
-import { bridge, type Project } from './ipc.js';
-import type { SplitDir, TileId, TileNode } from './window-tree.js';
-import { insert, listIds, neighbors, remove, swap } from './window-tree.js';
+import { bridge, type Project, type SendMessageArgs, type SessionSnapshot } from './ipc.js';
+import { useSessionState } from './session-state.js';
+import { useMessages } from './messages.js';
+import { useSnapshots } from './snapshots.js';
+import { listIds } from './window-tree.js';
 import './theme.css';
 
 function BootOverlay({ leaving }: { leaving: boolean }): React.JSX.Element {
@@ -27,22 +29,21 @@ function BootOverlay({ leaving }: { leaving: boolean }): React.JSX.Element {
 }
 
 export function App(): React.JSX.Element {
+  const ws = useSessionState();
+  const { messages, send } = useMessages(ws.session?.id ?? null);
+  const snapshots = useSnapshots();
+  const [judgeStatus, setJudgeStatus] = useState<JudgeStatus>('offline');
+
   const [info, setInfo] = useState<string>('');
   const [bootLeaving, setBootLeaving] = useState(false);
   const [bootGone, setBootGone] = useState(false);
   const [themeId, setThemeIdState] = useState<ThemeId>(DEFAULT_THEME);
   const [viewOpen, setViewOpen] = useState(false);
-  const [tree, setTree] = useState<TileNode | null>(null);
-  const [focusedId, setFocusedId] = useState<TileId | null>(null);
-  const [zoomedId, setZoomedId] = useState<TileId | null>(null);
-  const [tiles, setTiles] = useState<Map<TileId, WorkspaceTileMeta>>(new Map());
-  const nextId = useRef(1);
-  const insertDir = useRef<SplitDir>('h');
-  const defaultCwd = useRef('/home/walid');
+  const [sidePct, setSidePct] = useState({ left: 20, right: 20 });
   const [projects, setProjects] = useState<Project[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogDefault, setDialogDefault] = useState('/home/walid');
-  const [sidePct, setSidePct] = useState({ left: 20, right: 20 });
+  const defaultCwd = useRef('/home/walid');
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
   const dragDivider = useCallback((which: 'left' | 'right', clientX: number) => {
@@ -93,83 +94,6 @@ export function App(): React.JSX.Element {
     void bridge.setSettings({ theme: id }).catch(() => undefined);
   }, []);
 
-  const openTileDialog = useCallback(() => {
-    if (dialogOpenRef.current) return;
-    const f = focusedIdRef.current;
-    const fallback = f ? (tilesRef.current.get(f)?.cwd ?? defaultCwd.current) : (projectsRef.current[0]?.path ?? defaultCwd.current);
-    setDialogDefault(fallback);
-    setDialogOpen(true);
-  }, []);
-
-  const addTile = useCallback((cwd: string): TileId => {
-    const id = `tile-${nextId.current}`;
-    nextId.current += 1;
-    const dir = insertDir.current;
-    insertDir.current = dir === 'h' ? 'v' : 'h';
-    void bridge.addProject(cwd).then(() => refreshProjects()).catch(() => undefined);
-    setTiles((m) => {
-      const copy = new Map(m);
-      copy.set(id, { id, cwd });
-      return copy;
-    });
-    setTree((t) => {
-      const next = insert(t, focusedIdRef.current, id, dir);
-      return next;
-    });
-    setFocusedId(id);
-    return id;
-  }, [refreshProjects]);
-
-  const openProject = useCallback(
-    (path: string): void => {
-      const existing = [...tiles.values()].find((t) => t.cwd === path);
-      if (existing) {
-        setFocusedId(existing.id);
-        return;
-      }
-      addTile(path);
-    },
-    [tiles, addTile],
-  );
-
-  const focusedIdRef = useRef<TileId | null>(null);
-  useEffect(() => {
-    focusedIdRef.current = focusedId;
-  }, [focusedId]);
-
-  const closeTile = useCallback((id: TileId) => {
-    const next = remove(treeRef.current, id);
-    setTree(next);
-    if (focusedIdRef.current === id) {
-      setFocusedId(listIds(next).length > 0 ? (listIds(next)[0] ?? null) : null);
-    }
-    if (zoomedIdRef.current === id) setZoomedId(null);
-    setTiles((m) => {
-      const copy = new Map(m);
-      copy.delete(id);
-      return copy;
-    });
-  }, []);
-
-  const zoomedIdRef = useRef<TileId | null>(null);
-  useEffect(() => {
-    zoomedIdRef.current = zoomedId;
-  }, [zoomedId]);
-
-  const moveFocus = useCallback((dir: 'prev' | 'next') => {
-    setFocusedId((f) => neighbors(treeRef.current, f ?? '', dir));
-  }, []);
-
-  const treeRef = useRef<TileNode | null>(null);
-  useEffect(() => {
-    treeRef.current = tree;
-  }, [tree]);
-
-  const tilesRef = useRef<Map<TileId, WorkspaceTileMeta>>(new Map());
-  useEffect(() => {
-    tilesRef.current = tiles;
-  }, [tiles]);
-
   const projectsRef = useRef<Project[]>([]);
   useEffect(() => {
     projectsRef.current = projects;
@@ -180,9 +104,15 @@ export function App(): React.JSX.Element {
     dialogOpenRef.current = dialogOpen;
   }, [dialogOpen]);
 
-  const onSwap = useCallback((a: TileId, b: TileId) => {
-    setTree((t) => (t === null ? t : swap(t, a, b)));
-  }, []);
+  const openTileDialog = useCallback(() => {
+    if (dialogOpenRef.current) return;
+    const f = ws.focusedIdRef.current;
+    const fallback = f
+      ? (ws.tilesRef.current.get(f)?.cwd ?? defaultCwd.current)
+      : (projectsRef.current[0]?.path ?? defaultCwd.current);
+    setDialogDefault(fallback);
+    setDialogOpen(true);
+  }, [ws.focusedIdRef, ws.tilesRef]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -197,18 +127,18 @@ export function App(): React.JSX.Element {
           if (p) void bridge.addProject(p).then(() => refreshProjects()).catch(() => undefined);
         });
       } else if (key === 'w') {
-        if (focusedIdRef.current) closeTile(focusedIdRef.current);
+        if (ws.focusedIdRef.current) ws.closeTile(ws.focusedIdRef.current);
       } else if (key === 'enter') {
-        const f = focusedIdRef.current;
-        if (f) setZoomedId((z) => (z === f ? null : f));
+        const f = ws.focusedIdRef.current;
+        if (f) ws.toggleZoom(f);
       } else if (key === 'arrowleft' || key === 'arrowup') {
-        moveFocus('prev');
+        ws.moveFocus('prev');
       } else if (key === 'arrowright' || key === 'arrowdown') {
-        moveFocus('next');
+        ws.moveFocus('next');
       } else if (/^[1-9]$/.test(key)) {
-        const ids = listIds(treeRef.current);
+        const ids = listIds(ws.treeRef.current);
         const target = ids[Number(key) - 1];
-        if (target) setFocusedId(target);
+        if (target) ws.setFocusedId(target);
       } else {
         handled = false;
       }
@@ -219,32 +149,39 @@ export function App(): React.JSX.Element {
     };
     window.addEventListener('keydown', onKey, { capture: true });
     return () => window.removeEventListener('keydown', onKey, { capture: true });
-  }, [addTile, closeTile, moveFocus, openTileDialog]);
+  }, [openTileDialog, ws.closeTile, ws.moveFocus, ws.setFocusedId, ws.toggleZoom, ws.treeRef, ws.focusedIdRef, refreshProjects]);
 
   useEffect(() => {
     const unsubs: Array<() => void> = [];
-    for (const [id] of tiles) {
+    for (const [id] of ws.tiles) {
       unsubs.push(
         bridge.onTileExit(id, () => {
-          closeTile(id);
+          ws.closeTile(id);
         }),
       );
     }
     return () => {
       for (const unsub of unsubs) unsub();
     };
-  }, [tiles, closeTile]);
+  }, [ws.tiles, ws.closeTile]);
 
   useEffect(() => {
     const unsubTile = bridge.onMenuNewTile(openTileDialog);
     const unsubTheme = bridge.onMenuTheme((id) => {
       if (THEME_IDS.includes(id as ThemeId)) setTheme(id as ThemeId);
     });
+    const unsubJudge = bridge.onJudgeExit(() => setJudgeStatus('exited'));
     return () => {
       unsubTile();
       unsubTheme();
+      unsubJudge();
     };
   }, [openTileDialog, setTheme]);
+
+  // when a session opens, main spawns the judge; the panel should reflect it
+  useEffect(() => {
+    setJudgeStatus('running');
+  }, [ws.session?.id]);
 
   useEffect(() => {
     const t1 = window.setTimeout(() => setBootLeaving(true), 500);
@@ -264,8 +201,8 @@ export function App(): React.JSX.Element {
         <section className="pane pane-side" style={{ width: `${sidePct.left}%` }}>
           <Explorer
             projects={projects}
-            activePath={focusedId ? (tiles.get(focusedId)?.cwd ?? null) : null}
-            onOpenProject={openProject}
+            activePath={ws.focusedId ? (ws.tiles.get(ws.focusedId)?.cwd ?? null) : null}
+            onOpenProject={ws.openProject}
             onRemoveProject={(path) => {
               void bridge.removeProject(path).then(() => refreshProjects()).catch(() => undefined);
             }}
@@ -279,24 +216,52 @@ export function App(): React.JSX.Element {
         <Divider onDrag={(x) => dragDivider('left', x)} />
         <section className="pane pane-workspace">
           <Workspace
-            tree={tree}
-            zoomedId={zoomedId}
-            focusedId={focusedId}
-            tiles={tiles}
-            onFocus={setFocusedId}
-            onClose={closeTile}
-            onZoom={(id) => setZoomedId((z) => (z === id ? null : id))}
-            onSwap={onSwap}
+            tree={ws.tree}
+            zoomedId={ws.zoomedId}
+            focusedId={ws.focusedId}
+            tiles={ws.tiles}
+            onFocus={ws.setFocusedId}
+            onClose={ws.closeTile}
+            onZoom={ws.toggleZoom}
+            onSwap={ws.onSwap}
+            onSpawned={ws.registerAgent}
           />
         </section>
         <Divider onDrag={(x) => dragDivider('right', x)} />
         <section className="pane pane-side pane-side-right" style={{ width: `${sidePct.right}%` }}>
-          <PlannerPanel />
+          <OrchestratorPanel
+            session={ws.session}
+            sessions={ws.sessions}
+            agents={[...ws.tiles.values()].map((m) => ({ tileId: m.id, agentId: m.agentId, cwd: m.cwd }))}
+            messages={messages}
+            judgeStatus={judgeStatus}
+            onSend={async (args: SendMessageArgs): Promise<boolean> => send(args)}
+            onSnapshot={async (agentId: string, text: string): Promise<SessionSnapshot> =>
+              snapshots.create(agentId, text)
+            }
+            onGetSnapshot={(id: string) => snapshots.get(id)}
+            onFocusAgent={(agentId: string) => {
+              const tileId = ws.tileOf(agentId);
+              if (tileId) ws.setFocusedId(tileId);
+            }}
+            onCloseAgent={(agentId: string) => {
+              const tileId = ws.tileOf(agentId);
+              if (tileId) ws.closeTile(tileId);
+            }}
+            onNewSession={(name: string) => void ws.newSession(name)}
+            onOpenSession={(id: string) => void ws.openSession(id)}
+            onRenameSession={(name: string) => void ws.renameSession(name)}
+            onDeleteSession={(id: string) => void ws.deleteSession(id)}
+            onRetryJudge={() => {
+              void bridge.judgeRestart().then((ok) => setJudgeStatus(ok ? 'running' : 'exited'));
+            }}
+          />
         </section>
       </div>
       <StatusBar
-        tileCount={tiles.size}
-        focusedCwd={focusedId ? (tiles.get(focusedId)?.cwd ?? null) : null}
+        sessionName={ws.session?.name ?? null}
+        tileCount={ws.tiles.size}
+        focusedCwd={ws.focusedId ? (ws.tiles.get(ws.focusedId)?.cwd ?? null) : null}
         info={info}
       />
       {dialogOpen && (
@@ -305,7 +270,7 @@ export function App(): React.JSX.Element {
           defaultPath={dialogDefault}
           onConfirm={(path) => {
             setDialogOpen(false);
-            addTile(path);
+            ws.addTile(path);
           }}
           onCancel={() => setDialogOpen(false)}
         />
