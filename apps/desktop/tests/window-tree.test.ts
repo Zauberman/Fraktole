@@ -24,7 +24,7 @@ function overlap(a: Rect, b: Rect): boolean {
 describe('window-tree insert', () => {
   it('inserts into an empty tree as the root leaf', () => {
     const t = insert(null, null, 'a', 'h');
-    expect(t).toEqual({ kind: 'leaf', id: 'a', ratio: 0.5 });
+    expect(t).toEqual({ kind: 'leaf', id: 'a' });
   });
 
   it('splits the focused leaf 50/50, new tile at b', () => {
@@ -34,8 +34,8 @@ describe('window-tree insert', () => {
     if (t?.kind !== 'split') return;
     expect(t.ratio).toBe(0.5);
     expect(t.dir).toBe('h');
-    expect(t.a).toEqual({ kind: 'leaf', id: 'a', ratio: 0.5 });
-    expect(t.b).toEqual({ kind: 'leaf', id: 'b', ratio: 0.5 });
+    expect(t.a).toEqual({ kind: 'leaf', id: 'a' });
+    expect(t.b).toEqual({ kind: 'leaf', id: 'b' });
   });
 
   it('splits the focused leaf, not the first, when both exist', () => {
@@ -77,7 +77,7 @@ describe('window-tree remove', () => {
     let t: TileNode | null = insert(null, null, 'a', 'h');
     t = insert(t, 'a', 'b', 'h');
     t = remove(t, 'b');
-    expect(t).toEqual({ kind: 'leaf', id: 'a', ratio: 0.5 });
+    expect(t).toEqual({ kind: 'leaf', id: 'a' });
   });
 
   it('collapses a nested split and preserves area (minus one gap strip)', () => {
@@ -98,7 +98,7 @@ describe('window-tree remove', () => {
 });
 
 describe('window-tree swap', () => {
-  it('exchanges ids, keeps ratios and structure', () => {
+  it('exchanges ids, keeps structure and rects', () => {
     let t: TileNode | null = insert(null, null, 'a', 'h');
     t = insert(t, 'a', 'b', 'v');
     t = swap(t, 'a', 'b');

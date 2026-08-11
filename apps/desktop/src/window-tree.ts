@@ -2,12 +2,11 @@ export type TileId = string;
 export type SplitDir = 'h' | 'v';
 
 /**
- * Binary split tree. A split has exactly two children; a leaf carries the
- * ratio of its own share along the parent split's direction (meaningless at
- * the root, which is always a leaf or a split, never empty).
+ * Binary split tree. A split has exactly two children and carries the ratio
+ * of its first child along the split's direction; a leaf carries nothing.
  */
 export type TileNode =
-  | { kind: 'leaf'; id: TileId; ratio: number }
+  | { kind: 'leaf'; id: TileId }
   | { kind: 'split'; dir: SplitDir; ratio: number; a: TileNode; b: TileNode };
 
 export interface Rect {
@@ -26,12 +25,7 @@ export interface Box {
 }
 
 function leaf(id: TileId): TileNode {
-  return { kind: 'leaf', id, ratio: 0.5 };
-}
-
-function setLeafRatio(node: TileNode, ratio: number): TileNode {
-  if (node.kind === 'leaf') return { ...node, ratio };
-  return { ...node, ratio };
+  return { kind: 'leaf', id };
 }
 
 /** DFS pre-order: parent split visited, then a, then b. */
@@ -89,8 +83,9 @@ function insertAt(node: TileNode, targetId: TileId, newId: TileId, dir: SplitDir
 }
 
 /**
- * Removes a leaf, collapsing single-child splits. The surviving subtree keeps
- * the removed split's share: leaves inherit its ratio, splits re-wrap with it.
+ * Removes a leaf, collapsing single-child splits. The surviving subtree
+ * inherits the removed split's box wholesale: it fills the box its split
+ * used to occupy, keeping its internal proportions.
  */
 export function remove(root: TileNode | null, id: TileId): TileNode | null {
   if (root === null) return null;
@@ -99,20 +94,12 @@ export function remove(root: TileNode | null, id: TileId): TileNode | null {
   const a2 = removeFromSplitChild(root.a, id);
   const b2 = removeFromSplitChild(root.b, id);
   if (a2 !== null && b2 !== null) return { ...root, a: a2, b: b2 };
-  if (a2 !== null) return promote(a2, root.ratio);
-  if (b2 !== null) return promote(b2, 1 - root.ratio);
-  return null;
+  return a2 ?? b2;
 }
 
 function removeFromSplitChild(node: TileNode, id: TileId): TileNode | null {
   if (node.kind === 'leaf') return node.id === id ? null : node;
   return remove(node, id);
-}
-
-/** The surviving child inherits the removed split's share of its parent. */
-function promote(child: TileNode, ratio: number): TileNode {
-  if (child.kind === 'leaf') return setLeafRatio(child, ratio);
-  return { ...child, a: setLeafRatio(child.a, ratio), b: setLeafRatio(child.b, ratio) };
 }
 
 /** Exchanges the ids of two leaves; structure and ratios untouched. */
