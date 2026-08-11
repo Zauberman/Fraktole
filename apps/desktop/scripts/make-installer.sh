@@ -5,9 +5,17 @@
 #   release/fraktole-install-<version>.sh.sha256
 #
 # Copy the .sh to any Linux machine and run `bash fraktole-install.sh`.
-# It embeds the built app as a tar.gz payload after an exit-0 marker, plus
-# an inline launcher and icon — nothing is fetched and nothing outside the
-# file is needed.
+# It embeds the built app as a tar.gz payload after an exit-0 marker; the
+# payload layout matches what scripts/install.sh expects:
+#
+#   install.sh     canonical install/uninstall logic (first member: the
+#                  --uninstall path streams only this entry out of the tar)
+#   launcher.sh    env-sanitizing launcher (GTK3/GTK4 crash fix)
+#   icon.png       app icon
+#   app/...        electron linux-unpacked tree
+#
+# The header is deliberately thin: version, marker, offset, extraction.
+# Everything else lives in install.sh, shared by every install path.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,12 +28,23 @@ MARKER="__FRAKTOLE_PAYLOAD__"
 echo "building the app (linux dir target)..."
 bash scripts/ensure-unpacked.sh
 
-PAYLOAD="$(mktemp)"
-trap 'rm -f "${PAYLOAD}"' EXIT
-tar czf "${PAYLOAD}" -C release/linux-unpacked .
-
+STAGE="$(mktemp -d)"
 HEADER="$(mktemp)"
-trap 'rm -f "${PAYLOAD}" "${HEADER}"' EXIT
+PAYLOAD="$(mktemp)"
+trap 'rm -rf "${STAGE}" "${HEADER}" "${PAYLOAD}"' EXIT
+
+# stage the payload; install.sh must be the first member so --uninstall can
+# stream it out without decompressing the 110MB app
+cp scripts/install.sh "${STAGE}/install.sh"
+cp scripts/launcher.sh "${STAGE}/launcher.sh"
+cp build/icon.png "${STAGE}/icon.png"
+mkdir -p "${STAGE}/app"
+cp -a release/linux-unpacked/. "${STAGE}/app/"
+
+# fix the version placeholder in the payload copy (the repo file keeps it)
+sed -i "s|@VERSION@|${VERSION}|g" "${STAGE}/install.sh"
+
+tar czf "${PAYLOAD}" -C "${STAGE}" install.sh launcher.sh icon.png app
 
 cat > "${HEADER}" <<'GENEOF'
 #!/usr/bin/env bash
@@ -34,20 +53,12 @@ cat > "${HEADER}" <<'GENEOF'
 #   bash fraktole-install.sh            install to ~/.local (no sudo)
 #   bash fraktole-install.sh --uninstall
 #
-# Requirements: bash, tar, gzip, base64 (present on every Linux desktop).
-# The app itself needs the usual Electron system libraries (libgtk-3,
-# libnss3, libasound2) like any Electron application.
+# Requirements: bash, tar, gzip (present on every Linux desktop). The app
+# itself needs the usual Electron system libraries (libgtk-3, libnss3,
+# libasound2) like any Electron application.
 set -euo pipefail
 
 VERSION="@VERSION@"
-PREFIX="${HOME}/.local"
-LIBDIR="${PREFIX}/lib/fraktole-desktop"
-BIN="${PREFIX}/bin/fraktole-desktop"
-APP_DIR="${PREFIX}/share/applications"
-ICON_DIR="${PREFIX}/share/icons/hicolor/512x512/apps"
-DESKTOP="${APP_DIR}/fraktole-desktop.desktop"
-ICON="${ICON_DIR}/fraktole-desktop.png"
-BASHRC="${HOME}/.bashrc"
 MARKER="__FRAKTOLE_PAYLOAD__"
 PAYLOAD_OFFSET=@@@@@@@@@@@@@@@@@@@@
 # the offset is emitted zero-padded (fixed width); force base-10, bash would
@@ -67,98 +78,26 @@ extract_payload() {
   tail -c +$((PAYLOAD_OFFSET + ${#MARKER} + 2)) "${0}" | tar xz -C "${target}" || die "corrupt installer: payload extraction failed"
 }
 
-uninstall() {
-  rm -rf "${LIBDIR}"
-  rm -f "${BIN}" "${DESKTOP}" "${ICON}"
-  if [ -f "${BASHRC}" ]; then
-    sed -i '/^# fraktole$/d; /^export PATH=.*# fraktole$/d' "${BASHRC}"
-  fi
-  update-desktop-database "${APP_DIR}" 2>/dev/null || true
-  echo "fraktole ${VERSION} uninstalled"
-}
-
 if [ "${1:-}" = "--uninstall" ]; then
-  uninstall
-  exit 0
+  # stream install.sh out of the payload without extracting the app; it is
+  # the first tar member so only a few KB are decompressed
+  tail -c +$((PAYLOAD_OFFSET + ${#MARKER} + 2)) "${0}" | tar xzO install.sh | bash -s -- --uninstall
+  exit $?
 fi
 
-echo "installing Fraktole ${VERSION}..."
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 extract_payload "${TMP}"
 
-mkdir -p "${LIBDIR}" "${PREFIX}/bin" "${APP_DIR}" "${ICON_DIR}"
-rm -rf "${LIBDIR}"
-cp -a "${TMP}/." "${LIBDIR}/"
-chmod +x "${LIBDIR}/fraktole-desktop"
-
-cat > "${LIBDIR}/launcher.sh" <<'LAUNCHER_EOF'
-GENEOF
-
-cat scripts/launcher.sh >> "${HEADER}"
-
-cat >> "${HEADER}" <<'GENEOF'
-LAUNCHER_EOF
-chmod +x "${LIBDIR}/launcher.sh"
-
-printf '%s' '__ICON_B64__' | base64 -d > "${ICON}"
-
-cat > "${ICON_DIR}/../../index.theme" <<'THEME'
-[Icon Theme]
-Name=Hicolor
-Directories=512x512/apps
-
-[512x512/apps]
-Size=512
-Type=Directories
-Context=Applications
-THEME
-
-cat > "${BIN}" <<EOF
-#!/usr/bin/env bash
-# Fraktole launcher — see launcher.sh for why.
-set -euo pipefail
-export FRAKTOLE_REAL_BIN="${LIBDIR}/fraktole-desktop"
-exec bash "${LIBDIR}/launcher.sh" "\$@"
-EOF
-chmod +x "${BIN}"
-
-cat > "${DESKTOP}" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Fraktole
-Comment=Tiling command center for AI agents
-Exec=${BIN}
-Icon=fraktole-desktop
-Terminal=false
-Categories=Development;
-StartupWMClass=Fraktole
-StartupNotify=true
-EOF
-
-gtk-update-icon-cache "${PREFIX}/share/icons/hicolor" -f 2>/dev/null || true
-update-desktop-database "${APP_DIR}" 2>/dev/null || true
-if [ -f "${BASHRC}" ] && ! grep -qF '.local/bin' "${BASHRC}"; then
-  printf '\n# fraktole\nexport PATH="$HOME/.local/bin:$PATH"  # fraktole\n' >> "${BASHRC}"
-  echo "added ~/.local/bin to PATH in ~/.bashrc (open a new shell)"
-fi
+bash "${TMP}/install.sh"
 
 echo
-echo "installed:"
-echo "  ${BIN}"
-echo "  ${DESKTOP}"
-echo
-echo "launch from the app menu or run: fraktole-desktop"
 echo "uninstall with: bash ${0} --uninstall"
 exit 0
 GENEOF
 
-# fix the version placeholder (same length as @VERSION@ → offset unchanged)
+# fix the version placeholder in the header
 sed -i "s|@VERSION@|${VERSION}|g" "${HEADER}"
-
-# substitute the icon base64 (safe: A-Za-z0-9+/=)
-ICON_B64="$(base64 -w0 build/icon.png)"
-sed -i "s|__ICON_B64__|${ICON_B64}|" "${HEADER}"
 
 # the payload starts right after the marker line; record the byte offset as
 # a zero-padded number. The placeholder is exactly 20 chars wide so the

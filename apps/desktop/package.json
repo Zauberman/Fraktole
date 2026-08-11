@@ -19,8 +19,7 @@
     "postinstall": "electron-rebuild -f -w node-pty",
     "icon": "node scripts/icon.mjs",
     "installer": "bash scripts/make-installer.sh",
-    "fonts": "node scripts/fetch-fonts.mjs",
-    "dist:linux": "pnpm build && electron-builder --linux AppImage deb"
+    "fonts": "node scripts/fetch-fonts.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

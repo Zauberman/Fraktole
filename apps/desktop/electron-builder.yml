@@ -9,16 +9,9 @@ files:
   - package.json
 linux:
   target:
-    - AppImage
-    - deb
+    - dir
   icon: build/icon.png
   category: Development
   maintainer: Fraktole
   artifactName: ${productName}-${version}-${arch}.${ext}
-deb:
-  afterInstall: scripts/after-install.sh
-  afterRemove: scripts/after-remove.sh
-extraFiles:
-  - from: scripts/launcher.sh
-    to: launcher.sh
 npmRebuild: true
