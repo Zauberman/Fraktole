@@ -9,7 +9,7 @@
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k -s first \"vite\" \"bash scripts/launcher.sh ./node_modules/.bin/electron .\"",
+    "dev": "pnpm build:main && concurrently -k -s first \"vite\" \"bash scripts/launcher.sh ./node_modules/.bin/electron .\"",
     "build:renderer": "vite build",
     "build:main": "node scripts/build-main.mjs",
     "build": "pnpm build:main && pnpm build:renderer",

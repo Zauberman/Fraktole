@@ -10,6 +10,8 @@ export interface FraktoleBridge {
   ptyKill(tileId: string): void;
   onPtyData(tileId: string, cb: (data: string) => void): () => void;
   onTileExit(tileId: string, cb: (payload: PtyExitPayload) => void): () => void;
+  onMenuNewTile(cb: () => void): () => void;
+  onMenuTheme(cb: (id: string) => void): () => void;
   listProjects(): Promise<Project[]>;
   addProject(path: string): Promise<Project>;
   removeProject(path: string): Promise<void>;

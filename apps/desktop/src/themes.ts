@@ -1,4 +1,5 @@
-export type ThemeId = 'midnight' | 'gold' | 'amber' | 'forest' | 'neon' | 'paper';
+export const THEME_IDS = ['midnight', 'gold', 'amber', 'forest', 'neon', 'paper'] as const;
+export type ThemeId = (typeof THEME_IDS)[number];
 
 export interface XtermPalette {
   background: string;

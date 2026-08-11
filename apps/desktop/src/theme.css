@@ -683,8 +683,48 @@ body {
   z-index: 10;
 }
 
+.tile-hidden {
+  display: none;
+}
+
 .tile-dragging {
   opacity: 0.4;
+}
+
+/* ————— fatal error screen ————— */
+
+.fatal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+  height: 100%;
+  padding: var(--s6);
+  background: var(--bg);
+  color: var(--text);
+  text-align: center;
+}
+
+.fatal-title {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--err);
+}
+
+.fatal-message {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  max-width: 560px;
+  word-break: break-word;
+}
+
+.fatal-hint {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
 }
 
 /* ————— explorer ————— */

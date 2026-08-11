@@ -43,11 +43,19 @@ export function Terminal({ tileId, cwd }: TerminalProps): React.JSX.Element {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
-    fit.fit();
+
+    // tiles hidden while another is zoomed have no box — fit would compute
+    // 0x0; they refit automatically when the ResizeObserver fires on unzoom
+    const fitVisible = (): void => {
+      if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit();
+    };
+    fitVisible();
 
     const cols = term.cols;
     const rows = term.rows;
-    void bridge.ptySpawn({ tileId, cwd, cols, rows });
+    void bridge.ptySpawn({ tileId, cwd, cols, rows }).catch(() => {
+      // a spawn failure closes the tile via tile:exit (code -1) in main
+    });
 
     // debug hook: lets the CDP smoke read the live terminal buffer
     const terms = (window as unknown as { __fraktTerms?: Map<string, Xterm> }).__fraktTerms ?? new Map();
@@ -60,7 +68,7 @@ export function Terminal({ tileId, cwd }: TerminalProps): React.JSX.Element {
     const resizeDisposable = term.onResize(({ cols: c, rows: r }) => bridge.ptyResize(tileId, c, r));
 
     const ro = new ResizeObserver(() => {
-      fit.fit();
+      fitVisible();
     });
     ro.observe(host);
 

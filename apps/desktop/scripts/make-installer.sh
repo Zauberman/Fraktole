@@ -18,8 +18,7 @@ OUT="release/fraktole-install-${VERSION}.sh"
 MARKER="__FRAKTOLE_PAYLOAD__"
 
 echo "building the app (linux dir target)..."
-pnpm build >/dev/null
-pnpm exec electron-builder --linux dir >/dev/null
+bash scripts/ensure-unpacked.sh
 
 PAYLOAD="$(mktemp)"
 trap 'rm -f "${PAYLOAD}"' EXIT
@@ -72,7 +71,7 @@ uninstall() {
   rm -rf "${LIBDIR}"
   rm -f "${BIN}" "${DESKTOP}" "${ICON}"
   if [ -f "${BASHRC}" ]; then
-    sed -i '/^# fraktole$/d; /^export PATH="\$HOME\/.local\/bin:\$PATH"$/d' "${BASHRC}"
+    sed -i '/^# fraktole$/d; /^export PATH=.*# fraktole$/d' "${BASHRC}"
   fi
   update-desktop-database "${APP_DIR}" 2>/dev/null || true
   echo "fraktole ${VERSION} uninstalled"
@@ -140,7 +139,7 @@ EOF
 gtk-update-icon-cache "${PREFIX}/share/icons/hicolor" -f 2>/dev/null || true
 update-desktop-database "${APP_DIR}" 2>/dev/null || true
 if [ -f "${BASHRC}" ] && ! grep -qF '.local/bin' "${BASHRC}"; then
-  printf '\n# fraktole\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "${BASHRC}"
+  printf '\n# fraktole\nexport PATH="$HOME/.local/bin:$PATH"  # fraktole\n' >> "${BASHRC}"
   echo "added ~/.local/bin to PATH in ~/.bashrc (open a new shell)"
 fi
 

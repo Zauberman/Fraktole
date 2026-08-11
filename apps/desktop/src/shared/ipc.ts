@@ -12,6 +12,8 @@ export const IPC = {
   pickFolder: 'dialog:pick-folder',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  menuNewTile: 'menu:new-tile',
+  menuTheme: 'menu:theme',
 } as const;
 
 export interface AppInfo {

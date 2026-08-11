@@ -45,6 +45,7 @@ exec env -i \
   SHELL="$SHELL" \
   TERM="$TERM" \
   COLORTERM="$COLORTERM" \
+  TZ="${TZ:-}" \
   "${locales[@]}" \
   DISPLAY="${DISPLAY:-}" \
   WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \

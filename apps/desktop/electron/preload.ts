@@ -25,6 +25,17 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.tileExit, listener);
   },
 
+  onMenuNewTile: (cb: () => void): (() => void) => {
+    const listener = (): void => cb();
+    ipcRenderer.on(IPC.menuNewTile, listener);
+    return () => ipcRenderer.removeListener(IPC.menuNewTile, listener);
+  },
+  onMenuTheme: (cb: (id: string) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, id: string): void => cb(id);
+    ipcRenderer.on(IPC.menuTheme, listener);
+    return () => ipcRenderer.removeListener(IPC.menuTheme, listener);
+  },
+
   listProjects: (): Promise<Project[]> => ipcRenderer.invoke(IPC.projectsList),
   addProject: (path: string): Promise<Project> => ipcRenderer.invoke(IPC.projectsAdd, path),
   removeProject: (path: string): Promise<boolean> => ipcRenderer.invoke(IPC.projectsRemove, path),

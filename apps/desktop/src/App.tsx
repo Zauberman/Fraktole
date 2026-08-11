@@ -8,7 +8,7 @@ import { StatusBar } from './components/StatusBar.js';
 import { TopBar } from './components/TopBar.js';
 import { ViewMenu } from './components/ViewMenu.js';
 import { ThemeProvider } from './theme-context.js';
-import { applyTheme, DEFAULT_THEME, type ThemeId } from './themes.js';
+import { applyTheme, DEFAULT_THEME, THEME_IDS, type ThemeId } from './themes.js';
 import { bridge, type Project } from './ipc.js';
 import type { SplitDir, TileId, TileNode } from './window-tree.js';
 import { insert, listIds, neighbors, remove, swap } from './window-tree.js';
@@ -80,7 +80,7 @@ export function App(): React.JSX.Element {
       .getSettings()
       .then((s) => {
         const id = s.theme as ThemeId;
-        const valid = ['midnight', 'gold', 'amber', 'forest', 'neon', 'paper'].includes(id);
+        const valid = THEME_IDS.includes(id);
         setThemeIdState(valid ? id : DEFAULT_THEME);
         applyTheme(valid ? id : DEFAULT_THEME);
       })
@@ -91,6 +91,14 @@ export function App(): React.JSX.Element {
     setThemeIdState(id);
     applyTheme(id);
     void bridge.setSettings({ theme: id }).catch(() => undefined);
+  }, []);
+
+  const openTileDialog = useCallback(() => {
+    if (dialogOpenRef.current) return;
+    const f = focusedIdRef.current;
+    const fallback = f ? (tilesRef.current.get(f)?.cwd ?? defaultCwd.current) : (projectsRef.current[0]?.path ?? defaultCwd.current);
+    setDialogDefault(fallback);
+    setDialogOpen(true);
   }, []);
 
   const addTile = useCallback((cwd: string): TileId => {
@@ -130,15 +138,12 @@ export function App(): React.JSX.Element {
   }, [focusedId]);
 
   const closeTile = useCallback((id: TileId) => {
-    setTree((t) => {
-      const next = remove(t, id);
-      const ids = listIds(next);
-      if (focusedIdRef.current === id) {
-        setFocusedId(ids.length > 0 ? ids[0] ?? null : null);
-      }
-      if (zoomedIdRef.current === id) setZoomedId(null);
-      return next;
-    });
+    const next = remove(treeRef.current, id);
+    setTree(next);
+    if (focusedIdRef.current === id) {
+      setFocusedId(listIds(next).length > 0 ? (listIds(next)[0] ?? null) : null);
+    }
+    if (zoomedIdRef.current === id) setZoomedId(null);
     setTiles((m) => {
       const copy = new Map(m);
       copy.delete(id);
@@ -182,15 +187,11 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      if (dialogOpenRef.current) return;
       const key = e.key.toLowerCase();
       let handled = true;
       if (key === 't') {
-        if (!dialogOpenRef.current) {
-          const f = focusedIdRef.current;
-          const fallback = f ? (tilesRef.current.get(f)?.cwd ?? defaultCwd.current) : (projectsRef.current[0]?.path ?? defaultCwd.current);
-          setDialogDefault(fallback);
-          setDialogOpen(true);
-        }
+        openTileDialog();
       } else if (key === 'o') {
         void bridge.pickFolder().then((p) => {
           if (p) void bridge.addProject(p).then(() => refreshProjects()).catch(() => undefined);
@@ -218,7 +219,7 @@ export function App(): React.JSX.Element {
     };
     window.addEventListener('keydown', onKey, { capture: true });
     return () => window.removeEventListener('keydown', onKey, { capture: true });
-  }, [addTile, closeTile, moveFocus]);
+  }, [addTile, closeTile, moveFocus, openTileDialog]);
 
   useEffect(() => {
     const unsubs: Array<() => void> = [];
@@ -233,6 +234,17 @@ export function App(): React.JSX.Element {
       for (const unsub of unsubs) unsub();
     };
   }, [tiles, closeTile]);
+
+  useEffect(() => {
+    const unsubTile = bridge.onMenuNewTile(openTileDialog);
+    const unsubTheme = bridge.onMenuTheme((id) => {
+      if (THEME_IDS.includes(id as ThemeId)) setTheme(id as ThemeId);
+    });
+    return () => {
+      unsubTile();
+      unsubTheme();
+    };
+  }, [openTileDialog, setTheme]);
 
   useEffect(() => {
     const t1 = window.setTimeout(() => setBootLeaving(true), 500);

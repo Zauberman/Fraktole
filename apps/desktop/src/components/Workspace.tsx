@@ -73,14 +73,21 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
     return () => ro.disconnect();
   }, []);
 
+  const box = { x: 0, y: 0, w: size.w, h: size.h, gap: GAP };
+  const allRects = useMemo(() => {
+    if (tree === null) return new Map<TileId, Rect>();
+    return rects(tree, box);
+  }, [tree, size]);
+
+  // Zoom never unmounts tiles: the zoomed tile gets the full box, the others
+  // stay mounted and are hidden with CSS — their PTYs keep running.
+  const zoomed = zoomedId !== null && listIds(tree).includes(zoomedId);
   const rectMap = useMemo(() => {
     if (tree === null) return new Map<TileId, Rect>();
-    const box = { x: 0, y: 0, w: size.w, h: size.h, gap: GAP };
-    if (zoomedId !== null && listIds(tree).includes(zoomedId)) {
-      return new Map([[zoomedId, box]]);
-    }
-    return rects(tree, box);
-  }, [tree, zoomedId, size]);
+    if (!zoomed) return allRects;
+    const full: Rect = { x: 0, y: 0, w: size.w, h: size.h };
+    return new Map([...allRects].map(([id, r]) => [id, id === zoomedId ? full : r]));
+  }, [tree, zoomed, zoomedId, allRects, size]);
 
   useFlip(rectMap, elRefs);
 
@@ -105,12 +112,12 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
       {[...rectMap.entries()].map(([id, rect]) => {
         const meta = tiles.get(id);
         const focused = focusedId === id;
-        const zoomed = zoomedId === id;
+        const isZoomed = zoomedId === id;
         return (
           <div
             key={id}
             ref={(el) => setRef(id, el)}
-            className={`tile${focused ? ' tile-focused' : ''}${zoomed ? ' tile-zoomed' : ''}`}
+            className={`tile${focused ? ' tile-focused' : ''}${isZoomed ? ' tile-zoomed' : ''}${zoomed && !isZoomed ? ' tile-hidden' : ''}`}
             style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
             onMouseDown={() => onFocus(id)}
             onDragOver={(e) => {
