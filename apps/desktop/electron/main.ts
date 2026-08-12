@@ -168,8 +168,25 @@ function createWindow(): void {
 }
 
 if (!app.requestSingleInstanceLock()) {
+  // a second launch (app menu, desktop entry, repeated command) while an
+  // instance is already running: quit silently — the first instance is
+  // told to come forward by the second-instance event below
   app.quit();
 } else {
+  // bring the existing window forward (shared by the second-instance event
+  // and the launcher's SIGUSR2 when it detects a running instance)
+  const focusApp = (): void => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  };
+  app.on('second-instance', focusApp);
+  // the launcher sends this instead of spawning a doomed second Electron
+  // (whose zygotes would leak as orphans); some args-bearing launches still
+  // fall through to the second-instance event above
+  process.on('SIGUSR2', focusApp);
+
   app.whenReady().then(async () => {
     migrateUserData();
     const projects = new ProjectsStore(join(app.getPath('userData'), 'projects.json'));

@@ -86,6 +86,7 @@ Type=Application
 Name=Fraktole
 Comment=Tiling command center for AI agents
 Exec=${BIN}
+TryExec=${BIN}
 Icon=fraktole-desktop
 Terminal=false
 Categories=Development;

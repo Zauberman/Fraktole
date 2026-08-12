@@ -41,6 +41,17 @@ for name in $(env | sed -n 's/^\(FRAKTOLE_[A-Z0-9_]*\)=.*/\1/p' | sort -u); do
   fraktole_vars+=("$name=${!name}")
 done
 
+# Already running? Tell the first instance to come forward and exit right
+# here. Launching Electron anyway would create a doomed second instance —
+# its zygote children outlive the quick quit and accumulate as orphans.
+# (Only matches a bare main process: args-bearing launches fall through to
+# Electron's own second-instance handling.)
+EXISTING="$(pgrep -f 'lib/fraktole-desktop/fraktole-desktop$' 2>/dev/null | head -n1 || true)"
+if [ -n "${EXISTING}" ]; then
+  kill -USR2 "${EXISTING}" 2>/dev/null || true
+  exit 0
+fi
+
 # XDG_CURRENT_DESKTOP is deliberately NOT passed: Chromium reads it and
 # enables GNOME-specific GTK4 integration (e.g. zorin:GNOME), which collides
 # with GTK3 modules injected by the session.
@@ -58,6 +69,8 @@ exec env -i \
   WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
   XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
   XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-}" \
+  DESKTOP_STARTUP_ID="${DESKTOP_STARTUP_ID:-}" \
+  XDG_ACTIVATION_TOKEN="${XDG_ACTIVATION_TOKEN:-}" \
   DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
   XAUTHORITY="${XAUTHORITY:-}" \
   SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}" \
