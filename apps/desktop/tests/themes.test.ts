@@ -1,30 +1,48 @@
 import { describe, expect, it } from 'vitest';
 import { THEMES } from '../src/themes.js';
-import { contrast, contrastOklch, hexToSrgb, luminance, oklchToSrgb } from './color-utils.js';
+import {
+  contrast,
+  contrastOklch,
+  deltaL,
+  hexToSrgb,
+  hueDistance,
+  luminance,
+  oklchToSrgb,
+} from './color-utils.js';
 
 const TOKEN_NAMES = [
   '--bg',
+  '--bg-sunken',
+  '--bg-tile',
   '--bg-raised',
   '--bg-overlay',
-  '--bg-tile',
+  '--hover-surface',
+  '--active-surface',
   '--text',
   '--text-muted',
   '--text-faint',
   '--accent',
+  '--accent-strong',
+  '--accent-tint',
+  '--accent-glow',
   '--focus-border',
   '--focus-ring',
   '--ok',
   '--warn',
   '--err',
+  '--ok-tint',
+  '--warn-tint',
+  '--err-tint',
   '--line',
   '--line-strong',
-  '--accent-glow',
-  '--accent-tint',
   '--mark-ghost',
   '--shadow-dialog',
   '--overlay-scrim',
   '--btn-primary-fg',
   '--btn-primary-hover',
+  '--selection-bg',
+  '--scrollbar-thumb',
+  '--scrollbar-thumb-hover',
 ] as const;
 
 const XTERM_TEXT_COLORS = [
@@ -96,39 +114,69 @@ describe('theme contrast matrix', () => {
         expect(contrastOklch(t['--text'], t['--bg'])).toBeGreaterThanOrEqual(4.5);
         expect(contrastOklch(t['--text'], t['--bg-raised'])).toBeGreaterThanOrEqual(4.5);
         expect(contrastOklch(t['--text'], t['--bg-tile'])).toBeGreaterThanOrEqual(4.5);
+        expect(contrastOklch(t['--text'], t['--bg-sunken'])).toBeGreaterThanOrEqual(4.5);
+        expect(contrastOklch(t['--text'], t['--bg-overlay'])).toBeGreaterThanOrEqual(4.5);
       });
 
       it('muted text ≥ 4.5:1 on bg and raised', () => {
         expect(contrastOklch(t['--text-muted'], t['--bg'])).toBeGreaterThanOrEqual(4.5);
         expect(contrastOklch(t['--text-muted'], t['--bg-raised'])).toBeGreaterThanOrEqual(4.5);
+        expect(contrastOklch(t['--text-muted'], t['--bg-tile'])).toBeGreaterThanOrEqual(4.5);
       });
 
-      it('faint hints ≥ 3:1 on bg and raised', () => {
-        expect(contrastOklch(t['--text-faint'], t['--bg'])).toBeGreaterThanOrEqual(3);
-        expect(contrastOklch(t['--text-faint'], t['--bg-raised'])).toBeGreaterThanOrEqual(3);
+      it('faint hints ≥ 4.5:1 on bg and raised (11px mono is small text)', () => {
+        expect(contrastOklch(t['--text-faint'], t['--bg'])).toBeGreaterThanOrEqual(4.5);
+        expect(contrastOklch(t['--text-faint'], t['--bg-raised'])).toBeGreaterThanOrEqual(4.5);
       });
 
-      it('accent ≥ 3:1 on bg', () => {
-        expect(contrastOklch(t['--accent'], t['--bg'])).toBeGreaterThanOrEqual(3);
+      it('accent ≥ 4.5:1 on bg (it is used for small text)', () => {
+        expect(contrastOklch(t['--accent'], t['--bg'])).toBeGreaterThanOrEqual(4.5);
+        expect(contrastOklch(t['--accent'], t['--bg-raised'])).toBeGreaterThanOrEqual(4.5);
       });
 
       it('focus border ≥ 3:1 on tile bg', () => {
         expect(contrastOklch(t['--focus-border'], t['--bg-tile'])).toBeGreaterThanOrEqual(3);
       });
 
-      it('status colors ≥ 3:1 on bg', () => {
-        expect(contrastOklch(t['--ok'], t['--bg'])).toBeGreaterThanOrEqual(3);
-        expect(contrastOklch(t['--warn'], t['--bg'])).toBeGreaterThanOrEqual(3);
-        expect(contrastOklch(t['--err'], t['--bg'])).toBeGreaterThanOrEqual(3);
+      it('status colors ≥ 3:1 on bg and readable on their own tints', () => {
+        for (const [fg, bg, tint] of [
+          ['--ok', '--bg', '--ok-tint'],
+          ['--warn', '--bg', '--warn-tint'],
+          ['--err', '--bg', '--err-tint'],
+        ] as const) {
+          expect(contrastOklch(t[fg], t[bg]), `${fg} on bg`).toBeGreaterThanOrEqual(3);
+          expect(contrastOklch(t[fg], t[tint]), `${fg} on its tint`).toBeGreaterThanOrEqual(3);
+        }
       });
 
-      it('primary button label ≥ 3:1 on its accent', () => {
-        expect(contrastOklch(t['--btn-primary-fg'], t['--accent'])).toBeGreaterThanOrEqual(3);
+      it('status hues are theme-tinted but distinct from the accent (≥30°)', () => {
+        expect(hueDistance(t['--accent'], t['--ok'])).toBeGreaterThanOrEqual(30);
+        expect(hueDistance(t['--accent'], t['--warn'])).toBeGreaterThanOrEqual(30);
+      });
+
+      it('tints carry the same hue as their parent', () => {
+        expect(hueDistance(t['--accent'], t['--accent-tint'])).toBe(0);
+        expect(hueDistance(t['--ok'], t['--ok-tint'])).toBe(0);
+        expect(hueDistance(t['--warn'], t['--warn-tint'])).toBe(0);
+        expect(hueDistance(t['--err'], t['--err-tint'])).toBe(0);
+      });
+
+      it('primary button label ≥ 4.5:1 on its accent', () => {
+        expect(contrastOklch(t['--btn-primary-fg'], t['--accent'])).toBeGreaterThanOrEqual(4.5);
+      });
+
+      it('hairlines keep a perceptual lightness gap over the base', () => {
+        expect(deltaL(t['--line'], t['--bg'])).toBeGreaterThanOrEqual(0.09);
+        expect(deltaL(t['--line-strong'], t['--bg'])).toBeGreaterThanOrEqual(0.14);
       });
 
       it('line borders stay subtle (decorative, < 2:1 on bg)', () => {
         expect(contrastOklch(t['--line'], t['--bg'])).toBeLessThan(2);
         expect(contrastOklch(t['--line-strong'], t['--bg'])).toBeLessThan(2.5);
+      });
+
+      it('shadows are hue-tinted, never pure black', () => {
+        expect(t['--shadow-dialog']).not.toContain('oklch(0 0 0');
       });
 
       it('xterm: foreground + bright colors ≥ 4.5:1 on terminal bg', () => {
@@ -154,6 +202,10 @@ describe('theme contrast matrix', () => {
 
       it('xterm: cursor and cursor accent readable on each other', () => {
         expect(contrast(hexToSrgb(theme.xterm.cursorAccent), hexToSrgb(theme.xterm.cursor))).toBeGreaterThanOrEqual(3);
+      });
+
+      it('xterm: brightWhite is never pure #ffffff', () => {
+        expect(theme.xterm.brightWhite.toLowerCase()).not.toBe('#ffffff');
       });
     });
   }

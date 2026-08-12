@@ -31,32 +31,11 @@
 }
 
 :root {
-  /* color — oklch. These defaults are the Midnight theme; the full token set
-     is applied at runtime from src/themes.ts (applyTheme). */
-  --bg: oklch(0.15 0.012 255);
-  --bg-raised: oklch(0.19 0.013 255);
-  --bg-overlay: oklch(0.22 0.014 255);
-  --bg-tile: oklch(0.13 0.011 255);
-  --text: oklch(0.96 0.006 95);
-  --text-muted: oklch(0.72 0.012 255);
-  --text-faint: oklch(0.55 0.01 255);
-  --accent: oklch(0.8 0.16 160);
-  --focus-border: oklch(0.72 0.15 160);
-  --focus-ring: oklch(0.6 0.14 160 / 0.5);
-  --ok: oklch(0.8 0.16 160);
-  --warn: oklch(0.87 0.16 85);
-  --err: oklch(0.7 0.19 25);
-  --line: oklch(0.28 0.014 255);
-  --line-strong: oklch(0.36 0.015 255);
-  --accent-glow: oklch(0.8 0.16 160 / 0.06);
-  --accent-tint: oklch(0.8 0.16 160 / 0.12);
-  --mark-ghost: oklch(0.3 0.015 255);
-  --shadow-dialog: 0 1px 2px oklch(0 0 0 / 0.3), 0 24px 60px oklch(0 0 0 / 0.45);
-  --overlay-scrim: oklch(0.1 0.008 255 / 0.6);
-  --btn-primary-fg: oklch(0.16 0.02 160);
-  --btn-primary-hover: oklch(0.85 0.15 160);
+  /* color tokens are applied at runtime from src/themes.ts (applyTheme) —
+     this block holds only the CSS-native tokens (type/spacing/radii/motion) */
 
   /* type — two families only */
+  --text-2xs: 10px;
   --font-ui: 'Space Grotesk', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'DejaVu Sans Mono', monospace;
   --text-xs: 11px;
@@ -78,6 +57,7 @@
 
   /* radii */
   --r0: 0;
+  --r-xs: 6px;
   --r-sm: 8px;
   --r-md: 12px;
   --r-pill: 999px;
@@ -88,6 +68,40 @@
   --dur-fast: 150ms;
   --dur-med: 240ms;
   --dur-slow: 500ms;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+::selection {
+  background: var(--selection-bg);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--r-pill);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 * {
@@ -253,7 +267,7 @@ body {
   min-height: 0;
   overflow-y: auto;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   padding: var(--s2);
   background: var(--bg-tile);
   display: flex;
@@ -278,7 +292,7 @@ body {
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--fg-dim);
+  color: var(--text-faint);
 }
 
 .reviewer-row-body {
@@ -287,20 +301,20 @@ body {
 }
 
 .reviewer-row-user .reviewer-row-body {
-  color: var(--fg-bright);
+  color: var(--text);
 }
 
 .reviewer-row-system .reviewer-row-body {
-  color: var(--fg-dim);
+  color: var(--text-muted);
   font-style: italic;
 }
 
 .reviewer-row-tool .reviewer-row-body {
-  color: var(--fg-dim);
+  color: var(--text-muted);
 }
 
 .reviewer-row-tool-error .reviewer-row-body {
-  color: var(--danger);
+  color: var(--err);
 }
 
 .reviewer-tool-name {
@@ -315,8 +329,8 @@ body {
 .reviewer-tool-detail {
   margin: var(--s1) 0 0;
   padding: var(--s2);
-  background: var(--bg);
-  border-radius: 6px;
+  background: var(--bg-sunken);
+  border-radius: var(--r-xs);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   max-height: 8em;
@@ -324,18 +338,18 @@ body {
 }
 
 .reviewer-stream {
-  color: var(--fg);
+  color: var(--text);
 }
 
 .reviewer-note {
   padding: var(--s2);
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   font-size: var(--text-sm);
 }
 
 .reviewer-note-error {
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-  color: var(--danger);
+  background: var(--err-tint);
+  color: var(--err);
 }
 
 .reviewer-input {
@@ -354,7 +368,7 @@ body {
   gap: var(--s2);
   padding: var(--s2);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   margin-bottom: var(--s2);
 }
 
@@ -363,7 +377,7 @@ body {
   flex-direction: column;
   gap: var(--s1);
   font-size: var(--text-xs);
-  color: var(--fg-dim);
+  color: var(--text-faint);
 }
 
 .reviewer-config-provider {
@@ -380,7 +394,7 @@ body {
   color: var(--text);
   background: var(--bg-raised);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   padding: var(--s1);
 }
 
@@ -442,7 +456,7 @@ body {
 }
 
 .view-btn:hover {
-  background: var(--bg-overlay);
+  background: var(--hover-surface);
   color: var(--text);
   border-color: var(--text-muted);
 }
@@ -485,7 +499,7 @@ body {
 .view-menu-label {
   padding: var(--s1) var(--s3) var(--s2);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   letter-spacing: var(--track-wide);
   text-transform: uppercase;
   color: var(--text-faint);
@@ -509,7 +523,7 @@ body {
 }
 
 .view-menu-item:hover {
-  background: var(--bg-overlay);
+  background: var(--hover-surface);
 }
 
 .view-menu-item:focus-visible {
@@ -657,9 +671,9 @@ body {
 
 .file-tab-ro {
   color: var(--text-faint);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   border: 1px solid var(--line-strong);
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   padding: 0 2px;
 }
 
@@ -677,7 +691,7 @@ body {
   min-height: 0;
   position: relative;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   overflow: hidden;
   background: var(--bg-tile);
 }
@@ -731,12 +745,12 @@ body {
 
 .tree-row:hover {
   color: var(--text);
-  background: var(--bg-raised);
+  background: var(--hover-surface);
 }
 
 .tree-chevron {
   color: var(--text-faint);
-  font-size: 9px;
+  font-size: var(--text-2xs);
   width: 10px;
   flex-shrink: 0;
 }
@@ -831,7 +845,7 @@ body {
   overflow-y: auto;
   background: var(--bg-overlay);
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   box-shadow: var(--shadow-dialog);
   padding: var(--s3);
   display: flex;
@@ -854,11 +868,11 @@ body {
   gap: var(--s3);
   width: 100%;
   padding: var(--s1) var(--s2);
-  border-radius: 6px;
+  border-radius: var(--r-xs);
 }
 
 .orch-switcher-item:hover {
-  background: var(--bg-raised);
+  background: var(--hover-surface);
 }
 
 .orch-switcher-open {
@@ -951,7 +965,7 @@ body {
   gap: var(--s2);
   padding: var(--s2) var(--s3);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: var(--bg-raised);
 }
 
@@ -987,10 +1001,12 @@ body {
   color: var(--text-muted);
   background: none;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   padding: var(--s1) var(--s3);
   cursor: pointer;
-  transition: color 120ms ease, border-color 120ms ease;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
 }
 
 .orch-btn:hover:not(:disabled) {
@@ -1075,7 +1091,7 @@ body {
   gap: var(--s1);
   padding: var(--s2) var(--s3);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
 }
 
 .orch-msg-meta {
@@ -1109,22 +1125,25 @@ body {
   letter-spacing: var(--track-wide);
   text-transform: uppercase;
   padding: 1px var(--s2);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
 }
 
 .orch-badge-task {
   color: var(--warn);
   border: 1px solid var(--warn);
+  background: var(--warn-tint);
 }
 
 .orch-badge-result {
   color: var(--ok);
   border: 1px solid var(--ok);
+  background: var(--ok-tint);
 }
 
 .orch-badge-note {
   color: var(--text-faint);
   border: 1px solid var(--line-strong);
+  background: var(--bg-raised);
 }
 
 .orch-review {
@@ -1134,7 +1153,7 @@ body {
   color: var(--text);
   background: var(--bg-raised);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   padding: var(--s3);
   max-height: 220px;
   overflow: auto;
@@ -1160,7 +1179,7 @@ body {
   color: var(--text);
   background: var(--bg-raised);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   padding: var(--s2);
   outline: none;
   flex: 1;
@@ -1183,7 +1202,7 @@ body {
   color: var(--text);
   background: var(--bg-raised);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   padding: var(--s2);
   resize: vertical;
   min-height: 64px;
@@ -1209,18 +1228,19 @@ body {
   letter-spacing: var(--track-wide);
   text-transform: uppercase;
   padding: 1px var(--s2);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
 }
 
-.orch-judge-running,
-.orch-judge-idle {
+.orch-judge-running {
   color: var(--ok);
   border: 1px solid var(--ok);
+  background: var(--ok-tint);
 }
 
 .orch-judge-idle {
-  color: var(--fg-dim);
-  border-color: var(--line);
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  background: var(--warn-tint);
 }
 
 .orch-judge-stopped,
@@ -1229,6 +1249,7 @@ body {
 .orch-judge-offline {
   color: var(--err);
   border: 1px solid var(--err);
+  background: var(--err-tint);
 }
 
 /* ————— boot ————— */
@@ -1322,7 +1343,7 @@ body {
 }
 
 .btn:hover {
-  background: var(--bg-overlay);
+  background: var(--hover-surface);
   border-color: var(--text-muted);
 }
 
@@ -1597,7 +1618,7 @@ body {
 }
 
 .explorer-item:hover {
-  background: var(--bg-raised);
+  background: var(--hover-surface);
 }
 
 .explorer-item-active {
@@ -1618,7 +1639,7 @@ body {
 
 .explorer-item-path {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   color: var(--text-faint);
   white-space: nowrap;
   overflow: hidden;
@@ -1736,7 +1757,7 @@ body {
 }
 
 .dialog-project:hover {
-  background: var(--bg-overlay);
+  background: var(--hover-surface);
 }
 
 .dialog-project:focus-visible {
@@ -1750,7 +1771,7 @@ body {
 
 .dialog-project-path {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   color: var(--text-faint);
 }
 

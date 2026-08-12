@@ -88,3 +88,25 @@ export function contrast(a: Rgb, b: Rgb): number {
 export function contrastOklch(fg: string, bg: string): number {
   return contrast(oklchToSrgb(fg), oklchToSrgb(bg));
 }
+
+/** The hue component (degrees 0..360) of an oklch string. */
+export function oklchHue(color: string): number {
+  const m = color.match(/oklch\([\d.]+\s+[\d.]+\s+([\d.]+)(?:\s*\/\s*[\d.]+)?\)/);
+  if (!m) throw new Error(`cannot parse oklch: ${color}`);
+  return Number(m[1]);
+}
+
+/** Shortest angular distance between two hues. */
+export function hueDistance(a: string, b: string): number {
+  const d = Math.abs(oklchHue(a) - oklchHue(b)) % 360;
+  return d > 180 ? 360 - d : d;
+}
+
+/** Perceptual lightness gap between two oklch strings (for hairline
+ *  visibility — the L component difference). */
+export function deltaL(a: string, b: string): number {
+  const la = a.match(/oklch\(([\d.]+)/);
+  const lb = b.match(/oklch\(([\d.]+)/);
+  if (!la || !lb) throw new Error(`cannot parse oklch: ${a} / ${b}`);
+  return Math.abs(Number(la[1]) - Number(lb[1]));
+}
