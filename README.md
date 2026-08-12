@@ -1,46 +1,53 @@
 # Fraktole
 
-A coding agent orchestrator for Linux terminals. One daemon drives multiple
-coding agents (opencode, Claude Code, plugins) in parallel, each in its own git
-worktree, under the direction of a configurable planner LLM. Approval gates
-surface to a TUI dashboard, CLI, or phone; live state streams over WebSocket.
+A tiling command center for AI agents on Linux: run multiple coding agents
+side by side in your own terminals, drive them from an orchestrator panel, and
+delegate review to a built-in reviewer model that can watch every agent live.
+
+The desktop app is the only asset in this repository.
+
+## What it is
+
+- **Node layout** — each session is a tiling workspace (split panes, focus,
+  zoom, drag-dividers) where every tile is a real PTY running your shell or a
+  coding agent.
+- **Sessions** — named, project-bound, keep-alive: switch projects and the
+  sessions keep running in the background (PTYs stream on, terminal buffers
+  keep recording).
+- **Orchestrator panel** — a per-session side panel to spawn agents, send them
+  tasks, and collect their results through file mailboxes (star topology:
+  agents talk to the orchestrator, never to each other).
+- **Reviewer harness** — the built-in reviewer is our own model loop
+  (OpenAI-compatible, Anthropic, or Ollama), not a borrowed CLI: it observes
+  every agent tile through live recordings, delegates work via the mailboxes,
+  runs commands in the project, and streams its transcript in the Reviewer tab.
+- **Tabs** — File Editor (CodeMirror), Node, Reviewer; Alt+1/2/3 to switch.
+- **Session persistence** — arrangement, scrollback, messages and snapshots
+  survive restarts; sessions resume with their mailboxes intact.
 
 ## Quickstart
 
 ```bash
 pnpm install
-./scripts/install-cli.sh       # bundles and puts `fraktole` on PATH
-fraktole                       # opens the tabbed TUI (daemon auto-starts)
-fraktole dispatch "refactor the auth module" --repo /path/to/repo
+pnpm installer          # builds release/fraktole-install-<version>.sh
+bash release/fraktole-install-<version>.sh   # installs to ~/.local
+fraktole-desktop        # launch
 ```
 
-`fraktole` is one command: no args opens the TUI, subcommands run the CLI.
-Direct agent runs skip planning; omit `--driver` to let the planner decompose
-the goal into parallel subtasks (toggleable in the TUI Settings tab). Non-git
-folders work too: agents run in place, no worktree or merge gate.
+## Development
 
-## Features
+```bash
+pnpm dev                # vite + electron with live reload
+pnpm test               # vitest suite
+pnpm typecheck
+pnpm lint
+```
 
-- Parallel agents in isolated git worktrees with gated squash merges
-- Planner-agnostic decomposition (Anthropic, OpenAI, Ollama)
-- Approval gates: merge-to-base, risky plan steps, agent markers
-- Live TUI dashboard + CLI + WebSocket API (phone client planned in `mobile/`)
-- JSONL event persistence with crash-safe snapshot/restore
-- TLS + device pairing for remote access
+## Repository layout
 
-## Docs
-
-- `docs/SETUP.md` — install, config, TLS, systemd, pairing
-- `docs/ARCHITECTURE.md` — processes, event model, task lifecycle, gates
-- `docs/SECURITY.md` — threat model and mitigations (agents run with your user)
-- `docs/AGENTS.md` — repo conventions for agent sessions
-- `mobile/PLAN.md` — native Android app plan
-
-## Packages
-
-| Package | Role |
+| Path | Role |
 |---|---|
-| `@fraktole/core` | types, event union, state machine, config, protocol |
-| `@fraktole/daemon` | engine, persistence, server, drivers, planner, gates, pairing |
-| `@fraktole/cli` | `fraktole` command line |
-| `@fraktole/tui` | Ink dashboard |
+| `apps/desktop/electron/` | main process: PTY host, sessions, mailboxes, reviewer harness |
+| `apps/desktop/src/` | renderer: tiling UI, orchestrator panel, reviewer tab, file editor |
+| `apps/desktop/tests/` | unit tests (runtime, mailboxes, recorder, providers, harness loop) |
+| `apps/desktop/scripts/` | build + installer tooling |

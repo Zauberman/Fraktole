@@ -12,8 +12,7 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
     "build": "pnpm -r build",
-    "format": "prettier --write .",
-    "bundle": "node scripts/bundle.mjs"
+    "format": "prettier --write ."
   },
   "devDependencies": {
     "@eslint/js": "catalog:",
