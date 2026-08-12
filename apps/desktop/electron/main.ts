@@ -2,14 +2,16 @@ import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { copyFile, existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { buildAgentEnv } from './judge.js';
-import { JudgeHost } from './judge.js';
+import { buildAgentEnv } from './agent-env.js';
 import { MailboxRouter, ORCHESTRATOR_ID, messageId } from './mailbox.js';
 import { PtyHost } from './pty-host.js';
 import { ProjectsStore } from './projects.js';
+import { ReviewerHost, type ReviewerToolCallEvent } from './reviewer.js';
+import { ReviewerTools } from './reviewer-tools.js';
 import { SessionRegistry, SessionRuntime } from './session-runtime.js';
 import { SessionStore } from './sessions.js';
-import { DEFAULT_JUDGE_COMMAND, SettingsStore } from './settings.js';
+import { SettingsStore } from './settings.js';
+import { TileRecorder } from './tile-recorder.js';
 import {
   IPC,
   type AppInfo,
@@ -23,6 +25,7 @@ import {
   type SessionSavePayload,
   type SessionSnapshot,
   type Settings,
+  type ReviewerEntry,
 } from '../src/shared/ipc.js';
 import { THEME_IDS, type ThemeId } from '../src/themes.js';
 
@@ -174,7 +177,6 @@ if (!app.requestSingleInstanceLock()) {
     const sessions = new SessionStore(join(app.getPath('userData'), 'sessions'));
     const sessionsRoot = join(app.getPath('userData'), 'sessions');
     const home = app.getPath('home');
-    let judgeCommand = ((await settings.get()).judgeCommand) ?? DEFAULT_JUDGE_COMMAND;
 
     const judgeCwdFor = (session: SessionFile): string =>
       session.projectPath ?? session.judge?.cwd ?? home;
@@ -184,39 +186,81 @@ if (!app.requestSingleInstanceLock()) {
       sessionRoot: sessionsRoot,
       logger: (line) => console.log(line),
       makeRuntime: (session: SessionFile): SessionRuntime => {
-        let judge: JudgeHost | null = null;
+        let rt: SessionRuntime | null = null;
+        const recorder = new TileRecorder();
         const host = new PtyHost({
           send: (channel, tileId, payload) => {
+            // the recording: every agent PTY chunk is teed into the
+            // in-memory ring before being forwarded to the renderer
+            if (channel === IPC.ptyData) recorder.record(tileId, payload as string);
             // keep-alive: every live session streams its events, tagged with
             // its sessionId; the renderer filters per mounted SessionView
-            if (channel === IPC.tileExit && tileId === ORCHESTRATOR_ID) {
-              judge?.markExited();
-              mainWindow?.webContents.send(IPC.judgeExit, session.id, payload);
-            }
             mainWindow?.webContents.send(channel, session.id, tileId, payload);
           },
         });
-        judge = new JudgeHost({ host, getCommand: () => judgeCommand });
+        const tileOfAgent = (agentId: string): string | null =>
+          agentId === ORCHESTRATOR_ID ? null : (rt?.agentToTile.get(agentId) ?? null);
+        const agentOfTile = (tileId: string): string | null => {
+          for (const [agentId, tid] of rt?.agentToTile ?? []) {
+            if (tid === tileId) return agentId;
+          }
+          return null;
+        };
+        const cwdOfAgent = (agentId: string): string | null =>
+          rt?.session.tiles.find((t) => t.agentId === agentId)?.cwd ?? null;
         const router = new MailboxRouter({
           root: sessionsRoot,
-          currentSession: () => registry?.get(session.id)?.session ?? session,
-          tileOfAgent: (agentId) =>
-            agentId === ORCHESTRATOR_ID
-              ? ORCHESTRATOR_ID
-              : (registry?.get(session.id)?.agentToTile.get(agentId) ?? null),
+          currentSession: () => rt?.session ?? session,
+          tileOfAgent,
           write: (tileId, text) => host.write(tileId, text),
           emit: (msg) => {
             mainWindow?.webContents.send(IPC.messageEvent, session.id, msg);
+            // agent results feed the reviewer harness as turns
+            if (msg.to === ORCHESTRATOR_ID && msg.from !== ORCHESTRATOR_ID) {
+              void rt?.reviewer.onAgentMessage(msg);
+            }
           },
         });
-        return new SessionRuntime({
+        const tools = new ReviewerTools();
+        const reviewer = new ReviewerHost({
+          getConfig: () => settings.get().then((s) => s.reviewer),
+          sessionId: session.id,
+          sessionDir: join(sessionsRoot, session.id),
+          cwd: judgeCwdFor(session),
+          recorder,
+          toolContext: {
+            sessionId: session.id,
+            sessionDir: join(sessionsRoot, session.id),
+            cwd: judgeCwdFor(session),
+            recorder,
+            router: {
+              sendFromOrchestrator: (msg) => router.sendFromOrchestrator(msg),
+            },
+            tileOfAgent,
+            agentOfTile,
+            cwdOfAgent,
+          },
+          tools,
+          emit: {
+            status: (status, error) =>
+              mainWindow?.webContents.send(IPC.reviewerStatus, session.id, { status, error }),
+            stream: (delta) => mainWindow?.webContents.send(IPC.reviewerStream, session.id, delta),
+            toolCall: (ev: ReviewerToolCallEvent) =>
+              mainWindow?.webContents.send(IPC.reviewerToolCall, session.id, ev),
+            message: (entry) => mainWindow?.webContents.send(IPC.reviewerMessage, session.id, entry),
+          },
+          logger: (line) => console.log(line),
+        });
+        const runtime = new SessionRuntime({
           session,
           sessionRoot: sessionsRoot,
           host,
-          judge,
+          reviewer,
           router,
           judgeCwd: () => judgeCwdFor(session),
         });
+        rt = runtime;
+        return runtime;
       },
     });
 
@@ -246,7 +290,7 @@ if (!app.requestSingleInstanceLock()) {
       project = (await projects.bindSession(projectPath, opened.session.id)) ?? project;
       opened.session.projectPath = projectPath;
       opened.session.name = project.name;
-      opened.session.judge = { command: judgeCommand, cwd: projectPath };
+      opened.session.judge = { command: '', cwd: projectPath };
       await sessions.save(opened.session);
       const rt = registry!.open(opened.session.id, opened.session);
       refreshMenu();
@@ -308,9 +352,6 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle(IPC.settingsGet, () => settings.get());
     ipcMain.handle(IPC.settingsSet, async (_e, patch: Partial<Settings>) => {
       const next = await settings.set(patch);
-      if (typeof next.judgeCommand === 'string' && next.judgeCommand.length > 0) {
-        judgeCommand = next.judgeCommand;
-      }
       if (THEME_IDS.includes(next.theme as ThemeId)) {
         currentTheme = next.theme as ThemeId;
         refreshMenu();
@@ -367,7 +408,7 @@ if (!app.requestSingleInstanceLock()) {
       // means "not part of this payload"
       if (payload.zoomedAgentId !== undefined) session.zoomedAgentId = payload.zoomedAgentId ?? undefined;
       if (payload.focusedAgentId !== undefined) session.focusedAgentId = payload.focusedAgentId ?? undefined;
-      if (payload.judgeCwd) session.judge = { command: judgeCommand, cwd: payload.judgeCwd };
+      if (payload.judgeCwd) session.judge = { command: '', cwd: payload.judgeCwd };
       // prunes agents closed since the last save; mailboxes stay on disk
       session.tiles = session.tiles.filter((t) => payload.agents.includes(t.agentId));
       await sessions.save(session);
@@ -432,20 +473,29 @@ if (!app.requestSingleInstanceLock()) {
         return null;
       }
     });
-    ipcMain.handle(IPC.judgeRestart, async (_e, sessionId: string): Promise<boolean> => {
+    ipcMain.handle(IPC.reviewerEnsure, async (_e, sessionId: string): Promise<boolean> => {
       const rt = registry?.get(sessionId) ?? null;
       if (!rt) return false;
-      rt.judge.kill();
-      const started = rt.spawnJudge();
-      if (!started) mainWindow?.webContents.send(IPC.judgeExit, sessionId, { code: -1 });
-      return started;
+      return rt.ensureReviewer();
     });
-    ipcMain.handle(IPC.judgeEnsure, async (_e, sessionId: string): Promise<boolean> => {
+    ipcMain.handle(IPC.reviewerPrompt, async (_e, sessionId: string, text: string): Promise<void> => {
+      const rt = registry?.get(sessionId) ?? null;
+      if (!rt || text.trim().length === 0) return;
+      await rt.reviewer.prompt(text);
+    });
+    ipcMain.handle(IPC.reviewerStop, async (_e, sessionId: string): Promise<void> => {
+      const rt = registry?.get(sessionId) ?? null;
+      rt?.reviewer.cancel();
+    });
+    ipcMain.handle(IPC.reviewerRestart, async (_e, sessionId: string): Promise<boolean> => {
       const rt = registry?.get(sessionId) ?? null;
       if (!rt) return false;
-      const ok = rt.ensureJudge();
-      if (!ok) mainWindow?.webContents.send(IPC.judgeExit, sessionId, { code: -1 });
-      return ok;
+      return rt.reviewer.restart();
+    });
+    ipcMain.handle(IPC.reviewerTranscript, async (_e, sessionId: string): Promise<ReviewerEntry[]> => {
+      const rt = registry?.get(sessionId) ?? null;
+      if (!rt) return [];
+      return rt.reviewer.conversation;
     });
     ipcMain.handle(IPC.scrollbackGet, async (_e, sessionId: string, agentId: string): Promise<string[] | null> => {
       const rt = registry?.get(sessionId) ?? null;

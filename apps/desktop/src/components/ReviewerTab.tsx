@@ -1,51 +1,230 @@
-import React from 'react';
-import type { FraktoleMessage } from '../ipc.js';
-import { JudgeTerminal } from './JudgeTerminal.js';
-import type { JudgeStatus } from './OrchestratorPanel.js';
+import React, { useEffect, useRef, useState } from 'react';
+import type { FraktoleMessage, ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../ipc.js';
+import { bridge, type Settings } from '../ipc.js';
 
 interface ReviewerTabProps {
   sessionId: string;
   messages: FraktoleMessage[];
-  judgeStatus: JudgeStatus;
-  /** Bumped whenever the judge (re)spawns; refits the terminal so the PTY
-   *  matches the tab while the fresh CLI still tolerates resizes. */
-  spawnTick: number;
-  onRetryJudge(): void;
 }
 
 function timeOf(at: number): string {
   const d = new Date(at);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+interface ToolRowState {
+  name: string;
+  args: string;
+  state: 'start' | 'done' | 'error';
+  detail?: string;
+  durationMs?: number;
 }
 
 /**
- * The Reviewer tab: the judge's full space — its terminal, its status, and
- * the messages exchanged with the agents (its side of the conversation).
+ * The Reviewer tab: the harness's space — its streaming transcript (model
+ * text, tool calls, agent-result notes), its status, and the prompt box.
  */
 export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
-  const { sessionId, messages, judgeStatus, spawnTick, onRetryJudge } = props;
+  const { sessionId, messages } = props;
+  const [status, setStatus] = useState<ReviewerStatus>('offline');
+  const [statusError, setStatusError] = useState<string | undefined>(undefined);
+  const [entries, setEntries] = useState<ReviewerEntry[]>([]);
+  const [streamText, setStreamText] = useState('');
+  const [tools, setTools] = useState<ToolRowState[]>([]);
+  const [input, setInput] = useState('');
+  const [configOpen, setConfigOpen] = useState(false);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [draft, setDraft] = useState({ provider: 'anthropic', model: 'claude-sonnet-4-5', apiKeyEnv: '', baseUrl: '' });
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // mount: load the persisted transcript, current config
+  useEffect(() => {
+    void bridge.reviewerTranscript(sessionId).then((rows) => {
+      if (rows.length > 0) setEntries(rows);
+    });
+    void bridge.getSettings().then((s) => {
+      setSettings(s);
+      setDraft({
+        provider: s.reviewer.provider,
+        model: s.reviewer.model,
+        apiKeyEnv: s.reviewer.apiKeyEnv ?? '',
+        baseUrl: s.reviewer.baseUrl ?? '',
+      });
+    });
+  }, [sessionId]);
+
+  useEffect(() => {
+    const unsubs = [
+      bridge.onReviewerStatus(sessionId, (s) => {
+        setStatus(s.status as ReviewerStatus);
+        setStatusError(s.error);
+      }),
+      bridge.onReviewerStream(sessionId, (delta) => setStreamText((t) => t + delta)),
+      bridge.onReviewerToolCall(sessionId, (ev: ReviewerToolCallEvent) => {
+        if (ev.state === 'start') {
+          setTools((ts) => [...ts, { name: ev.name, args: JSON.stringify(ev.args), state: 'start' }]);
+        } else {
+          setTools((ts) => {
+            const next = [...ts];
+            const last = next[next.length - 1];
+            if (last && last.name === ev.name) {
+              next[next.length - 1] = {
+                ...last,
+                state: ev.state,
+                detail: ev.error ?? ev.result,
+                durationMs: ev.durationMs,
+              };
+            } else {
+              next.push({ name: ev.name, args: JSON.stringify(ev.args), state: ev.state, detail: ev.error ?? ev.result, durationMs: ev.durationMs });
+            }
+            return next;
+          });
+        }
+      }),
+      bridge.onReviewerMessage(sessionId, (entry) => {
+        if (entry.role === 'assistant') setStreamText('');
+        setEntries((es) => [...es, entry]);
+      }),
+    ];
+    return () => {
+      for (const unsub of unsubs) unsub();
+    };
+  }, [sessionId]);
+
+  // keep the transcript pinned to the newest content
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [entries, streamText, tools]);
+
+  const submit = (): void => {
+    const text = input.trim();
+    if (text.length === 0) return;
+    setInput('');
+    void bridge.promptReviewer(sessionId, text);
+  };
+
+  const retry = (): void => {
+    void bridge.restartReviewer(sessionId).then((ok) => {
+      setStatus(ok ? 'running' : 'unconfigured');
+      setStreamText('');
+      setTools([]);
+    });
+  };
+
+  const stop = (): void => {
+    void bridge.stopReviewer(sessionId);
+    setTools([]);
+  };
+
+  const saveConfig = (): void => {
+    if (!settings) return;
+    const next = { ...settings, reviewer: { provider: draft.provider as Settings['reviewer']['provider'], model: draft.model.trim() || 'claude-sonnet-4-5', apiKeyEnv: draft.apiKeyEnv.trim() || undefined, baseUrl: draft.baseUrl.trim() || undefined } };
+    void bridge.setSettings(next).then(() => {
+      setSettings(next);
+      setConfigOpen(false);
+      void retry();
+    });
+  };
+
   const judgeThread = messages.filter((m) => m.from === 'orchestrator' || m.to === 'orchestrator');
 
   return (
     <div className="reviewer">
       <header className="reviewer-header">
-        <div className="pane-title">Reviewer — judge</div>
+        <div className="pane-title">Reviewer — harness</div>
         <div className="reviewer-actions">
-          <span className={`orch-judge-status orch-judge-${judgeStatus}`}>{judgeStatus}</span>
-          {judgeStatus !== 'running' && (
-            <button type="button" className="orch-btn" onClick={onRetryJudge}>
+          <span className={`orch-judge-status orch-judge-${status}`}>{status}</span>
+          {status !== 'running' && (
+            <button type="button" className="orch-btn" onClick={() => void retry()}>
               retry
             </button>
           )}
+          <button type="button" className="orch-btn" onClick={stop}>
+            stop
+          </button>
+          <button type="button" className="orch-btn" onClick={() => setConfigOpen((o) => !o)}>
+            config
+          </button>
         </div>
       </header>
-      <div className="reviewer-term">
-        <JudgeTerminal sessionId={sessionId} spawnTick={spawnTick} />
+
+      {configOpen && (
+        <section className="reviewer-config">
+          <label>
+            provider
+            <select
+              value={draft.provider}
+              onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value }))}
+            >
+              <option value="anthropic">anthropic</option>
+              <option value="openai">openai</option>
+              <option value="ollama">ollama</option>
+            </select>
+          </label>
+          <label>
+            model
+            <input value={draft.model} onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))} />
+          </label>
+          <label>
+            apiKeyEnv
+            <input value={draft.apiKeyEnv} onChange={(e) => setDraft((d) => ({ ...d, apiKeyEnv: e.target.value }))} placeholder="ANTHROPIC_API_KEY" />
+          </label>
+          <label>
+            baseUrl
+            <input value={draft.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))} placeholder="(provider default)" />
+          </label>
+          <div className="reviewer-config-actions">
+            <button type="button" className="orch-btn" onClick={saveConfig}>
+              save &amp; restart
+            </button>
+            <button type="button" className="orch-btn" onClick={() => setConfigOpen(false)}>
+              cancel
+            </button>
+          </div>
+        </section>
+      )}
+
+      <div className="reviewer-transcript" ref={scrollRef}>
+        {status === 'unconfigured' && (
+          <div className="reviewer-note reviewer-note-error">{statusError ?? 'reviewer not configured — open config'}</div>
+        )}
+        {status === 'error' && statusError && <div className="reviewer-note reviewer-note-error">{statusError}</div>}
+        {entries.length === 0 && streamText === '' && tools.length === 0 && (
+          <div className="orch-hint">no activity yet — prompt the reviewer below; it observes every agent tile</div>
+        )}
+        {entries.map((e, i) => (
+          <div key={i} className={`reviewer-row reviewer-row-${e.role}`}>
+            <div className="reviewer-row-meta">
+              <span className="reviewer-row-role">{e.role}</span>
+              <span className="orch-msg-time">{timeOf(e.at)}</span>
+            </div>
+            <div className="reviewer-row-body">{e.content}</div>
+          </div>
+        ))}
+        {tools.map((t, i) => (
+          <div key={`t${i}`} className={`reviewer-row reviewer-row-tool reviewer-row-tool-${t.state}`}>
+            <div className="reviewer-row-meta">
+              <span className="reviewer-row-role">tool</span>
+              <span className="orch-msg-time">
+                {t.state === 'start' ? 'running…' : `${t.state}${t.durationMs !== undefined ? ` · ${t.durationMs}ms` : ''}`}
+              </span>
+            </div>
+            <div className="reviewer-row-body">
+              <span className="reviewer-tool-name">{t.name}</span> <span className="reviewer-tool-args">{t.args}</span>
+              {t.detail !== undefined && <pre className="reviewer-tool-detail">{t.detail}</pre>}
+            </div>
+          </div>
+        ))}
+        {streamText !== '' && (
+          <div className="reviewer-row reviewer-row-assistant">
+            <div className="reviewer-row-body reviewer-stream">{streamText}</div>
+          </div>
+        )}
       </div>
+
       <section className="reviewer-log">
-        <div className="orch-section-title">judge messages</div>
+        <div className="orch-section-title">orchestrator messages</div>
         {judgeThread.length === 0 ? (
           <div className="orch-hint">no messages yet — results from agents land here</div>
         ) : (
@@ -65,6 +244,21 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           </ul>
         )}
       </section>
+
+      <footer className="reviewer-input">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') submit();
+          }}
+          placeholder={status === 'running' ? 'prompt the reviewer…' : 'reviewer not running — click retry'}
+          disabled={status !== 'running'}
+        />
+        <button type="button" className="orch-btn" onClick={submit} disabled={status !== 'running'}>
+          send
+        </button>
+      </footer>
     </div>
   );
 }

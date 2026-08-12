@@ -9,6 +9,9 @@ import type {
   PtyExitPayload,
   PtySpawnArgs,
   PtySpawnResult,
+  ReviewerEntry,
+  ReviewerStatus,
+  ReviewerToolCallEvent,
   SendMessageArgs,
   SessionFile,
   SessionSavePayload,
@@ -28,6 +31,9 @@ export type {
   PtyExitPayload,
   PtySpawnArgs,
   PtySpawnResult,
+  ReviewerEntry,
+  ReviewerStatus,
+  ReviewerToolCallEvent,
   SendMessageArgs,
   SessionFile,
   SessionSavePayload,
@@ -66,9 +72,15 @@ export interface FraktoleBridge {
   sendMessage(sessionId: string, args: SendMessageArgs): Promise<boolean>;
   listMessages(sessionId: string): Promise<FraktoleMessage[]>;
   onMessageEvent(sessionId: string, cb: (msg: FraktoleMessage) => void): () => void;
-  onJudgeExit(sessionId: string, cb: (payload: PtyExitPayload) => void): () => void;
-  judgeRestart(sessionId: string): Promise<boolean>;
-  judgeEnsure(sessionId: string): Promise<boolean>;
+  ensureReviewer(sessionId: string): Promise<boolean>;
+  promptReviewer(sessionId: string, text: string): Promise<void>;
+  stopReviewer(sessionId: string): Promise<void>;
+  restartReviewer(sessionId: string): Promise<boolean>;
+  reviewerTranscript(sessionId: string): Promise<ReviewerEntry[]>;
+  onReviewerStatus(sessionId: string, cb: (s: { status: string; error?: string }) => void): () => void;
+  onReviewerStream(sessionId: string, cb: (delta: string) => void): () => void;
+  onReviewerToolCall(sessionId: string, cb: (ev: ReviewerToolCallEvent) => void): () => void;
+  onReviewerMessage(sessionId: string, cb: (entry: ReviewerEntry) => void): () => void;
   createSnapshot(sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot>;
   getSnapshot(sessionId: string, id: string): Promise<SessionSnapshot | null>;
   getScrollback(sessionId: string, agentId: string): Promise<string[] | null>;

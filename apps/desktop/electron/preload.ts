@@ -11,6 +11,8 @@ import {
   type PtyExitPayload,
   type PtySpawnArgs,
   type PtySpawnResult,
+  type ReviewerEntry,
+  type ReviewerToolCallEvent,
   type SendMessageArgs,
   type SessionFile,
   type SessionSavePayload,
@@ -91,15 +93,42 @@ const api = {
     ipcRenderer.on(IPC.messageEvent, listener);
     return () => ipcRenderer.removeListener(IPC.messageEvent, listener);
   },
-  onJudgeExit: (sessionId: string, cb: (payload: PtyExitPayload) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, sid: string, payload: PtyExitPayload): void => {
-      if (sid === sessionId) cb(payload);
+  ensureReviewer: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.reviewerEnsure, sessionId),
+  promptReviewer: (sessionId: string, text: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.reviewerPrompt, sessionId, text),
+  stopReviewer: (sessionId: string): Promise<void> => ipcRenderer.invoke(IPC.reviewerStop, sessionId),
+  restartReviewer: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.reviewerRestart, sessionId),
+  reviewerTranscript: (sessionId: string): Promise<ReviewerEntry[]> =>
+    ipcRenderer.invoke(IPC.reviewerTranscript, sessionId),
+
+  onReviewerStatus: (sessionId: string, cb: (s: { status: string; error?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, s: { status: string; error?: string }): void => {
+      if (sid === sessionId) cb(s);
     };
-    ipcRenderer.on(IPC.judgeExit, listener);
-    return () => ipcRenderer.removeListener(IPC.judgeExit, listener);
+    ipcRenderer.on(IPC.reviewerStatus, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerStatus, listener);
   },
-  judgeRestart: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.judgeRestart, sessionId),
-  judgeEnsure: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.judgeEnsure, sessionId),
+  onReviewerStream: (sessionId: string, cb: (delta: string) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, delta: string): void => {
+      if (sid === sessionId) cb(delta);
+    };
+    ipcRenderer.on(IPC.reviewerStream, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerStream, listener);
+  },
+  onReviewerToolCall: (sessionId: string, cb: (ev: ReviewerToolCallEvent) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, ev: ReviewerToolCallEvent): void => {
+      if (sid === sessionId) cb(ev);
+    };
+    ipcRenderer.on(IPC.reviewerToolCall, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerToolCall, listener);
+  },
+  onReviewerMessage: (sessionId: string, cb: (entry: ReviewerEntry) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, entry: ReviewerEntry): void => {
+      if (sid === sessionId) cb(entry);
+    };
+    ipcRenderer.on(IPC.reviewerMessage, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerMessage, listener);
+  },
 
   createSnapshot: (sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot> =>
     ipcRenderer.invoke(IPC.snapshotCreate, sessionId, args),

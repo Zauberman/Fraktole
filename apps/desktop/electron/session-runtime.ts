@@ -1,6 +1,6 @@
 import { join } from 'node:path';
-import type { SessionFile, SessionState } from '../src/shared/ipc.js';
-import { ORCHESTRATOR_ID } from './mailbox.js';
+import type { FraktoleMessage, ReviewerEntry, SessionFile, SessionState } from '../src/shared/ipc.js';
+import type { ReviewerStatus } from './reviewer.js';
 
 /** Minimal shapes the runtime depends on, so tests can inject fakes. */
 export interface RuntimeHost {
@@ -12,11 +12,19 @@ export interface RuntimeHost {
   cwdOf(tileId: string): string | null;
 }
 
-export interface RuntimeJudge {
-  status: 'offline' | 'running' | 'exited';
-  spawn(sessionId: string, sessionDir: string, cwd: string): boolean;
-  kill(): void;
-  markExited(): void;
+/** The harness reviewer: our own model loop (no PTY, no CLI). Spawned lazily
+ *  when its tab is visited; idles out when backgrounded. */
+export interface RuntimeReviewer {
+  status: ReviewerStatus;
+  start(sessionId: string, sessionDir: string, cwd: string): Promise<boolean>;
+  stop(): void;
+  idleOut(): void;
+  restart(): Promise<boolean>;
+  prompt(text: string): Promise<void>;
+  cancel(): void;
+  onAgentMessage(msg: FraktoleMessage): void;
+  /** Live transcript entries, for the Reviewer tab on mount. */
+  conversation: ReviewerEntry[];
 }
 
 export interface RuntimeRouter {
@@ -38,7 +46,7 @@ export interface SessionRuntimeOpts {
   session: SessionFile;
   sessionRoot: string; // userData/sessions
   host: RuntimeHost;
-  judge: RuntimeJudge;
+  reviewer: RuntimeReviewer;
   router: RuntimeRouter;
   judgeCwd: () => string;
   idleTimeoutMs?: number;
@@ -48,16 +56,16 @@ export interface SessionRuntimeOpts {
 export const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60_000;
 
 /**
- * One live session: its PTY host, judge and mailbox router, plus the
- * lifecycle state machine.
+ * One live session: its PTY host, reviewer harness and mailbox router, plus
+ * the lifecycle state machine.
  *
  *   running  — everything alive (may be backgrounded)
- *   idle     — backgrounded long enough that the judge shut down (tiles stay)
- *   stopped  — user switched it off: all PTYs and the judge are dead
+ *   idle     — backgrounded long enough that the reviewer shut down (tiles stay)
+ *   stopped  — user switched it off: all PTYs and the reviewer are dead
  *
- * Keep-alive: a backgrounded session keeps its tiles running; only the judge
- * idles out. Explicit stop tears the whole runtime down; start revives it
- * (the renderer re-spawns tiles from the persisted arrangement).
+ * Keep-alive: a backgrounded session keeps its tiles running; only the
+ * reviewer idles out. Explicit stop tears the whole runtime down; start
+ * revives it (the renderer re-spawns tiles from the persisted arrangement).
  */
 export class SessionRuntime {
   state: SessionState = 'running';
@@ -85,8 +93,8 @@ export class SessionRuntime {
     return this.opts.host;
   }
 
-  get judge(): RuntimeJudge {
-    return this.opts.judge;
+  get reviewer(): RuntimeReviewer {
+    return this.opts.reviewer;
   }
 
   get router(): RuntimeRouter {
@@ -115,32 +123,27 @@ export class SessionRuntime {
     this.startIdleTimer();
   }
 
-  /** Judge cwd: the bound project root, else the session's judge cwd, else home. */
-  spawnJudge(): boolean {
-    const started = this.opts.judge.spawn(this.sessionRef.id, this.sessionDir(), this.opts.judgeCwd());
-    return started;
-  }
-
-  /** The judge spawns only when its tab is actually visited: a freshly
-   *  spawned CLI tolerates the initial fit resize, so its PTY ends up sized
-   *  to the reviewer tab. Revives a stopped session first. */
-  ensureJudge(): boolean {
+  /** The reviewer starts only when its tab is actually visited. Revives a
+   *  stopped session first. */
+  ensureReviewer(): Promise<boolean> {
     if (this.state === 'stopped') this.start();
-    if (this.opts.judge.status !== 'running') return this.spawnJudge();
-    return true;
+    if (this.opts.reviewer.status === 'running') {
+      return Promise.resolve(true);
+    }
+    return this.opts.reviewer.start(this.sessionRef.id, this.sessionDir(), this.opts.judgeCwd());
   }
 
-  /** Explicit off switch: kills every PTY and the judge. */
+  /** Explicit off switch: kills every PTY and the reviewer. */
   stop(): void {
     this.clearIdleTimer();
     this.opts.host.killAll();
-    this.opts.judge.kill();
+    this.opts.reviewer.stop();
     this.opts.router.stop();
     this.state = 'stopped';
   }
 
   /** Revives a stopped session; the renderer re-spawns the tiles and the
-   *  judge comes back on the next reviewer visit. */
+   *  reviewer comes back on the next reviewer visit. */
   start(): void {
     if (this.state !== 'stopped') return;
     this.state = 'running';
@@ -151,7 +154,7 @@ export class SessionRuntime {
   teardown(): void {
     this.clearIdleTimer();
     this.opts.host.killAll();
-    this.opts.judge.kill();
+    this.opts.reviewer.stop();
     this.opts.router.stop();
     this.state = 'stopped';
   }
@@ -164,11 +167,11 @@ export class SessionRuntime {
     if (this.idleTimer !== null || this.state === 'stopped') return;
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
-      // still backgrounded: shut the judge down, keep the tiles alive
+      // still backgrounded: shut the reviewer down, keep the tiles alive
       if (this.state !== 'stopped') {
-        this.opts.judge.kill();
+        this.opts.reviewer.idleOut();
         this.state = 'idle';
-        this.opts.logger?.(`session ${this.id}: judge idle-shutdown`);
+        this.opts.logger?.(`session ${this.id}: reviewer idle-shutdown`);
       }
     }, this.idleTimeoutMs);
     this.idleTimer.unref();
@@ -247,7 +250,3 @@ export class SessionRegistry {
   }
 }
 
-/** The judge's tile id inside any session runtime. */
-export function judgeTileId(): string {
-  return ORCHESTRATOR_ID;
-}

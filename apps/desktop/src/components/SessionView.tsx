@@ -1,9 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Workspace } from './Workspace.js';
 import { Divider } from './Divider.js';
 import { OrchestratorPanel } from './OrchestratorPanel.js';
 import { ReviewerTab } from './ReviewerTab.js';
-import type { JudgeStatus } from './OrchestratorPanel.js';
 import { useSessionState, type SessionState } from '../session-state.js';
 import { useMessages } from '../messages.js';
 import { useSnapshots } from '../snapshots.js';
@@ -60,22 +59,16 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
   const ws = useSessionState(sessionId);
   const { messages, send } = useMessages(sessionId);
   const snapshots = useSnapshots();
-  const [judgeStatus, setJudgeStatus] = useState<JudgeStatus>('offline');
-  const [spawnTick, setSpawnTick] = useState(0);
-
   // (re)activate when this view becomes the active session
   useEffect(() => {
     if (active) void ws.reactivate();
   }, [active, ws.reactivate]);
 
-  // the judge spawns lazily, when its tab is visited: a fresh CLI tolerates
-  // the initial fit resize, so its PTY ends up sized to the reviewer tab
+  // the reviewer starts lazily, when its tab is visited; its status events
+  // are consumed by the ReviewerTab itself
   useEffect(() => {
     if (active && tab === 'reviewer') {
-      void bridge.judgeEnsure(sessionId).then((ok) => {
-        setJudgeStatus(ok ? 'running' : 'exited');
-        setSpawnTick((t) => t + 1);
-      });
+      void bridge.ensureReviewer(sessionId);
     }
   }, [active, tab, sessionId]);
 
@@ -111,11 +104,6 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
       for (const unsub of unsubs) unsub();
     };
   }, [sessionId, ws.tiles, ws.closeTile]);
-
-  useEffect(() => {
-    const unsubJudge = bridge.onJudgeExit(sessionId, () => setJudgeStatus('exited'));
-    return () => unsubJudge();
-  }, [sessionId]);
 
   const nodeContent = (
     <>
@@ -164,18 +152,7 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
 
   const reviewerContent = (
     <section className="pane pane-workspace pane-reviewer">
-      <ReviewerTab
-        sessionId={sessionId}
-        messages={messages}
-        judgeStatus={judgeStatus}
-        spawnTick={spawnTick}
-        onRetryJudge={() => {
-          void bridge.judgeRestart(sessionId).then((ok) => {
-            setJudgeStatus(ok ? 'running' : 'exited');
-            setSpawnTick((t) => t + 1);
-          });
-        }}
-      />
+      <ReviewerTab sessionId={sessionId} messages={messages} />
     </section>
   );
 

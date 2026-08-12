@@ -248,14 +248,128 @@ body {
   gap: var(--s3);
 }
 
-.reviewer-term {
+.reviewer-transcript {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
-  overflow: hidden;
   padding: var(--s2);
   background: var(--bg-tile);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.reviewer-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-sm);
+}
+
+.reviewer-row-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.reviewer-row-role {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+}
+
+.reviewer-row-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.reviewer-row-user .reviewer-row-body {
+  color: var(--fg-bright);
+}
+
+.reviewer-row-system .reviewer-row-body {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.reviewer-row-tool .reviewer-row-body {
+  color: var(--fg-dim);
+}
+
+.reviewer-row-tool-error .reviewer-row-body {
+  color: var(--danger);
+}
+
+.reviewer-tool-name {
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+
+.reviewer-tool-args {
+  font-family: var(--font-mono);
+}
+
+.reviewer-tool-detail {
+  margin: var(--s1) 0 0;
+  padding: var(--s2);
+  background: var(--bg);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  max-height: 8em;
+  overflow: auto;
+}
+
+.reviewer-stream {
+  color: var(--fg);
+}
+
+.reviewer-note {
+  padding: var(--s2);
+  border-radius: 6px;
+  font-size: var(--text-sm);
+}
+
+.reviewer-note-error {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.reviewer-input {
+  display: flex;
+  gap: var(--s2);
+  padding-top: var(--s2);
+}
+
+.reviewer-input input {
+  flex: 1;
+}
+
+.reviewer-config {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--s2);
+  padding: var(--s2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: var(--s2);
+}
+
+.reviewer-config label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  font-size: var(--text-xs);
+  color: var(--fg-dim);
+}
+
+.reviewer-config-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: var(--s2);
 }
 
 .reviewer-log {
@@ -897,14 +1011,6 @@ body {
   flex: 0 0 auto;
 }
 
-/* the judge keeps a fixed height so panel-internal growth (fleet rows,
-   message log, composer) never resizes the judge's PTY — TUIs like
-   opencode exit on a resize once settled */
-.orch-judge-section {
-  flex: 0 0 38%;
-  min-height: 160px;
-}
-
 .orch-log-section {
   max-height: 30%;
   overflow: hidden;
@@ -1088,25 +1194,23 @@ body {
   border-radius: 4px;
 }
 
-.orch-judge-running {
+.orch-judge-running,
+.orch-judge-idle {
   color: var(--ok);
   border: 1px solid var(--ok);
 }
 
-.orch-judge-exited,
+.orch-judge-idle {
+  color: var(--fg-dim);
+  border-color: var(--line);
+}
+
+.orch-judge-stopped,
+.orch-judge-error,
+.orch-judge-unconfigured,
 .orch-judge-offline {
   color: var(--err);
   border: 1px solid var(--err);
-}
-
-.judge-term {
-  flex: 1;
-  min-height: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  overflow: hidden;
-  padding: var(--s2);
-  background: var(--bg-tile);
 }
 
 /* ————— boot ————— */

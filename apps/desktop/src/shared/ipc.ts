@@ -33,9 +33,15 @@ export const IPC = {
   snapshotCreate: 'snapshot:create',
   snapshotGet: 'snapshot:get',
   scrollbackGet: 'scrollback:get',
-  judgeExit: 'judge:exit',
-  judgeRestart: 'judge:restart',
-  judgeEnsure: 'judge:ensure',
+  reviewerEnsure: 'reviewer:ensure',
+  reviewerPrompt: 'reviewer:prompt',
+  reviewerStop: 'reviewer:stop',
+  reviewerRestart: 'reviewer:restart',
+  reviewerTranscript: 'reviewer:transcript',
+  reviewerStatus: 'reviewer:status',
+  reviewerStream: 'reviewer:stream',
+  reviewerToolCall: 'reviewer:tool-call',
+  reviewerMessage: 'reviewer:message',
   menuSession: 'menu:session',
 } as const;
 
@@ -80,7 +86,33 @@ export interface Project {
 
 export interface Settings {
   theme: string;
-  judgeCommand: string;
+  /** The reviewer harness model config (own model loop, no CLI). */
+  reviewer: {
+    provider: 'openai' | 'anthropic' | 'ollama';
+    model: string;
+    apiKeyEnv?: string;
+    baseUrl?: string;
+  };
+}
+
+/** The harness reviewer's lifecycle status. */
+export type ReviewerStatus = 'offline' | 'running' | 'idle' | 'stopped' | 'error' | 'unconfigured';
+
+export interface ReviewerEntry {
+  role: 'user' | 'assistant' | 'tool' | 'system';
+  content: string;
+  toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown> }>;
+  toolCallId?: string;
+  at: number;
+}
+
+export interface ReviewerToolCallEvent {
+  name: string;
+  args: Record<string, unknown>;
+  state: 'start' | 'done' | 'error';
+  result?: string;
+  error?: string;
+  durationMs?: number;
 }
 
 /** Window-tree serialized with durable agent ids on the leaves. The live

@@ -34,6 +34,13 @@ for name in $(env | sed -n 's/^\([A-Z_]*_PROXY\|NO_PROXY\|no_proxy\)=.*/\1/p' | 
   proxies+=("$name=${!name}")
 done
 
+# Fraktole variables: the reviewer harness reads its provider key through
+# FRAKTOLE_* env names (settings.reviewer.apiKeyEnv) — keep every one.
+fraktole_vars=()
+for name in $(env | sed -n 's/^\(FRAKTOLE_[A-Z0-9_]*\)=.*/\1/p' | sort -u); do
+  fraktole_vars+=("$name=${!name}")
+done
+
 # XDG_CURRENT_DESKTOP is deliberately NOT passed: Chromium reads it and
 # enables GNOME-specific GTK4 integration (e.g. zorin:GNOME), which collides
 # with GTK3 modules injected by the session.
@@ -64,7 +71,6 @@ exec env -i \
   EDITOR="${EDITOR:-}" \
   VISUAL="${VISUAL:-}" \
   PAGER="${PAGER:-}" \
-  FRAKTOLE_CONFIG="${FRAKTOLE_CONFIG:-}" \
-  FRAKTOLE_TOKEN="${FRAKTOLE_TOKEN:-}" \
+  "${fraktole_vars[@]}" \
   "${proxies[@]}" \
   "$REAL" "$@"

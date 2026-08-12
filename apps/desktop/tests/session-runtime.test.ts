@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SessionRegistry, SessionRuntime, type RuntimeHost, type RuntimeJudge, type RuntimeRouter } from '../electron/session-runtime.js';
+import { SessionRegistry, SessionRuntime, type RuntimeHost, type RuntimeReviewer, type RuntimeRouter } from '../electron/session-runtime.js';
 import type { SessionFile } from '../src/shared/ipc.js';
 
 function session(id: string, name = id): SessionFile {
@@ -25,11 +25,16 @@ function fakes() {
     resize: vi.fn(),
     cwdOf: vi.fn(() => '/tmp'),
   };
-  const judge: RuntimeJudge = {
+  const reviewer: RuntimeReviewer = {
     status: 'offline' as const,
-    spawn: vi.fn(() => true),
-    kill: vi.fn(),
-    markExited: vi.fn(),
+    start: vi.fn(async () => true),
+    stop: vi.fn(),
+    idleOut: vi.fn(),
+    restart: vi.fn(async () => true),
+    prompt: vi.fn(async () => undefined),
+    cancel: vi.fn(),
+    onAgentMessage: vi.fn(),
+    conversation: [],
   };
   const router: RuntimeRouter = {
     start: vi.fn(),
@@ -37,7 +42,7 @@ function fakes() {
     sendFromOrchestrator: vi.fn(async () => true),
     listMessages: vi.fn(async () => []),
   };
-  return { host, judge, router };
+  return { host, reviewer, router };
 }
 
 function makeRegistry(logs: string[] = []) {
@@ -50,7 +55,7 @@ function makeRegistry(logs: string[] = []) {
         session: s,
         sessionRoot: '/tmp/sessions',
         host: f.host,
-        judge: f.judge,
+        reviewer: f.reviewer,
         router: f.router,
         judgeCwd: () => s.projectPath ?? '/home',
         idleTimeoutMs: 50,
@@ -62,74 +67,74 @@ function makeRegistry(logs: string[] = []) {
 
 describe('SessionRuntime lifecycle', () => {
   it('activate does not spawn the judge (lazy, on reviewer visit)', () => {
-    const { host, judge, router } = fakes();
+    const { host, reviewer, router } = fakes();
     const rt = new SessionRuntime({
       session: session('s1'),
       sessionRoot: '/tmp/sessions',
       host,
-      judge,
+      reviewer,
       router,
       judgeCwd: () => '/home',
     });
     expect(rt.state).toBe('running');
     rt.activate();
-    expect(judge.spawn).not.toHaveBeenCalled();
+    expect(reviewer.start).not.toHaveBeenCalled();
     expect(rt.state).toBe('running');
   });
 
-  it('ensureJudge spawns the judge when not running', () => {
-    const { host, judge, router } = fakes();
-    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
-    expect(rt.ensureJudge()).toBe(true);
-    expect(judge.spawn).toHaveBeenCalledTimes(1);
+  it('ensureReviewer starts the reviewer when not running', async () => {
+    const { host, reviewer, router } = fakes();
+    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, reviewer, router, judgeCwd: () => '/home' });
+    await expect(rt.ensureReviewer()).resolves.toBe(true);
+    expect(reviewer.start).toHaveBeenCalledTimes(1);
   });
 
-  it('ensureJudge is a no-op when the judge is already running', () => {
-    const { host, judge, router } = fakes();
-    judge.status = 'running';
-    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
-    expect(rt.ensureJudge()).toBe(true);
-    expect(judge.spawn).not.toHaveBeenCalled();
+  it('ensureReviewer is a no-op when the reviewer is already running', async () => {
+    const { host, reviewer, router } = fakes();
+    reviewer.status = 'running';
+    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, reviewer, router, judgeCwd: () => '/home' });
+    await expect(rt.ensureReviewer()).resolves.toBe(true);
+    expect(reviewer.start).not.toHaveBeenCalled();
   });
 
-  it('ensureJudge revives a stopped session before spawning', () => {
-    const { host, judge, router } = fakes();
-    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
+  it('ensureReviewer revives a stopped session before starting', async () => {
+    const { host, reviewer, router } = fakes();
+    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, reviewer, router, judgeCwd: () => '/home' });
     rt.stop();
-    expect(rt.ensureJudge()).toBe(true);
+    await expect(rt.ensureReviewer()).resolves.toBe(true);
     expect(rt.state).toBe('running');
     expect(router.start).toHaveBeenCalled();
-    expect(judge.spawn).toHaveBeenCalled();
+    expect(reviewer.start).toHaveBeenCalled();
   });
 
-  it('stop kills ptys and judge and stops the router', () => {
-    const { host, judge, router } = fakes();
-    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
+  it('stop kills ptys and the reviewer and stops the router', () => {
+    const { host, reviewer, router } = fakes();
+    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, reviewer, router, judgeCwd: () => '/home' });
     rt.stop();
     expect(host.killAll).toHaveBeenCalled();
-    expect(judge.kill).toHaveBeenCalled();
+    expect(reviewer.stop).toHaveBeenCalled();
     expect(router.stop).toHaveBeenCalled();
     expect(rt.state).toBe('stopped');
   });
 
-  it('start revives a stopped session (router only; judge spawns on visit)', () => {
-    const { host, judge, router } = fakes();
-    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
+  it('start revives a stopped session (router only; reviewer starts on visit)', () => {
+    const { host, reviewer, router } = fakes();
+    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, reviewer, router, judgeCwd: () => '/home' });
     rt.stop();
     rt.start();
     expect(rt.state).toBe('running');
     expect(router.start).toHaveBeenCalled();
-    expect(judge.spawn).not.toHaveBeenCalled();
+    expect(reviewer.start).not.toHaveBeenCalled();
   });
 
-  it('idle timer shuts the judge down but keeps tiles alive', async () => {
+  it('idle timer idles the reviewer out but keeps tiles alive', async () => {
     const logs: string[] = [];
-    const { host, judge, router } = fakes();
+    const { host, reviewer, router } = fakes();
     const rt = new SessionRuntime({
       session: session('s1'),
       sessionRoot: '/tmp/sessions',
       host,
-      judge,
+      reviewer,
       router,
       judgeCwd: () => '/home',
       idleTimeoutMs: 30,
@@ -137,19 +142,19 @@ describe('SessionRuntime lifecycle', () => {
     });
     rt.deactivate();
     await new Promise((r) => setTimeout(r, 80));
-    expect(judge.kill).toHaveBeenCalled();
+    expect(reviewer.idleOut).toHaveBeenCalled();
     expect(host.killAll).not.toHaveBeenCalled();
     expect(rt.state).toBe('idle');
     expect(logs.join()).toContain('idle-shutdown');
   });
 
   it('activate cancels the idle timer', async () => {
-    const { host, judge, router } = fakes();
+    const { host, reviewer, router } = fakes();
     const rt = new SessionRuntime({
       session: session('s1'),
       sessionRoot: '/tmp/sessions',
       host,
-      judge,
+      reviewer,
       router,
       judgeCwd: () => '/home',
       idleTimeoutMs: 30,
@@ -157,22 +162,22 @@ describe('SessionRuntime lifecycle', () => {
     rt.deactivate();
     rt.activate();
     await new Promise((r) => setTimeout(r, 80));
-    expect(judge.kill).not.toHaveBeenCalled();
+    expect(reviewer.idleOut).not.toHaveBeenCalled();
   });
 
   it('teardown kills everything and clears the idle timer', () => {
-    const { host, judge, router } = fakes();
-    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
+    const { host, reviewer, router } = fakes();
+    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, reviewer, router, judgeCwd: () => '/home' });
     rt.teardown();
     expect(host.killAll).toHaveBeenCalled();
-    expect(judge.kill).toHaveBeenCalled();
+    expect(reviewer.stop).toHaveBeenCalled();
     expect(router.stop).toHaveBeenCalled();
     expect(rt.state).toBe('stopped');
   });
 
   it('updateSession keeps the runtime view fresh', () => {
-    const { host, judge, router } = fakes();
-    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, judge, router, judgeCwd: () => '/home' });
+    const { host, reviewer, router } = fakes();
+    const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, reviewer, router, judgeCwd: () => '/home' });
     const next = session('s1', 'renamed');
     rt.updateSession(next);
     expect(rt.session.name).toBe('renamed');

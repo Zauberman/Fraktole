@@ -1,0 +1,115 @@
+/** Provider contracts for the reviewer harness: one shape, three adapters.
+ *  The harness talks to models over plain HTTP streaming — no SDKs, so the
+ *  whole provider surface is testable with stubbed fetch + fixtures. */
+
+export type ProviderName = 'openai' | 'anthropic' | 'ollama';
+
+export interface ReviewerTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface ReviewerToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+}
+
+/** The harness's normalized conversation message. */
+export interface ProviderMsg {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  /** assistant only */
+  toolCalls?: ReviewerToolCall[];
+  /** tool only: which call this result answers */
+  toolCallId?: string;
+}
+
+export interface CompleteOpts {
+  model: string;
+  apiKey: string;
+  /** Base URL override ('' = provider default). */
+  baseUrl: string;
+  messages: ProviderMsg[];
+  tools: ReviewerTool[];
+  signal: AbortSignal;
+  /** Streamed text deltas, delivered as they arrive. */
+  onDelta: (text: string) => void;
+}
+
+export interface ProviderClient {
+  readonly name: ProviderName;
+  complete(opts: CompleteOpts): Promise<{ text: string; toolCalls: ReviewerToolCall[] }>;
+}
+
+import { AnthropicProvider } from './providers/anthropic.js';
+import { OllamaProvider } from './providers/ollama.js';
+import { OpenAIProvider } from './providers/openai.js';
+
+export function createProvider(name: string): ProviderClient {
+  switch (name) {
+    case 'openai':
+      return new OpenAIProvider();
+    case 'anthropic':
+      return new AnthropicProvider();
+    case 'ollama':
+      return new OllamaProvider();
+    default:
+      throw new Error(`unknown reviewer provider: ${name}`);
+  }
+}
+
+export function joinBase(baseUrl: string, path: string): string {
+  const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  return `${base}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+/** Reads a web ReadableStream byte-by-byte (the generic variance of
+ *  ReadableStream across @types/node makes `for await` on the stream type
+ *  unreliable; bytes are bytes regardless). */
+export async function* readBytes(body: ReadableStream<Uint8Array<ArrayBufferLike>>): AsyncGenerator<Uint8Array<ArrayBufferLike>> {
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (value) yield value;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/** SSE reader: yields parsed JSON payloads of `data:` lines until [DONE]. */
+export async function* ssePayloads(body: ReadableStream<Uint8Array<ArrayBufferLike>>): AsyncGenerator<unknown> {
+  let buf = '';
+  for await (const chunk of readBytes(body)) {
+    buf += new TextDecoder().decode(chunk, { stream: true });
+    let idx: number;
+    while ((idx = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (data === '[DONE]') return;
+      if (data.length === 0) continue;
+      yield JSON.parse(data);
+    }
+  }
+}
+
+/** NDJSON reader (ollama-style streaming). */
+export async function* ndjsonPayloads(body: ReadableStream<Uint8Array<ArrayBufferLike>>): AsyncGenerator<unknown> {
+  let buf = '';
+  for await (const chunk of readBytes(body)) {
+    buf += new TextDecoder().decode(chunk, { stream: true });
+    let idx: number;
+    while ((idx = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (line.length === 0) continue;
+      yield JSON.parse(line);
+    }
+  }
+}

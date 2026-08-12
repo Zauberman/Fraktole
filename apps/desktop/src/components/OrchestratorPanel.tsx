@@ -3,8 +3,6 @@ import { bridge, type SessionSummary } from '../ipc.js';
 import type { FraktoleMessage, SendMessageArgs, SessionSnapshot } from '../ipc.js';
 import type { TileId } from '../window-tree.js';
 
-export type JudgeStatus = 'offline' | 'running' | 'exited';
-
 export interface FleetAgent {
   tileId: TileId;
   agentId: string | null;
