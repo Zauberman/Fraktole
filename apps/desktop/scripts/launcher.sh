@@ -44,12 +44,15 @@ done
 # Already running? Tell the first instance to come forward and exit right
 # here. Launching Electron anyway would create a doomed second instance —
 # its zygote children outlive the quick quit and accumulate as orphans.
-# (Only matches a bare main process: args-bearing launches fall through to
-# Electron's own second-instance handling.)
-EXISTING="$(pgrep -f 'lib/fraktole-desktop/fraktole-desktop$' 2>/dev/null | head -n1 || true)"
-if [ -n "${EXISTING}" ]; then
-  kill -USR2 "${EXISTING}" 2>/dev/null || true
-  exit 0
+# (Only matches a bare main process; args-bearing launches fall through to
+# Electron's own second-instance handling. Applies to installed launches
+# only — dev launches set no FRAKTOLE_REAL_BIN and must always start.)
+if [ -n "${FRAKTOLE_REAL_BIN:-}" ]; then
+  EXISTING="$(pgrep -f 'lib/fraktole-desktop/fraktole-desktop$' 2>/dev/null | head -n1 || true)"
+  if [ -n "${EXISTING}" ]; then
+    kill -USR2 "${EXISTING}" 2>/dev/null || true
+    exit 0
+  fi
 fi
 
 # XDG_CURRENT_DESKTOP is deliberately NOT passed: Chromium reads it and

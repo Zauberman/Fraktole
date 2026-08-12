@@ -509,6 +509,10 @@ if (!app.requestSingleInstanceLock()) {
       if (!rt) return false;
       return rt.reviewer.restart();
     });
+    ipcMain.handle(IPC.reviewerCompact, async (_e, sessionId: string): Promise<void> => {
+      const rt = registry?.get(sessionId) ?? null;
+      rt?.reviewer.compact();
+    });
     ipcMain.handle(IPC.reviewerTranscript, async (_e, sessionId: string): Promise<ReviewerEntry[]> => {
       const rt = registry?.get(sessionId) ?? null;
       if (!rt) return [];

@@ -275,46 +275,58 @@ body {
   gap: var(--s2);
 }
 
-.reviewer-row {
+.reviewer-item {
   display: flex;
   flex-direction: column;
   gap: 2px;
   font-size: var(--text-sm);
 }
 
-.reviewer-row-meta {
+.reviewer-item-meta {
   display: flex;
   align-items: center;
   gap: var(--s2);
 }
 
-.reviewer-row-role {
+.reviewer-item-role {
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-faint);
 }
 
-.reviewer-row-body {
+.reviewer-item-body {
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.reviewer-row-user .reviewer-row-body {
   color: var(--text);
 }
 
-.reviewer-row-system .reviewer-row-body {
+.reviewer-item-system .reviewer-item-body {
   color: var(--text-muted);
   font-style: italic;
 }
 
-.reviewer-row-tool .reviewer-row-body {
-  color: var(--text-muted);
+.reviewer-item-tool {
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: var(--s2);
+  background: var(--bg-raised);
 }
 
-.reviewer-row-tool-error .reviewer-row-body {
+.reviewer-item-tool-error {
+  border-color: var(--err);
+}
+
+.reviewer-item-tool-error .reviewer-tool-name {
   color: var(--err);
+}
+
+.reviewer-item-tool-error .reviewer-item-body {
+  color: var(--err);
+}
+
+.reviewer-live .reviewer-item-body {
+  color: var(--text);
 }
 
 .reviewer-tool-name {
@@ -324,6 +336,11 @@ body {
 
 .reviewer-tool-args {
   font-family: var(--font-mono);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
 }
 
 .reviewer-tool-detail {
@@ -335,10 +352,8 @@ body {
   font-size: var(--text-xs);
   max-height: 8em;
   overflow: auto;
-}
-
-.reviewer-stream {
-  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .reviewer-note {
@@ -402,16 +417,6 @@ body {
   grid-column: 1 / -1;
   display: flex;
   gap: var(--s2);
-}
-
-.reviewer-log {
-  flex: 0 1 32%;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s2);
-  margin-top: var(--s3);
-  overflow: hidden;
 }
 
 .status-state {

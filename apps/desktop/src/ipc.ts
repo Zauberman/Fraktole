@@ -76,6 +76,7 @@ export interface FraktoleBridge {
   promptReviewer(sessionId: string, text: string): Promise<void>;
   stopReviewer(sessionId: string): Promise<void>;
   restartReviewer(sessionId: string): Promise<boolean>;
+  compactReviewer(sessionId: string): Promise<void>;
   reviewerTranscript(sessionId: string): Promise<ReviewerEntry[]>;
   onReviewerStatus(sessionId: string, cb: (s: { status: string; error?: string }) => void): () => void;
   onReviewerStream(sessionId: string, cb: (delta: string) => void): () => void;

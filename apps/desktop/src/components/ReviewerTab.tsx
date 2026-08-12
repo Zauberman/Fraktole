@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { FraktoleMessage, ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../ipc.js';
+import type { ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../ipc.js';
 import { bridge, type Settings } from '../ipc.js';
 import {
   DEFAULT_MODELS,
@@ -7,10 +7,25 @@ import {
   resolveProvider,
   type DetectedProvider,
 } from '../shared/reviewer-detect.js';
+import { sanitizeChatText } from '../shared/sanitize.js';
 
-interface ReviewerTabProps {
-  sessionId: string;
-  messages: FraktoleMessage[];
+/** One row of the unified transcript timeline: a message or a tool call.
+ *  Events arrive over IPC in order, so the renderer's monotonic `seq` is
+ *  the chronological order; tool cards merge in by callId. */
+interface TranscriptItem {
+  seq: number;
+  at: number;
+  kind: 'message' | 'tool';
+  role?: ReviewerEntry['role'];
+  content?: string;
+  /** streaming: the last assistant message is finalized by its message event */
+  finalized?: boolean;
+  callId?: string;
+  name?: string;
+  args?: string;
+  state?: 'start' | 'done' | 'error';
+  detail?: string;
+  durationMs?: number;
 }
 
 function timeOf(at: number): string {
@@ -18,35 +33,39 @@ function timeOf(at: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-interface ToolRowState {
-  name: string;
-  args: string;
-  state: 'start' | 'done' | 'error';
-  detail?: string;
-  durationMs?: number;
+interface ReviewerTabProps {
+  sessionId: string;
 }
 
 /**
- * The Reviewer tab: the harness's space — its streaming transcript (model
- * text, tool calls, agent-result notes), its status, and the prompt box.
+ * The Reviewer tab: the harness's full space — one unified transcript
+ * timeline (model text, tool calls, agent-result notes), the status, the
+ * /compact command, and the prompt box.
  */
 export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
-  const { sessionId, messages } = props;
+  const { sessionId } = props;
   const [status, setStatus] = useState<ReviewerStatus>('offline');
   const [statusError, setStatusError] = useState<string | undefined>(undefined);
-  const [entries, setEntries] = useState<ReviewerEntry[]>([]);
-  const [streamText, setStreamText] = useState('');
-  const [tools, setTools] = useState<ToolRowState[]>([]);
+  const [items, setItems] = useState<TranscriptItem[]>([]);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '' });
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const seqRef = useRef(0);
+
+  const nextSeq = (): number => {
+    seqRef.current += 1;
+    return seqRef.current;
+  };
 
   // mount: load the persisted transcript, current config
   useEffect(() => {
     void bridge.reviewerTranscript(sessionId).then((rows) => {
-      if (rows.length > 0) setEntries(rows);
+      if (rows.length > 0) {
+        setItems(rows.map((entry) => ({ seq: nextSeq(), at: entry.at, kind: 'message', role: entry.role, content: entry.content, finalized: true })));
+      }
     });
     void bridge.getSettings().then((s) => {
       setSettings(s);
@@ -65,31 +84,48 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         setStatus(s.status as ReviewerStatus);
         setStatusError(s.error);
       }),
-      bridge.onReviewerStream(sessionId, (delta) => setStreamText((t) => t + delta)),
+      bridge.onReviewerStream(sessionId, (delta) => {
+        setItems((its) => {
+          const last = its[its.length - 1];
+          if (last && last.kind === 'message' && last.role === 'assistant' && !last.finalized) {
+            const next = [...its];
+            next[next.length - 1] = { ...last, content: `${last.content ?? ''}${delta}` };
+            return next;
+          }
+          return [...its, { seq: nextSeq(), at: Date.now(), kind: 'message', role: 'assistant', content: delta, finalized: false }];
+        });
+      }),
       bridge.onReviewerToolCall(sessionId, (ev: ReviewerToolCallEvent) => {
         if (ev.state === 'start') {
-          setTools((ts) => [...ts, { name: ev.name, args: JSON.stringify(ev.args), state: 'start' }]);
+          setItems((its) => [
+            ...its,
+            { seq: nextSeq(), at: ev.at, kind: 'tool', callId: ev.callId, name: ev.name, args: JSON.stringify(ev.args), state: 'start' },
+          ]);
         } else {
-          setTools((ts) => {
-            const next = [...ts];
-            const last = next[next.length - 1];
-            if (last && last.name === ev.name) {
-              next[next.length - 1] = {
-                ...last,
-                state: ev.state,
-                detail: ev.error ?? ev.result,
-                durationMs: ev.durationMs,
-              };
-            } else {
-              next.push({ name: ev.name, args: JSON.stringify(ev.args), state: ev.state, detail: ev.error ?? ev.result, durationMs: ev.durationMs });
-            }
-            return next;
-          });
+          setItems((its) =>
+            its.map((it) =>
+              it.kind === 'tool' && it.callId === ev.callId
+                ? { ...it, state: ev.state, detail: ev.error ?? ev.result, durationMs: ev.durationMs }
+                : it,
+            ),
+          );
+          if (ev.state === 'error' && ev.callId) {
+            setExpanded((e) => ({ ...e, [ev.callId]: true }));
+          }
         }
       }),
       bridge.onReviewerMessage(sessionId, (entry) => {
-        if (entry.role === 'assistant') setStreamText('');
-        setEntries((es) => [...es, entry]);
+        setItems((its) => {
+          if (entry.role === 'assistant') {
+            const last = its[its.length - 1];
+            if (last && last.kind === 'message' && last.role === 'assistant' && !last.finalized) {
+              const next = [...its];
+              next[next.length - 1] = { ...last, content: entry.content, finalized: true };
+              return next;
+            }
+          }
+          return [...its, { seq: nextSeq(), at: entry.at, kind: 'message', role: entry.role, content: entry.content, finalized: true }];
+        });
       }),
     ];
     return () => {
@@ -101,26 +137,28 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [entries, streamText, tools]);
+  }, [items]);
 
   const submit = (): void => {
     const text = input.trim();
     if (text.length === 0) return;
     setInput('');
+    if (text === '/compact') {
+      void bridge.compactReviewer(sessionId);
+      return;
+    }
     void bridge.promptReviewer(sessionId, text);
   };
 
   const retry = (): void => {
     void bridge.restartReviewer(sessionId).then((ok) => {
       setStatus(ok ? 'running' : 'unconfigured');
-      setStreamText('');
-      setTools([]);
+      setItems([]);
     });
   };
 
   const stop = (): void => {
     void bridge.stopReviewer(sessionId);
-    setTools([]);
   };
 
   // live provider resolution from the pasted key (same logic the harness uses)
@@ -151,8 +189,6 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       void retry();
     });
   };
-
-  const judgeThread = messages.filter((m) => m.from === 'orchestrator' || m.to === 'orchestrator');
 
   return (
     <div className="reviewer">
@@ -229,60 +265,53 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           <div className="reviewer-note reviewer-note-error">{statusError ?? 'reviewer not configured — open config'}</div>
         )}
         {status === 'error' && statusError && <div className="reviewer-note reviewer-note-error">{statusError}</div>}
-        {entries.length === 0 && streamText === '' && tools.length === 0 && (
+        {items.length === 0 && (
           <div className="orch-hint">no activity yet — prompt the reviewer below; it observes every agent tile</div>
         )}
-        {entries.map((e, i) => (
-          <div key={i} className={`reviewer-row reviewer-row-${e.role}`}>
-            <div className="reviewer-row-meta">
-              <span className="reviewer-row-role">{e.role}</span>
-              <span className="orch-msg-time">{timeOf(e.at)}</span>
+        {items.map((it) =>
+          it.kind === 'message' ? (
+            <div key={it.seq} className={`reviewer-item reviewer-item-${it.role ?? 'system'}${it.finalized ? '' : ' reviewer-live'}`}>
+              <div className="reviewer-item-meta">
+                <span className="reviewer-item-role">{it.role ?? 'system'}</span>
+                <span className="orch-msg-time">{timeOf(it.at)}</span>
+              </div>
+              <div className="reviewer-item-body">{sanitizeChatText(it.content ?? '')}</div>
             </div>
-            <div className="reviewer-row-body">{e.content}</div>
-          </div>
-        ))}
-        {tools.map((t, i) => (
-          <div key={`t${i}`} className={`reviewer-row reviewer-row-tool reviewer-row-tool-${t.state}`}>
-            <div className="reviewer-row-meta">
-              <span className="reviewer-row-role">tool</span>
-              <span className="orch-msg-time">
-                {t.state === 'start' ? 'running…' : `${t.state}${t.durationMs !== undefined ? ` · ${t.durationMs}ms` : ''}`}
-              </span>
+          ) : (
+            <div key={it.seq} className={`reviewer-item reviewer-item-tool reviewer-item-tool-${it.state ?? 'start'}`}>
+              <div className="reviewer-item-meta">
+                <span className="reviewer-item-role">tool</span>
+                <span className="reviewer-tool-name">{it.name}</span>
+                <span className="reviewer-tool-args">{sanitizeChatText(it.args ?? '')}</span>
+                <span className="orch-msg-time">
+                  {it.state === 'start' ? 'running…' : `${it.state}${it.durationMs !== undefined ? ` · ${it.durationMs}ms` : ''}`}
+                </span>
+                {it.state !== 'start' && it.detail !== undefined && (
+                  <button
+                    type="button"
+                    className="orch-btn"
+                    onClick={() => setExpanded((e) => ({ ...e, [it.callId ?? String(it.seq)]: !e[it.callId ?? String(it.seq)] }))}
+                  >
+                    {expanded[it.callId ?? String(it.seq)] ? 'collapse' : 'expand'}
+                  </button>
+                )}
+                {it.state !== 'start' && it.detail !== undefined && (
+                  <button
+                    type="button"
+                    className="orch-btn"
+                    onClick={() => void navigator.clipboard.writeText(it.detail ?? '')}
+                  >
+                    copy
+                  </button>
+                )}
+              </div>
+              {it.state !== 'start' && it.detail !== undefined && (expanded[it.callId ?? String(it.seq)] || it.state === 'error') && (
+                <pre className="reviewer-tool-detail">{sanitizeChatText(it.detail)}</pre>
+              )}
             </div>
-            <div className="reviewer-row-body">
-              <span className="reviewer-tool-name">{t.name}</span> <span className="reviewer-tool-args">{t.args}</span>
-              {t.detail !== undefined && <pre className="reviewer-tool-detail">{t.detail}</pre>}
-            </div>
-          </div>
-        ))}
-        {streamText !== '' && (
-          <div className="reviewer-row reviewer-row-assistant">
-            <div className="reviewer-row-body reviewer-stream">{streamText}</div>
-          </div>
+          ),
         )}
       </div>
-
-      <section className="reviewer-log">
-        <div className="orch-section-title">orchestrator messages</div>
-        {judgeThread.length === 0 ? (
-          <div className="orch-hint">no messages yet — results from agents land here</div>
-        ) : (
-          <ul className="orch-log">
-            {judgeThread.map((m) => (
-              <li key={m.id} className="orch-msg">
-                <div className="orch-msg-meta">
-                  <span className={`orch-badge orch-badge-${m.kind}`}>{m.kind}</span>
-                  <span className="orch-msg-from">
-                    {m.from} → {m.to}
-                  </span>
-                  <span className="orch-msg-time">{timeOf(m.at)}</span>
-                </div>
-                <div className="orch-msg-body">{m.body}</div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
 
       <footer className="reviewer-input">
         <input
@@ -291,7 +320,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           onKeyDown={(e) => {
             if (e.key === 'Enter') submit();
           }}
-          placeholder={status === 'running' ? 'prompt the reviewer…' : 'reviewer not running — click retry'}
+          placeholder={status === 'running' ? 'prompt the reviewer…  (/compact)' : 'reviewer not running — click retry'}
           disabled={status !== 'running'}
         />
         <button type="button" className="orch-btn" onClick={submit} disabled={status !== 'running'}>

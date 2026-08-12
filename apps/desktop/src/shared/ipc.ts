@@ -37,6 +37,7 @@ export const IPC = {
   reviewerPrompt: 'reviewer:prompt',
   reviewerStop: 'reviewer:stop',
   reviewerRestart: 'reviewer:restart',
+  reviewerCompact: 'reviewer:compact',
   reviewerTranscript: 'reviewer:transcript',
   reviewerStatus: 'reviewer:status',
   reviewerStream: 'reviewer:stream',
@@ -116,12 +117,17 @@ export interface ReviewerEntry {
 }
 
 export interface ReviewerToolCallEvent {
+  /** Provider tool-call id — the renderer matches start→done/error cards. */
+  callId: string;
   name: string;
   args: Record<string, unknown>;
   state: 'start' | 'done' | 'error';
   result?: string;
   error?: string;
   durationMs?: number;
+  /** When the call started — lets the renderer interleave tool cards into
+   *  the transcript timeline. */
+  at: number;
 }
 
 /** Window-tree serialized with durable agent ids on the leaves. The live

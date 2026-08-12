@@ -2,6 +2,7 @@ import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { FraktoleMessage, ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../src/shared/ipc.js';
 import { resolveProvider, type ProviderResolution } from '../src/shared/reviewer-detect.js';
+import { sanitizeChatText } from '../src/shared/sanitize.js';
 import { ReviewerTools, type ReviewerToolContext } from './reviewer-tools.js';
 import { createProvider, type ProviderClient, type ProviderMsg } from './reviewer/providers.js';
 import type { TileRecorder } from './tile-recorder.js';
@@ -55,6 +56,8 @@ export function buildSystemPrompt(sessionId: string, cwd: string): string {
     `Start each engagement by calling list_tiles so you know what is running.`,
     'Read the TAIL of a tile before judging it; use read_scrollback for full history.',
     'Do not send messages to an agent unless the task warrants it.',
+    'Never use emojis or decorative unicode in any message, body or reply — ASCII only.',
+    'Context compacts automatically near the limit; keep replies tight.',
     'End each engagement with a concise verdict: what each agent did, and what you recommend.',
   ].join('\n');
 }
@@ -144,14 +147,21 @@ export class ReviewerHost {
     this.drainQueue();
   }
 
-  /** Queues an agent result message as a turn. */
+  /** Queues an agent result message as a turn. The body is sanitized at
+   *  ingestion so the model never sees (or echoes) emoji. */
   onAgentMessage(msg: FraktoleMessage): void {
     if (this.status !== 'running') return;
     this.queue.push({
       role: 'user',
-      content: `[${msg.from} → ${msg.to} (${msg.kind})]: ${msg.body}`,
+      content: `[${msg.from} → ${msg.to} (${msg.kind})]: ${sanitizeChatText(msg.body)}`,
     });
     this.drainQueue();
+  }
+
+  /** Manual compaction pass (the /compact command): drops old tool rows
+   *  regardless of the size budget and tells the model context was trimmed. */
+  compact(): void {
+    this.compactIfNeeded(true);
   }
 
   /** Aborts the in-flight provider call; queued turns are dropped. */
@@ -205,19 +215,21 @@ export class ReviewerHost {
           let failed = false;
           for (const call of response.toolCalls) {
             const started = Date.now();
-            this.opts.emit.toolCall({ name: call.name, args: call.args, state: 'start' });
+            this.opts.emit.toolCall({ callId: call.id, name: call.name, args: call.args, state: 'start', at: Date.now() });
             const result = await this.tools.run(call.name, call.args, this.opts.toolContext);
             const durationMs = Date.now() - started;
             if (result.startsWith('error:')) {
               failed = true;
-              this.opts.emit.toolCall({ name: call.name, args: call.args, state: 'error', error: result, durationMs });
+              this.opts.emit.toolCall({ callId: call.id, name: call.name, args: call.args, state: 'error', error: result, durationMs, at: Date.now() });
             } else {
               this.opts.emit.toolCall({
+                callId: call.id,
                 name: call.name,
                 args: call.args,
                 state: 'done',
                 result: result.slice(0, 2000),
                 durationMs,
+                at: Date.now(),
               });
             }
             const capped = result.length > TOOL_RESULT_CHARS ? `${result.slice(0, TOOL_RESULT_CHARS)}\n…[truncated]` : result;
@@ -239,16 +251,28 @@ export class ReviewerHost {
     }
   }
 
-  /** Drops old tool rows when the conversation outgrows the budget. */
-  private compactIfNeeded(): void {
+  /** Drops old tool rows when the conversation outgrows the budget (or on a
+   *  forced /compact pass). Auto-compaction drops oldest-first; a forced
+   *  pass never drops the most recent user turn. */
+  private compactIfNeeded(force = false): void {
     let total = 0;
     for (const m of this.messages) total += m.content.length;
-    if (total <= COMPACT_THRESHOLD) return;
+    if (!force && total <= COMPACT_THRESHOLD) return;
+    let stopAt = Number.MAX_SAFE_INTEGER;
+    if (force) {
+      for (let i = this.messages.length - 1; i >= 0; i--) {
+        if (this.messages[i]!.role === 'user') {
+          stopAt = i;
+          break;
+        }
+      }
+    }
     let dropped = 0;
-    while (this.messages.length > 4 && total > COMPACT_THRESHOLD) {
+    while (this.messages.length > 4 && 1 < stopAt && (force || total > COMPACT_THRESHOLD)) {
       const victim = this.messages[1]!;
       total -= victim.content.length;
       this.messages.splice(1, 1);
+      stopAt -= 1;
       dropped += 1;
     }
     if (dropped > 0) {

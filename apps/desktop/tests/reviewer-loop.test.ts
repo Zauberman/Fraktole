@@ -248,6 +248,51 @@ describe('ReviewerHost', () => {
     expect(host.conversation.length).toBe(1); // system prompt only
   });
 
+  it('sanitizes emoji from agent messages before they enter the conversation', async () => {
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder);
+    await host.start();
+    host.onAgentMessage({
+      id: 'm-1',
+      from: 'agent-1',
+      to: 'orchestrator',
+      kind: 'result',
+      body: 'done ✅ with 🚀 launch',
+      at: Date.now(),
+    });
+    await settle(80);
+    const users = host.conversation.filter((e) => e.role === 'user').map((e) => e.content);
+    expect(users.some((u) => u.includes('done  with  launch'))).toBe(true);
+    expect(users.some((u) => u.includes('\u{1F389}'))).toBe(false);
+    expect(users.join(' ')).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
+  });
+
+  it('forced compact drops old exchanges but keeps the last user turn', async () => {
+    const recorder = recorderWith('x'.repeat(100));
+    const script: ScriptEntry[] = [];
+    for (let i = 0; i < 10; i++) {
+      script.push({ text: '', toolCalls: [{ id: `c${i}`, name: 'read_tile', args: { agentId: 'agent-1', tail: 5 } }] });
+    }
+    script.push({ text: 'done', toolCalls: [] });
+    script.push({ text: 'again', toolCalls: [] });
+    const { host } = makeHost(script, recorder);
+    await host.start();
+    await host.prompt('dig deep');
+    await settle(300);
+    await host.prompt('and again');
+    await settle(100);
+    const before = host.conversation.length;
+    expect(before).toBeGreaterThan(10);
+    host.compact();
+    await settle(30);
+    const after = host.conversation;
+    expect(after.length).toBeLessThan(before);
+    expect(after.some((e) => e.content.includes('context compacted'))).toBe(true);
+    // the most recent user turn survives
+    const lastUser = [...after].reverse().find((e) => e.role === 'user');
+    expect(lastUser?.content).toBe('and again');
+  });
+
   it('compacts the conversation when it outgrows the budget', async () => {
     const recorder = recorderWith('x'.repeat(3000));
     const script: ScriptEntry[] = [];

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { bridge, type SessionSummary } from '../ipc.js';
+import { sanitizeChatText } from '../shared/sanitize.js';
 import type { FraktoleMessage, SendMessageArgs, SessionSnapshot } from '../ipc.js';
 import type { TileId } from '../window-tree.js';
 
@@ -349,7 +350,7 @@ export function OrchestratorPanel(props: OrchestratorPanelProps): React.JSX.Elem
                     </button>
                   )}
                 </div>
-                <div className="orch-msg-body">{m.body}</div>
+                <div className="orch-msg-body">{sanitizeChatText(m.body)}</div>
               </li>
             ))}
           </ul>

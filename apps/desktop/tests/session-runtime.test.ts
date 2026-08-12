@@ -31,6 +31,7 @@ function fakes() {
     stop: vi.fn(),
     idleOut: vi.fn(),
     restart: vi.fn(async () => true),
+    compact: vi.fn(),
     prompt: vi.fn(async () => undefined),
     cancel: vi.fn(),
     onAgentMessage: vi.fn(),

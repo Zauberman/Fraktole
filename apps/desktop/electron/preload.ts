@@ -98,6 +98,7 @@ const api = {
     ipcRenderer.invoke(IPC.reviewerPrompt, sessionId, text),
   stopReviewer: (sessionId: string): Promise<void> => ipcRenderer.invoke(IPC.reviewerStop, sessionId),
   restartReviewer: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.reviewerRestart, sessionId),
+  compactReviewer: (sessionId: string): Promise<void> => ipcRenderer.invoke(IPC.reviewerCompact, sessionId),
   reviewerTranscript: (sessionId: string): Promise<ReviewerEntry[]> =>
     ipcRenderer.invoke(IPC.reviewerTranscript, sessionId),
 

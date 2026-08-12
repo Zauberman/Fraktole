@@ -152,7 +152,7 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
 
   const reviewerContent = (
     <section className="pane pane-workspace pane-reviewer">
-      <ReviewerTab sessionId={sessionId} messages={messages} />
+      <ReviewerTab sessionId={sessionId} />
     </section>
   );
 

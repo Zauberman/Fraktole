@@ -20,6 +20,7 @@ export interface RuntimeReviewer {
   stop(): void;
   idleOut(): void;
   restart(): Promise<boolean>;
+  compact(): void;
   prompt(text: string): Promise<void>;
   cancel(): void;
   onAgentMessage(msg: FraktoleMessage): void;
