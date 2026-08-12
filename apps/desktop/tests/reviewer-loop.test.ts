@@ -78,12 +78,64 @@ function uniqueConversationFile(): string {
 }
 
 describe('ReviewerHost', () => {
-  it('starts unconfigured when the API key is missing', async () => {
+  it('resolves to ollama when no key is available — the key decides everything', async () => {
     const recorder = new TileRecorder();
-    const { host } = makeHost([], recorder, { config: { provider: 'openai', model: 'm', apiKeyEnv: 'FRAKTOLE_TEST_KEY' } });
-    const ok = await host.start();
-    expect(ok).toBe(false);
-    expect(host.status).toBe('unconfigured');
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: { provider: 'openai' }, // a stale hint cannot override keylessness
+    });
+    await host.start();
+    expect(host.status).toBe('running');
+    await host.prompt('x');
+    await settle(60);
+    const call = provider.complete.mock.calls[0]![0] as { model: string; baseUrl: string; apiKey: string };
+    expect(call.model).toBe('qwen2.5');
+    expect(call.baseUrl).toBe('http://localhost:11434');
+  });
+
+  it('resolves provider, endpoint and model from a pasted key', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'hi', toolCalls: [] }], recorder, {
+      config: { apiKey: 'sk-ant-api03-test' },
+    });
+    await host.start();
+    expect(host.status).toBe('running');
+    await host.prompt('hello');
+    await settle(60);
+    const call = provider.complete.mock.calls[0]![0] as { model: string; apiKey: string; baseUrl: string };
+    expect(call.model).toBe('claude-sonnet-4-5');
+    expect(call.baseUrl).toBe('https://api.anthropic.com');
+    expect(call.apiKey).toBe('sk-ant-api03-test');
+  });
+
+  it('an env-var fallback key still works', async () => {
+    process.env.FRAKTOLE_ENV_FALLBACK_KEY = 'sk-proj-test';
+    try {
+      const recorder = new TileRecorder();
+      const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+        config: { apiKeyEnv: 'FRAKTOLE_ENV_FALLBACK_KEY' },
+      });
+      await host.start();
+      expect(host.status).toBe('running');
+      await host.prompt('x');
+      await settle(60);
+      const call = provider.complete.mock.calls[0]![0] as { baseUrl: string };
+      expect(call.baseUrl).toBe('https://api.openai.com/v1');
+    } finally {
+      delete process.env.FRAKTOLE_ENV_FALLBACK_KEY;
+    }
+  });
+
+  it('a deepseek hint routes through the openai adapter to the deepseek endpoint', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: { apiKey: 'sk-deepseek-key', provider: 'deepseek' },
+    });
+    await host.start();
+    await host.prompt('x');
+    await settle(60);
+    const call = provider.complete.mock.calls[0]![0] as { model: string; baseUrl: string };
+    expect(call.model).toBe('deepseek-chat');
+    expect(call.baseUrl).toBe('https://api.deepseek.com/v1');
   });
 
   it('runs the tool loop: read_tile executes against the real recording, then final text', async () => {

@@ -86,11 +86,20 @@ export interface Project {
 
 export interface Settings {
   theme: string;
-  /** The reviewer harness model config (own model loop, no CLI). */
+  /** The reviewer harness model config. Everything except the key is
+   *  derived by resolveProvider: the key alone decides provider/endpoint,
+   *  with optional explicit overrides for ambiguous sk- keys. */
   reviewer: {
-    provider: 'openai' | 'anthropic' | 'ollama';
-    model: string;
+    /** Pasted API key (stored in settings.json like opencode's auth.json). */
+    apiKey?: string;
+    /** Env-var fallback when apiKey is empty. */
     apiKeyEnv?: string;
+    /** Explicit pick for ambiguous sk- keys ('deepseek' routes through the
+     *  OpenAI adapter to api.deepseek.com). */
+    provider?: 'openai' | 'anthropic' | 'ollama' | 'deepseek';
+    /** User's model pick; empty → per-provider default. */
+    model?: string;
+    /** Custom OpenAI-compatible endpoint. */
     baseUrl?: string;
   };
 }

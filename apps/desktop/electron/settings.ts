@@ -4,13 +4,10 @@ import type { Settings } from '../src/shared/ipc.js';
 
 /**
  * App preferences, persisted as JSON under userData: the color theme and the
- * reviewer harness model config.
+ * reviewer harness config. The reviewer derives provider/endpoint from the
+ * pasted API key (src/shared/reviewer-detect.ts); explicit overrides are
+ * optional and only used for ambiguous sk- keys.
  */
-export const DEFAULT_REVIEWER = {
-  provider: 'anthropic' as const,
-  model: 'claude-sonnet-4-5',
-};
-
 export class SettingsStore {
   constructor(private readonly file: string) {}
 
@@ -18,25 +15,22 @@ export class SettingsStore {
     try {
       const raw = await readFile(this.file, 'utf8');
       const parsed = JSON.parse(raw) as Partial<Settings>;
+      const provider = parsed.reviewer?.provider;
       return {
         theme: typeof parsed.theme === 'string' ? parsed.theme : 'midnight',
         reviewer: {
-          provider:
-            parsed.reviewer?.provider === 'openai' ||
-            parsed.reviewer?.provider === 'anthropic' ||
-            parsed.reviewer?.provider === 'ollama'
-              ? parsed.reviewer.provider
-              : DEFAULT_REVIEWER.provider,
-          model: typeof parsed.reviewer?.model === 'string' ? parsed.reviewer.model : DEFAULT_REVIEWER.model,
+          apiKey: typeof parsed.reviewer?.apiKey === 'string' ? parsed.reviewer.apiKey : undefined,
           apiKeyEnv: typeof parsed.reviewer?.apiKeyEnv === 'string' ? parsed.reviewer.apiKeyEnv : undefined,
+          provider:
+            provider === 'openai' || provider === 'anthropic' || provider === 'ollama' || provider === 'deepseek'
+              ? provider
+              : undefined,
+          model: typeof parsed.reviewer?.model === 'string' ? parsed.reviewer.model : undefined,
           baseUrl: typeof parsed.reviewer?.baseUrl === 'string' ? parsed.reviewer.baseUrl : undefined,
         },
       };
     } catch {
-      return {
-        theme: 'midnight',
-        reviewer: { provider: DEFAULT_REVIEWER.provider, model: DEFAULT_REVIEWER.model },
-      };
+      return { theme: 'midnight', reviewer: {} };
     }
   }
 

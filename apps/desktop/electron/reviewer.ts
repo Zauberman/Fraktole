@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { FraktoleMessage, ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../src/shared/ipc.js';
+import { resolveProvider, type ProviderResolution } from '../src/shared/reviewer-detect.js';
 import { ReviewerTools, type ReviewerToolContext } from './reviewer-tools.js';
 import { createProvider, type ProviderClient, type ProviderMsg } from './reviewer/providers.js';
 import type { TileRecorder } from './tile-recorder.js';
@@ -8,9 +9,15 @@ import type { TileRecorder } from './tile-recorder.js';
 export type { ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../src/shared/ipc.js';
 
 export interface ReviewerConfig {
-  provider: 'openai' | 'anthropic' | 'ollama';
-  model: string;
+  /** Pasted API key — everything else is derived from it. */
+  apiKey?: string;
+  /** Env-var fallback when apiKey is empty. */
   apiKeyEnv?: string;
+  /** Explicit pick for ambiguous sk- keys. */
+  provider?: 'openai' | 'anthropic' | 'ollama' | 'deepseek';
+  /** User's model pick; empty → per-provider default. */
+  model?: string;
+  /** Custom OpenAI-compatible endpoint. */
   baseUrl?: string;
 }
 
@@ -65,6 +72,9 @@ export class ReviewerHost {
   private running = false;
   private aborter: AbortController | null = null;
   private provider: ProviderClient;
+  /** Provider/endpoint/model resolved from the key at start(). */
+  private resolved: ProviderResolution | null = null;
+  private apiKey = '';
   private readonly tools: ReviewerTools;
   private readonly conversationFile: string;
 
@@ -78,16 +88,24 @@ export class ReviewerHost {
     return this.messages.map(toEntry);
   }
 
-  /** Loads the conversation and marks the harness ready. False when the
-   *  provider config is unusable (missing API key). */
+  /** Resolves provider/endpoint/model from the pasted API key (env fallback
+   *  via apiKeyEnv), loads the conversation and marks the harness ready.
+   *  False when a non-ollama provider has no key. */
   async start(): Promise<boolean> {
     const cfg = await this.opts.getConfig();
-    const key = await this.apiKeyFor(cfg);
-    if (key === null) {
-      this.setStatus('unconfigured', 'missing API key — configure the reviewer provider first');
+    const key = cfg.apiKey?.trim() ?? (cfg.apiKeyEnv ? (process.env[cfg.apiKeyEnv] ?? '') : '');
+    const res = resolveProvider(key, {
+      baseUrl: cfg.baseUrl,
+      providerHint: cfg.provider,
+      modelHint: cfg.model,
+    });
+    if (res.adapter !== 'ollama' && key.length === 0) {
+      this.setStatus('unconfigured', 'no API key — paste one in the reviewer config');
       return false;
     }
-    this.provider = (this.opts.createProvider ?? createProvider)(cfg.provider);
+    this.resolved = res;
+    this.apiKey = key;
+    this.provider = (this.opts.createProvider ?? createProvider)(res.adapter);
     await this.load();
     if (this.messages.length === 0) {
       this.messages.push({ role: 'system', content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd) });
@@ -142,14 +160,6 @@ export class ReviewerHost {
     this.aborter = null;
   }
 
-  private async apiKeyFor(cfg: ReviewerConfig): Promise<string | null> {
-    if (cfg.provider === 'ollama') return 'ollama';
-    const envName = cfg.apiKeyEnv ?? (cfg.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY');
-    const key = process.env[envName];
-    if (!key) return null;
-    return key;
-  }
-
   private setStatus(status: ReviewerStatus, error?: string): void {
     this.status = status;
     this.opts.emit.status(status, error);
@@ -164,8 +174,11 @@ export class ReviewerHost {
     this.running = true;
     const aborter = new AbortController();
     this.aborter = aborter;
-    const cfg = await this.opts.getConfig();
-    const apiKey = (await this.apiKeyFor(cfg)) ?? '';
+    const res = this.resolved;
+    if (!res) {
+      this.running = false;
+      return;
+    }
     try {
       while (this.queue.length > 0) {
         const turn = this.queue.shift()!;
@@ -174,23 +187,23 @@ export class ReviewerHost {
         this.opts.emit.message(toEntry(turn));
 
         for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-          const res = await this.provider.complete({
-            model: cfg.model,
-            apiKey,
-            baseUrl: cfg.baseUrl ?? '',
+          const response = await this.provider.complete({
+            model: res.model,
+            apiKey: this.apiKey,
+            baseUrl: res.baseUrl,
             messages: this.messages,
             tools: this.tools.definitions(),
             signal: aborter.signal,
             onDelta: (delta) => this.opts.emit.stream(delta),
           });
-          this.messages.push({ role: 'assistant', content: res.text, toolCalls: res.toolCalls });
+          this.messages.push({ role: 'assistant', content: response.text, toolCalls: response.toolCalls });
           await this.persist();
           const entry = toEntry(this.messages[this.messages.length - 1]!);
           this.opts.emit.message(entry);
 
-          if (res.toolCalls.length === 0) break;
+          if (response.toolCalls.length === 0) break;
           let failed = false;
-          for (const call of res.toolCalls) {
+          for (const call of response.toolCalls) {
             const started = Date.now();
             this.opts.emit.toolCall({ name: call.name, args: call.args, state: 'start' });
             const result = await this.tools.run(call.name, call.args, this.opts.toolContext);

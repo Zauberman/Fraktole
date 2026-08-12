@@ -1,6 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { FraktoleMessage, ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../ipc.js';
 import { bridge, type Settings } from '../ipc.js';
+import {
+  DEFAULT_MODELS,
+  REVIEWER_MODEL_SUGGESTIONS,
+  resolveProvider,
+  type DetectedProvider,
+} from '../shared/reviewer-detect.js';
 
 interface ReviewerTabProps {
   sessionId: string;
@@ -34,7 +40,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [draft, setDraft] = useState({ provider: 'anthropic', model: 'claude-sonnet-4-5', apiKeyEnv: '', baseUrl: '' });
+  const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '' });
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // mount: load the persisted transcript, current config
@@ -45,9 +51,9 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     void bridge.getSettings().then((s) => {
       setSettings(s);
       setDraft({
-        provider: s.reviewer.provider,
-        model: s.reviewer.model,
-        apiKeyEnv: s.reviewer.apiKeyEnv ?? '',
+        apiKey: s.reviewer.apiKey ?? '',
+        provider: s.reviewer.provider ?? '',
+        model: s.reviewer.model ?? '',
         baseUrl: s.reviewer.baseUrl ?? '',
       });
     });
@@ -117,9 +123,28 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     setTools([]);
   };
 
+  // live provider resolution from the pasted key (same logic the harness uses)
+  const det = resolveProvider(draft.apiKey, {
+    baseUrl: draft.baseUrl.trim() || undefined,
+    providerHint: draft.provider || undefined,
+    modelHint: draft.model.trim() || undefined,
+  });
+  const derived: DetectedProvider =
+    det.adapter === 'openai' && (det.baseUrl.includes('deepseek') || draft.provider === 'deepseek')
+      ? 'deepseek'
+      : det.adapter;
+
   const saveConfig = (): void => {
     if (!settings) return;
-    const next = { ...settings, reviewer: { provider: draft.provider as Settings['reviewer']['provider'], model: draft.model.trim() || 'claude-sonnet-4-5', apiKeyEnv: draft.apiKeyEnv.trim() || undefined, baseUrl: draft.baseUrl.trim() || undefined } };
+    const next = {
+      ...settings,
+      reviewer: {
+        apiKey: draft.apiKey.trim() || undefined,
+        provider: (draft.provider || undefined) as Settings['reviewer']['provider'],
+        model: draft.model.trim() || undefined,
+        baseUrl: draft.baseUrl.trim() || undefined,
+      },
+    };
     void bridge.setSettings(next).then(() => {
       setSettings(next);
       setConfigOpen(false);
@@ -152,28 +177,42 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       {configOpen && (
         <section className="reviewer-config">
           <label>
-            provider
-            <select
-              value={draft.provider}
-              onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value }))}
-            >
-              <option value="anthropic">anthropic</option>
-              <option value="openai">openai</option>
-              <option value="ollama">ollama</option>
-            </select>
+            api key
+            <input
+              type="password"
+              value={draft.apiKey}
+              onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
+              placeholder="sk-…  (provider detected from the key)"
+              autoComplete="off"
+            />
           </label>
           <label>
             model
-            <input value={draft.model} onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))} />
+            <input
+              list="reviewer-models"
+              value={draft.model}
+              onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+              placeholder={DEFAULT_MODELS[derived]}
+            />
+            <datalist id="reviewer-models">
+              {REVIEWER_MODEL_SUGGESTIONS[derived].map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
           </label>
           <label>
-            apiKeyEnv
-            <input value={draft.apiKeyEnv} onChange={(e) => setDraft((d) => ({ ...d, apiKeyEnv: e.target.value }))} placeholder="ANTHROPIC_API_KEY" />
-          </label>
-          <label>
-            baseUrl
+            baseUrl (optional)
             <input value={draft.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))} placeholder="(provider default)" />
           </label>
+          <div className="reviewer-config-provider">
+            <span className="orch-judge-status orch-judge-running">{derived}</span>
+            {det.ambiguous && (
+              <select value={draft.provider} onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value }))}>
+                <option value="">openai (default)</option>
+                <option value="deepseek">deepseek</option>
+              </select>
+            )}
+          </div>
           <div className="reviewer-config-actions">
             <button type="button" className="orch-btn" onClick={saveConfig}>
               save &amp; restart
