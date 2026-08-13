@@ -1076,4 +1076,87 @@ describe('ReviewerHost', () => {
     expect(host.status).toBe('running');
     expect(host.conversation.some((e) => e.content.includes('watch this'))).toBe(true);
   });
+
+  it('loads legacy poisoned history (empty toolCalls) without leaking it to the provider', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-poison-${process.pid}-${++hostSeq}`);
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    // exactly the shape the old build persisted: assistant replies carrying
+    // "toolCalls": []
+    const poison = [
+      { role: 'user', content: 'do you see the agents' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'c1', name: 'list_tiles', args: {} }] },
+      { role: 'tool', content: '[{"tileId":"tile-1"}]', toolCallId: 'c1' },
+      { role: 'assistant', content: 'yes both agents are up', toolCalls: [] },
+      { role: 'user', content: 'next' },
+    ];
+    await writeFile(join(dir, 'conversation.jsonl'), poison.map((l) => JSON.stringify(l)).join('\n'), 'utf8');
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir });
+    await host.start();
+    await host.prompt('first message');
+    await settle(60);
+    expect(host.status).toBe('running');
+    const sent = provider.complete.mock.calls[0]![0] as { messages: ProviderMsg[] };
+    const dirty = sent.messages.filter((m) => m.toolCalls !== undefined && m.toolCalls.length === 0);
+    expect(dirty).toEqual([]);
+    // the repaired history is preserved: the real tool turn survives
+    expect(sent.messages.some((m) => m.role === 'assistant' && (m.toolCalls ?? []).length === 1)).toBe(true);
+  });
+
+  it('persists every tool result of a multi-call turn (no lossy tail)', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-multicall-${process.pid}-${++hostSeq}`);
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const recorder = new TileRecorder();
+    const { host } = makeHost(
+      [
+        { text: '', toolCalls: [{ id: 'a', name: 'list_dir', args: { path: '/tmp' } }, { id: 'b', name: 'search_files', args: { pattern: 'x' } }] },
+      ],
+      recorder,
+      { dir },
+    );
+    await host.start();
+    await host.prompt('go');
+    await settle(80);
+    const { readFile } = await import('node:fs/promises');
+    const raw = await readFile(join(dir, 'conversation.jsonl'), 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l) as ProviderMsg);
+    const toolLines = lines.filter((l) => l.role === 'tool');
+    expect(toolLines.length).toBe(2);
+    expect(toolLines.map((t) => t.toolCallId)).toEqual(['a', 'b']);
+  });
+
+  it('repairs an incomplete tool-call turn on load (crash-lost responses)', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-repair-${process.pid}-${++hostSeq}`);
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    // assistant demanded three tools but only one response made it to disk
+    const broken = [
+      { role: 'user', content: 'launch agents' },
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          { id: 'a1', name: 'list_tiles', args: {} },
+          { id: 'a2', name: 'spawn_agent', args: { kind: 'opencode' } },
+          { id: 'a3', name: 'send_message', args: { to: 'agent-1' } },
+        ],
+      },
+      { role: 'tool', content: 'done', toolCallId: 'a3' },
+      { role: 'user', content: 'next turn' },
+    ];
+    await writeFile(join(dir, 'conversation.jsonl'), broken.map((l) => JSON.stringify(l)).join('\n'), 'utf8');
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir });
+    await host.start();
+    await host.prompt('first message');
+    await settle(60);
+    const sent = provider.complete.mock.calls[0]![0] as { messages: ProviderMsg[] };
+    const roles = sent.messages.map((m) => m.role);
+    expect(roles).not.toContain('tool');
+    const assistants = sent.messages.filter((m) => m.role === 'assistant');
+    expect(assistants.every((a) => (a.toolCalls ?? []).length === 0)).toBe(true);
+    expect(sent.messages.map((m) => m.content)).toContain('first message');
+  });
 });

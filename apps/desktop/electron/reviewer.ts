@@ -145,6 +145,9 @@ export class ReviewerHost {
   /** One in-flight start() shared by concurrent callers (tab visits, rapid
    *  prompts) so the conversation can never be double-loaded. */
   private startPromise: Promise<boolean> | null = null;
+  /** How many conversation lines are already on disk (the prefix of
+   *  this.messages that has been persisted). */
+  private persistedCount = 0;
   /** The in-flight ask_user question; the tool promise resolves on the
    *  user's answer (or rejects on restart/stop). At most one — the loop is
    *  exclusive. */
@@ -625,20 +628,64 @@ export class ReviewerHost {
     for (const line of raw.split('\n')) {
       if (line.trim().length === 0) continue;
       try {
-        loaded.push(JSON.parse(line) as ProviderMsg);
+        const msg = JSON.parse(line) as ProviderMsg;
+        // heal legacy history: providers reject empty toolCalls arrays
+        if (msg.toolCalls && msg.toolCalls.length === 0) msg.toolCalls = undefined;
+        loaded.push(msg);
       } catch {
         // a corrupt line must not hide the rest
       }
     }
-    this.messages = loaded;
+    this.persistedCount = loaded.length;
+    this.messages = this.repairSequence(loaded);
   }
 
+  /** Drops structurally-broken turns from a loaded conversation: an
+   *  assistant message whose tool_calls lack their tool responses (a crash
+   *  or an old build that persisted only the last result) would be rejected
+   *  by every provider. Orphan tool messages go with it. */
+  private repairSequence(msgs: ProviderMsg[]): ProviderMsg[] {
+    const out: ProviderMsg[] = [];
+    let i = 0;
+    while (i < msgs.length) {
+      const m = msgs[i]!;
+      if (m.role === 'assistant') {
+        const ids = (m.toolCalls ?? []).map((c) => c.id);
+        const covered = new Set<string>();
+        let j = i + 1;
+        while (j < msgs.length && msgs[j]!.role === 'tool') {
+          if (msgs[j]!.toolCallId) covered.add(msgs[j]!.toolCallId!);
+          j += 1;
+        }
+        const complete = ids.length === 0 || ids.every((id) => covered.has(id));
+        if (complete) {
+          out.push(m);
+          for (let k = i + 1; k < j; k++) out.push(msgs[k]!);
+        }
+        i = j;
+      } else if (m.role === 'tool') {
+        // orphan tool result — no assistant owner kept
+        i += 1;
+      } else {
+        out.push(m);
+        i += 1;
+      }
+    }
+    return out;
+  }
+
+  /** Appends every not-yet-persisted message (never just the last one — a
+   *  multi-call turn's tool results must all survive a restart). The system
+   *  prompt is memory-only, as before. */
   private async persist(): Promise<void> {
-    const last = this.messages[this.messages.length - 1];
-    if (!last) return;
+    if (this.persistedCount >= this.messages.length) return;
+    const fresh = this.messages.slice(this.persistedCount);
+    const lines = fresh.filter((m) => m.role !== 'system').map((m) => JSON.stringify(m));
+    this.persistedCount = this.messages.length;
+    if (lines.length === 0) return;
     try {
       await mkdir(dirname(this.conversationFile), { recursive: true });
-      await appendFile(this.conversationFile, `${JSON.stringify(last)}\n`, 'utf8');
+      await appendFile(this.conversationFile, `${lines.join('\n')}\n`, 'utf8');
     } catch (err) {
       this.opts.logger?.(`reviewer: persist failed (${(err as Error).message})`);
     }
@@ -649,6 +696,7 @@ export class ReviewerHost {
       await mkdir(dirname(this.conversationFile), { recursive: true });
       const fs = await import('node:fs/promises');
       await fs.truncate(this.conversationFile);
+      this.persistedCount = 0;
     } catch {
       // nothing to clear
     }

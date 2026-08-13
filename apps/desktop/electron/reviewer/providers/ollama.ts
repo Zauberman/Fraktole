@@ -11,26 +11,36 @@ import {
 const DEFAULT_BASE = 'http://localhost:11434';
 
 function toMessages(messages: ProviderMsg[]): unknown[] {
-  return messages.map((m) => {
+  const out = messages.map((m) => {
     switch (m.role) {
       case 'system':
         return { role: 'system', content: m.content };
       case 'user':
         return { role: 'user', content: m.content };
       case 'assistant': {
-        const out: Record<string, unknown> = { role: 'assistant', content: m.content };
+        const msg: Record<string, unknown> = { role: 'assistant', content: m.content };
         // never send an empty tool_calls array (same contract as openai)
         if (m.toolCalls && m.toolCalls.length > 0) {
-          out.tool_calls = m.toolCalls.map((c) => ({
+          msg.tool_calls = m.toolCalls.map((c) => ({
             function: { name: c.name, arguments: JSON.stringify(c.args) },
           }));
         }
-        return out;
+        return msg;
       }
       case 'tool':
         return { role: 'tool', content: m.content };
     }
   });
+  // last-chance wire guard: no message may ever carry an empty tool_calls
+  // array, whatever produced it
+  for (const m of out) {
+    const calls = (m as { tool_calls?: unknown }).tool_calls;
+    if (Array.isArray(calls) && calls.length === 0) {
+      console.log(`ollama adapter: stripped empty tool_calls on role=${(m as { role?: string }).role}`);
+      delete (m as { tool_calls?: unknown }).tool_calls;
+    }
+  }
+  return out;
 }
 
 function toTools(tools: CompleteOpts['tools']): unknown[] {

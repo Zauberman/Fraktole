@@ -71,8 +71,8 @@ const mock = http.createServer((req, res) => {
         // the contract guard: OpenAI rejects "tool_calls": [] — a request
         // carrying one is a regression of the exact bug being fixed
         for (const m of j.messages ?? []) {
-          if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length === 0) {
-            violation = `assistant message carries an empty tool_calls array`;
+          if (Array.isArray(m.tool_calls) && m.tool_calls.length === 0) {
+            violation = `${m.role ?? '?'} message carries an empty tool_calls array`;
             break;
           }
         }
