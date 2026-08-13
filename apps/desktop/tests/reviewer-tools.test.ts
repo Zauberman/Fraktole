@@ -102,3 +102,46 @@ describe('search_files', () => {
     expect(out).toContain('error: bad regex');
   });
 });
+
+describe('send_keystroke + type_into_tile', () => {
+  it('maps named combos to escape sequences and passes literals through', async () => {
+    const written: string[] = [];
+    const ctx: ReviewerToolContext = {
+      ...ctxFor('/tmp'),
+      tileOfAgent: (id) => (id === 'agent-1' ? 'tile-1' : null),
+      writeToAgent: async (_id, bytes) => {
+        written.push(bytes);
+        return 'sent';
+      },
+    };
+    const out = await tools.run('send_keystroke', { agentId: 'agent-1', keys: ['shift-tab', 'enter', 'custom'] }, ctx);
+    expect(out).toBe('sent');
+    expect(written).toEqual(['\x1b[Z\rcustom']);
+  });
+
+  it('type_into_tile sends the text verbatim and optionally presses enter', async () => {
+    const written: string[] = [];
+    const ctx: ReviewerToolContext = {
+      ...ctxFor('/tmp'),
+      writeToAgent: async (_id, bytes) => {
+        written.push(bytes);
+        return 'sent';
+      },
+    };
+    await tools.run('type_into_tile', { agentId: 'agent-1', text: 'yes' }, ctx);
+    await tools.run('type_into_tile', { agentId: 'agent-1', text: 'npx build', pressEnter: true }, ctx);
+    expect(written).toEqual(['yes', 'npx build\r']);
+  });
+
+  it('errors cleanly on unknown agents and missing arguments', async () => {
+    const ctx: ReviewerToolContext = {
+      ...ctxFor('/tmp'),
+      tileOfAgent: (id) => (id === 'agent-1' ? 'tile-1' : null),
+      writeToAgent: async (id) => (id === 'agent-1' ? 'sent' : `error: unknown agent ${id}`),
+    };
+    expect(await tools.run('send_keystroke', { agentId: 'ghost', keys: ['enter'] }, ctx)).toContain('error:');
+    expect(await tools.run('type_into_tile', { agentId: 'ghost', text: 'hi' }, ctx)).toContain('error:');
+    expect(await tools.run('send_keystroke', { agentId: 'agent-1', keys: [] }, ctx)).toContain('error:');
+    expect(await tools.run('type_into_tile', { agentId: '', text: '' }, ctx)).toContain('error:');
+  });
+});

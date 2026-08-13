@@ -10,6 +10,7 @@ import type {
   ReviewerStreamEvent,
   ReviewerTask,
   ReviewerToolCallEvent,
+  ReviewerUsageEvent,
 } from '../src/shared/ipc.js';
 import { resolveProvider, type ProviderResolution } from '../src/shared/reviewer-detect.js';
 import { sanitizeChatText } from '../src/shared/sanitize.js';
@@ -53,6 +54,8 @@ export interface ReviewerEmitter {
   message(entry: ReviewerEntry): void;
   goal(ev: ReviewerGoalEvent): void;
   question(ev: ReviewerQuestion): void;
+  /** Cumulative usage totals after a completed turn. */
+  usage(ev: ReviewerUsageEvent): void;
 }
 
 export interface ReviewerHostOpts {
@@ -70,6 +73,8 @@ export interface ReviewerHostOpts {
    *  tests. */
   maxRetries?: number;
   retryDelayMs?: number;
+  /** Override the per-model context budget (tokens) used by compaction. */
+  contextBudgetTokens?: number;
   /** injectable seams for tests */
   createProvider?: (name: string) => ProviderClient;
   tools?: ReviewerTools;
@@ -79,11 +84,29 @@ export interface ReviewerHostOpts {
 }
 
 const MAX_TOOL_ITERATIONS = 25;
-const COMPACT_THRESHOLD = 60_000;
 const TOOL_RESULT_CHARS = 20_000;
 const POLL_INTERVAL_MS_DEFAULT = 30_000;
 const MAX_COMPLETE_RETRIES = 1;
 const COMPLETE_RETRY_DELAY_MS = 2_000;
+
+/** Per-model context budgets (tokens) — compaction keeps the conversation
+ *  within 80% of the budget. Unknown openai-compatible models default to
+ *  128K. */
+const CONTEXT_BUDGETS: Array<[string, number]> = [
+  ['claude', 200_000],
+  ['gpt-4o', 128_000],
+  ['deepseek', 128_000],
+  ['qwen2.5', 32_000],
+];
+
+function contextBudgetTokens(model: string, override?: number): number {
+  if (override !== undefined) return override;
+  const m = model.toLowerCase();
+  for (const [prefix, tokens] of CONTEXT_BUDGETS) {
+    if (m.includes(prefix)) return tokens;
+  }
+  return 128_000;
+}
 /** With an active goal, force a wake every N silent polls (5 min at 30s) so
  *  a stalled loop can never die quietly. */
 const GOAL_RECHECK_POLLS = 10;
@@ -148,6 +171,22 @@ export class ReviewerHost {
   /** How many conversation lines are already on disk (the prefix of
    *  this.messages that has been persisted). */
   private persistedCount = 0;
+  /** Per-turn token cost (marginal), oldest first — aligned with the turn
+   *  order so compaction can subtract exactly what it drops. */
+  private turnTokens: number[] = [];
+  /** Total tokens across the whole conversation from the last usage event
+   *  (used to derive per-turn marginals when the provider reports usage). */
+  private lastUsageTotal = 0;
+  /** Marginal tokens of the turn whose usage event just arrived (consumed
+   *  by recordTurnCost at the turn boundary). */
+  private pendingUsageDelta: number | null = null;
+  /** A /compact issued mid-turn: applied at the next turn boundary instead
+   *  of splicing the conversation while the model is streaming. */
+  private pendingCompact = false;
+  /** True when the most recently processed turn was the watchdog's own
+   *  compaction wake — used to never chain wakes back-to-back (an
+   *  over-budget conversation would otherwise wake forever). */
+  private lastTurnWasWake = false;
   /** The in-flight ask_user question; the tool promise resolves on the
    *  user's answer (or rejects on restart/stop). At most one — the loop is
    *  exclusive. */
@@ -472,8 +511,9 @@ export class ReviewerHost {
     }
   }
 
-  /** Manual compaction pass (the /compact command): drops old tool rows
-   *  regardless of the size budget and tells the model context was trimmed. */
+  /** Manual compaction pass (the /compact command): forces a turn-boundary
+   *  compaction now, or defers it to the next turn boundary if the model is
+   *  mid-run. */
   compact(): void {
     this.compactIfNeeded(true);
   }
@@ -505,7 +545,9 @@ export class ReviewerHost {
     }
     try {
       while (this.queue.length > 0) {
+        const turnStart = this.messages.length;
         const turn = this.queue.shift()!;
+        this.lastTurnWasWake = typeof turn.content === 'string' && turn.content.includes('context was compacted');
         this.messages.push(turn);
         await this.persist();
         this.opts.emit.message(toEntry(turn));
@@ -536,6 +578,16 @@ export class ReviewerHost {
           };
           if (response.toolCalls.length > 0) assistant.toolCalls = response.toolCalls;
           this.messages.push(assistant);
+          if (response.usage) {
+            const total = response.usage.inputTokens + response.usage.cachedTokens + response.usage.outputTokens;
+            this.pendingUsageDelta = Math.max(1, total - this.lastUsageTotal);
+            this.lastUsageTotal = total;
+            this.state.usage.inputTokens += response.usage.inputTokens;
+            this.state.usage.cachedTokens += response.usage.cachedTokens;
+            this.state.usage.outputTokens += response.usage.outputTokens;
+            await persistState(this.stateFile, this.state, this.opts.logger);
+            this.opts.emit.usage({ at: Date.now(), ...this.state.usage });
+          }
           await this.persist();
           const entry = toEntry(this.messages[this.messages.length - 1]!);
           this.opts.emit.message(entry);
@@ -574,7 +626,8 @@ export class ReviewerHost {
           await this.persist();
           if (failed) break; // don't spin on a broken tool
         }
-        this.compactIfNeeded();
+        this.recordTurnCost(turnStart);
+        this.compactIfNeeded(false, true);
       }
     } catch (err) {
       if (!aborter.signal.aborted) {
@@ -583,37 +636,77 @@ export class ReviewerHost {
     } finally {
       this.running = false;
       this.aborter = null;
+      // a /compact deferred mid-turn lands here when the run ends early
+      // (abort/error) without reaching the turn-boundary call
+      if (this.pendingCompact) this.compactIfNeeded(false, true);
     }
   }
 
-  /** Drops old tool rows when the conversation outgrows the budget (or on a
-   *  forced /compact pass). Auto-compaction drops oldest-first; a forced
-   *  pass never drops the most recent user turn. */
-  private compactIfNeeded(force = false): void {
-    let total = 0;
-    for (const m of this.messages) total += m.content.length + (m.thinking?.length ?? 0);
-    if (!force && total <= COMPACT_THRESHOLD) return;
-    let stopAt = Number.MAX_SAFE_INTEGER;
-    if (force) {
-      for (let i = this.messages.length - 1; i >= 0; i--) {
-        if (this.messages[i]!.role === 'user') {
-          stopAt = i;
-          break;
-        }
-      }
+  /** Records the token cost of the turn that just finished (messages from
+   *  `turnStart` onward). Uses the provider's real usage marginal when
+   *  available (set by recordUsage, Phase 2); falls back to chars/4. */
+  private recordTurnCost(turnStart: number): void {
+    if (this.lastUsageTotal > 0 && this.pendingUsageDelta !== null) {
+      this.turnTokens.push(Math.max(1, this.pendingUsageDelta));
+      this.pendingUsageDelta = null;
+      return;
     }
+    let chars = 0;
+    for (let i = turnStart; i < this.messages.length; i++) {
+      const m = this.messages[i]!;
+      chars += m.content.length + (m.thinking?.length ?? 0);
+    }
+    this.turnTokens.push(Math.max(1, Math.ceil(chars / 4)));
+  }
+
+  /** Estimated total tokens currently in the conversation. */
+  private estimateTokens(): number {
+    let total = 400; // system prompt constant
+    for (const t of this.turnTokens) total += t;
+    return total;
+  }
+
+  /** Drops whole oldest turns while the conversation exceeds 80% of the
+   *  model's context budget (or on a forced /compact pass). Turns are
+   *  removed as complete units — an assistant's tool responses can never be
+   *  orphaned, so the conversation stays API-valid at every step. The two
+   *  newest turns are always kept. A /compact issued mid-turn is deferred to
+   *  the next turn boundary. */
+  private compactIfNeeded(force = false, atBoundary = false): void {
+    if (this.running && !atBoundary) {
+      if (force) this.pendingCompact = true;
+      return;
+    }
+    const doForce = force || this.pendingCompact;
+    this.pendingCompact = false;
+    const budget = Math.floor(contextBudgetTokens(this.resolved?.model ?? '', this.opts.contextBudgetTokens) * 0.8);
     let dropped = 0;
-    while (this.messages.length > 4 && 1 < stopAt && (force || total > COMPACT_THRESHOLD)) {
-      const victim = this.messages[1]!;
-      total -= victim.content.length + (victim.thinking?.length ?? 0);
-      this.messages.splice(1, 1);
-      stopAt -= 1;
+    for (;;) {
+      const userIdx: number[] = [];
+      this.messages.forEach((m, i) => {
+        if (m.role === 'user') userIdx.push(i);
+      });
+      if (userIdx.length <= 2) break;
+      if (!doForce && this.estimateTokens() <= budget) break;
+      const start = userIdx[0]!;
+      const end = userIdx[1]!;
+      this.messages.splice(start, end - start);
+      this.turnTokens.shift();
       dropped += 1;
     }
     if (dropped > 0) {
-      const note: ProviderMsg = { role: 'system', content: `[context compacted: ${dropped} old exchanges dropped]` };
-      this.messages.splice(1, 0, note);
+      // role user + position after the first user turn: the note joins the
+      // oldest kept turn's content and never looks like a second system
+      const note: ProviderMsg = {
+        role: 'user',
+        content: `[context compacted: ${dropped} exchanges dropped — your goal and ledger are unchanged; continue]`,
+      };
+      this.messages.splice(2, 0, note);
       this.opts.emit.message(toEntry(note));
+      if (this.state.goal?.state === 'active' && !this.lastTurnWasWake) {
+        this.queue.push({ role: 'user', content: this.withStateBlock('[watchdog] context was compacted — re-check progress') });
+        this.drainQueue();
+      }
     }
   }
 

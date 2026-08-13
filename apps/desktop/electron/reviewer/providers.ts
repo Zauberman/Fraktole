@@ -46,11 +46,21 @@ export interface CompleteOpts {
   onDelta: (text: string, thinking?: string) => void;
 }
 
+/** Token usage of one request/response pair (from the provider's usage
+ *  block; providers without usage leave it undefined). */
+export interface ProviderUsage {
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+}
+
 export interface ProviderResult {
   text: string;
   toolCalls: ReviewerToolCall[];
   /** Full reasoning output of the turn ('' when the provider sent none). */
   thinking: string;
+  /** Token usage when the provider reports it (streamed or final). */
+  usage?: ProviderUsage;
 }
 
 export interface ProviderClient {

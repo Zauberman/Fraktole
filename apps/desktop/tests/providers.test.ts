@@ -202,6 +202,38 @@ describe('OpenAIProvider', () => {
       { id: 'c1', type: 'function', function: { name: 'read_tile', arguments: '{"agentId":"a1"}' } },
     ]);
   });
+
+  it('asks for usage only on official endpoints and parses the final chunk', async () => {
+    // official deepseek endpoint: stream_options + usage parsed
+    stubFetch(
+      sseStream([
+        '{"choices":[{"delta":{"content":"x"}}]}',
+        '{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":40}}}',
+        '[DONE]',
+      ]),
+    );
+    const res = await new OpenAIProvider().complete({ ...baseOpts(), baseUrl: 'https://api.deepseek.com' });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { stream_options?: unknown };
+    expect(body.stream_options).toEqual({ include_usage: true });
+    expect(res.usage).toEqual({ inputTokens: 100, cachedTokens: 40, outputTokens: 7 });
+
+    // deepseek's own cache fields
+    stubFetch(
+      sseStream([
+        '{"choices":[],"usage":{"prompt_tokens":90,"completion_tokens":3,"prompt_cache_hit_tokens":60}}',
+        '[DONE]',
+      ]),
+    );
+    const res2 = await new OpenAIProvider().complete({ ...baseOpts(), baseUrl: 'https://api.deepseek.com' });
+    expect(res2.usage?.cachedTokens).toBe(60);
+
+    // custom endpoint: no stream_options, no usage
+    stubFetch(sseStream(['{"choices":[{"delta":{"content":"y"}}]}', '[DONE]']));
+    const res3 = await new OpenAIProvider().complete({ ...baseOpts(), baseUrl: 'https://gateway.example.com/v1' });
+    const body3 = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { stream_options?: unknown };
+    expect(body3.stream_options).toBeUndefined();
+    expect(res3.usage).toBeUndefined();
+  });
 });
 
 describe('AnthropicProvider', () => {
@@ -289,6 +321,21 @@ describe('AnthropicProvider', () => {
     expect(blocks.length).toBeGreaterThan(0);
     expect(blocks[0]!.type).toBe('text');
   });
+
+  it('parses usage from message_start and message_delta', async () => {
+    stubFetch(
+      sseStream([
+        '{"type":"message_start","message":{"usage":{"input_tokens":200,"cache_read_input_tokens":80,"cache_creation_input_tokens":10}}}',
+        '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}',
+        '{"type":"content_block_stop","index":0}',
+        '{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}',
+        '{"type":"message_stop"}',
+      ]),
+    );
+    const res = await new AnthropicProvider().complete(baseOpts());
+    expect(res.usage).toEqual({ inputTokens: 200, cachedTokens: 90, outputTokens: 25 });
+  });
 });
 
 describe('OllamaProvider', () => {
@@ -324,6 +371,17 @@ describe('OllamaProvider', () => {
     });
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { messages: Array<{ tool_calls?: unknown }> };
     expect('tool_calls' in body.messages[1]!).toBe(false);
+  });
+
+  it('parses eval counts from the final done chunk', async () => {
+    stubFetch(
+      ndjsonStream([
+        '{"message":{"role":"assistant","content":"hi"},"done":false}',
+        '{"message":{"role":"assistant","content":" there"},"done":true,"prompt_eval_count":500,"eval_count":42}',
+      ]),
+    );
+    const res = await new OllamaProvider().complete(baseOpts());
+    expect(res.usage).toEqual({ inputTokens: 500, cachedTokens: 0, outputTokens: 42 });
   });
 
   it('captures message.thinking as thinking', async () => {

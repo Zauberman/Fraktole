@@ -16,6 +16,8 @@ import type {
   ReviewerSpawnRequest,
   ReviewerStatus,
   ReviewerStreamEvent,
+  ReviewerUsageEvent,
+  RemoteStatus,
   TestPageState,
   ReviewerToolCallEvent,
   SendMessageArgs,
@@ -44,6 +46,8 @@ export type {
   ReviewerSpawnRequest,
   ReviewerStatus,
   ReviewerStreamEvent,
+  ReviewerUsageEvent,
+  RemoteStatus,
   TestPageState,
   ReviewerToolCallEvent,
   SendMessageArgs,
@@ -97,6 +101,7 @@ export interface FraktoleBridge {
   onReviewerMessage(sessionId: string, cb: (entry: ReviewerEntry) => void): () => void;
   setReviewerGoal(sessionId: string, text: string | null): Promise<void>;
   onReviewerGoal(sessionId: string, cb: (ev: ReviewerGoalEvent) => void): () => void;
+  onReviewerUsage(sessionId: string, cb: (ev: ReviewerUsageEvent) => void): () => void;
   listReviewerModels(opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]>;
   onReviewerQuestion(sessionId: string, cb: (ev: ReviewerQuestion) => void): () => void;
   answerReviewerQuestion(sessionId: string, askId: string, answer: string): Promise<void>;
@@ -122,6 +127,11 @@ export interface FraktoleBridge {
   readFile(path: string): Promise<{ content: string; size: number }>;
   writeFile(path: string, content: string): Promise<void>;
   statFile(path: string): Promise<FsStat>;
+  getRemoteStatus(): Promise<RemoteStatus>;
+  setRemoteEnabled(enabled: boolean): Promise<RemoteStatus>;
+  setRemotePort(port: number): Promise<RemoteStatus>;
+  revokeRemoteDevice(deviceId: string): Promise<boolean>;
+  onRemoteStatus(cb: (status: RemoteStatus) => void): () => void;
 }
 
 export const bridge: FraktoleBridge = window.fraktole;

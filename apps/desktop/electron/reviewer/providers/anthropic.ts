@@ -5,6 +5,7 @@ import {
   type ProviderClient,
   type ProviderMsg,
   type ProviderResult,
+  type ProviderUsage,
   type ReviewerToolCall,
 } from '../providers.js';
 
@@ -86,6 +87,7 @@ export class AnthropicProvider implements ProviderClient {
 
     let text = '';
     let thinking = '';
+    let usage: ProviderUsage | undefined;
     const calls = new Map<string, ReviewerToolCall>();
     let openBlock: { call: ReviewerToolCall; raw: string } | null = null;
 
@@ -94,8 +96,23 @@ export class AnthropicProvider implements ProviderClient {
         type?: string;
         content_block?: { type?: string; id?: string; name?: string; thinking?: string };
         delta?: { type?: string; text?: string; thinking?: string; partial_json?: string };
+        message?: { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
+        usage?: { output_tokens?: number };
       };
       switch (ev.type) {
+        case 'message_start':
+          if (ev.message?.usage) {
+            usage = {
+              inputTokens: ev.message.usage.input_tokens ?? 0,
+              cachedTokens: (ev.message.usage.cache_read_input_tokens ?? 0) + (ev.message.usage.cache_creation_input_tokens ?? 0),
+              outputTokens: 0,
+            };
+          }
+          break;
+        case 'message_delta':
+        case 'message_stop':
+          if (ev.usage?.output_tokens && usage) usage.outputTokens = ev.usage.output_tokens;
+          break;
         case 'content_block_start':
           if (ev.content_block?.type === 'tool_use') {
             openBlock = {
@@ -129,7 +146,7 @@ export class AnthropicProvider implements ProviderClient {
       }
     }
 
-    return { text, toolCalls: [...calls.values()], thinking };
+    return { text, toolCalls: [...calls.values()], thinking, usage };
   }
 }
 

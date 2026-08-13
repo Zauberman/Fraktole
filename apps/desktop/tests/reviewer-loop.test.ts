@@ -9,7 +9,7 @@ import { TileRecorder } from '../electron/tile-recorder.js';
 import type { ProviderClient, ProviderMsg } from '../electron/reviewer/providers.js';
 
 type ScriptEntry =
-  | { text: string; toolCalls: ProviderMsg['toolCalls']; thinking?: string }
+  | { text: string; toolCalls: ProviderMsg['toolCalls']; thinking?: string; usage?: { inputTokens: number; cachedTokens: number; outputTokens: number } }
   | { hang: boolean }
   | { fail: boolean };
 
@@ -27,7 +27,12 @@ class FakeProvider implements ProviderClient {
       if (entry && 'fail' in entry) {
         return Promise.reject(new Error('provider boom'));
       }
-      return Promise.resolve({ text: entry.text, toolCalls: entry.toolCalls ?? [], thinking: entry.thinking ?? '' });
+      return Promise.resolve({
+        text: entry.text,
+        toolCalls: entry.toolCalls ?? [],
+        thinking: entry.thinking ?? '',
+        ...(entry.usage ? { usage: entry.usage } : {}),
+      });
     });
   }
 }
@@ -59,7 +64,7 @@ function ctxFor(recorder: TileRecorder, opts: Partial<ReviewerToolContext> = {})
 }
 
 let hostSeq = 0;
-function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number }> = {}) {
+function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; contextBudgetTokens: number }> = {}) {
   const dir = extra.dir ?? join(tmpdir(), `fraktole-reviewer-host-${process.pid}-${++hostSeq}`);
   const provider = new FakeProvider(script);
   const events: string[] = [];
@@ -73,9 +78,13 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
     toolContext: ctxFor(recorder),
     createProvider: () => provider,
     retryDelayMs: extra.retryDelayMs ?? 1,
+    contextBudgetTokens: extra.contextBudgetTokens,
     conversationFile: extra.dir ? join(extra.dir, 'conversation.jsonl') : uniqueConversationFile(),
     emit: {
-      status: (s) => events.push(`status:${s}`),
+      status: (s, e) => {
+        events.push(`status:${s}`);
+        if (e) events.push(`status-error:${e}`);
+      },
       stream: (ev) => events.push(`stream:${ev.delta}${ev.thinking ? '|think:' + ev.thinking : ''}`),
       toolCall: (ev) => events.push(`tool:${ev.name}:${ev.state}`),
       message: () => events.push('msg'),
@@ -84,6 +93,7 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
         asks.push({ id: ev.askId, kind: ev.kind, agentId: ev.agentId });
         events.push(`question:${ev.kind}`);
       },
+      usage: (ev) => events.push(`usage:${ev.inputTokens}:${ev.cachedTokens}:${ev.outputTokens}`),
     },
   });
   return { host, provider, events, asks };
@@ -208,7 +218,7 @@ describe('ReviewerHost', () => {
       toolContext: ctx,
       createProvider: () => provider,
       conversationFile: join(dir, 'conversation.jsonl'),
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     await host.prompt('delegate');
@@ -232,7 +242,7 @@ describe('ReviewerHost', () => {
       toolContext: ctxFor(recorder),
       createProvider: () => provider,
       retryDelayMs: 1,
-      emit: { status: (s) => events.push(`status:${s}`), stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: (s) => events.push(`status:${s}`), stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     await host.prompt('x');
@@ -288,7 +298,7 @@ describe('ReviewerHost', () => {
     expect(users.join(' ')).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
   });
 
-  it('forced compact drops old exchanges but keeps the last user turn', async () => {
+  it('forced compact drops whole oldest turns but keeps the two newest', async () => {
     const recorder = recorderWith('x'.repeat(100));
     const script: ScriptEntry[] = [];
     for (let i = 0; i < 10; i++) {
@@ -296,12 +306,15 @@ describe('ReviewerHost', () => {
     }
     script.push({ text: 'done', toolCalls: [] });
     script.push({ text: 'again', toolCalls: [] });
+    script.push({ text: 'third', toolCalls: [] });
     const { host } = makeHost(script, recorder);
     await host.start();
     await host.prompt('dig deep');
     await settle(300);
     await host.prompt('and again');
-    await settle(100);
+    await settle(60);
+    await host.prompt('third');
+    await settle(60);
     const before = host.conversation.length;
     expect(before).toBeGreaterThan(10);
     host.compact();
@@ -309,25 +322,38 @@ describe('ReviewerHost', () => {
     const after = host.conversation;
     expect(after.length).toBeLessThan(before);
     expect(after.some((e) => e.content.includes('context compacted'))).toBe(true);
-    // the most recent user turn survives
-    const lastUser = [...after].reverse().find((e) => e.role === 'user');
-    expect(lastUser?.content).toBe('and again');
+    // the two newest turns survive (whole-turn floor)
+    const users = after.filter((e) => e.role === 'user').map((e) => e.content);
+    expect(users).toContain('and again');
+    expect(users).toContain('third');
+    // whole turns only: no tool message without its assistant owner
+    for (let i = 1; i < after.length; i++) {
+      if (after[i]!.role === 'tool') expect(after[i - 1]!.role).toBe('assistant');
+    }
   });
 
   it('compacts the conversation when it outgrows the budget', async () => {
     const recorder = recorderWith('x'.repeat(3000));
     const script: ScriptEntry[] = [];
-    for (let i = 0; i < 24; i++) {
+    for (let i = 0; i < 6; i++) {
       script.push({ text: '', toolCalls: [{ id: `c${i}`, name: 'read_tile', args: { agentId: 'agent-1', tail: 2000 } }] });
     }
     script.push({ text: 'done', toolCalls: [] });
-    const { host } = makeHost(script, recorder);
+    script.push({ text: 'again', toolCalls: [] });
+    script.push({ text: 'third', toolCalls: [] });
+    const { host } = makeHost(script, recorder, { contextBudgetTokens: 500 });
     await host.start();
     await host.prompt('dig');
     await settle(400);
-    expect(host.conversation.length).toBeLessThan(51); // compaction dropped exchanges
-    expect(host.conversation[0]!.role).toBe('system');
-    expect(host.conversation.some((e) => e.content.includes('context compacted'))).toBe(true);
+    await host.prompt('again');
+    await settle(60);
+    await host.prompt('third');
+    await settle(60);
+    const conv = host.conversation;
+    expect(conv[0]!.role).toBe('system');
+    expect(conv.some((e) => e.content.includes('context compacted'))).toBe(true);
+    const users = conv.filter((e) => e.role === 'user').map((e) => e.content);
+    expect(users).toContain('third');
   });
 
   it('setGoal persists the ledger; read_state and update_task work through the real tools', async () => {
@@ -460,14 +486,17 @@ describe('ReviewerHost', () => {
       script.push({ text: '', toolCalls: [{ id: `c${i}`, name: 'read_tile', args: { agentId: 'agent-1', tail: 2000 } }] });
     }
     script.push({ text: 'done', toolCalls: [] });
-    script.push({ text: 'final answer', toolCalls: [] });
-    const { host } = makeHost(script, recorder);
+    script.push({ text: 'again', toolCalls: [] });
+    script.push({ text: 'third', toolCalls: [] });
+    const { host } = makeHost(script, recorder, { contextBudgetTokens: 3000 });
     await host.start();
     await host.setGoal('big dig');
     await settle(500);
-    expect(host.conversation.some((e) => e.content.includes('context compacted'))).toBe(true);
     await host.prompt('one more');
-    await settle(120);
+    await settle(60);
+    await host.prompt('third');
+    await settle(60);
+    expect(host.conversation.some((e) => e.content.includes('context compacted'))).toBe(true);
     const lastUser = [...host.conversation].reverse().find((e) => e.role === 'user');
     expect(lastUser?.content.startsWith('[goal: big dig (active)]')).toBe(true);
   });
@@ -551,7 +580,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctx,
       createProvider: () => provider,
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     await host.prompt('kill');
@@ -587,6 +616,7 @@ describe('ReviewerHost', () => {
         question: (ev) => {
           if (ev.kind === 'confirm-kill') host.answerQuestion(ev.askId, 'yes');
         },
+        usage: () => undefined,
       },
     });
     await host.start();
@@ -611,7 +641,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctx,
       createProvider: () => new FakeProvider([]),
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     expect(await host.killAgentNow('agent-1')).toBe('killed tile-1');
@@ -637,7 +667,7 @@ describe('ReviewerHost', () => {
       toolContext: ctx,
       createProvider: () => provider,
       conversationFile: join(dir, 'conversation.jsonl'),
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     await host.prompt('spin one up');
@@ -674,6 +704,7 @@ describe('ReviewerHost', () => {
         question: (ev) => {
           if (ev.kind === 'agent-kind') host.answerQuestion(ev.askId, 'opencode');
         },
+        usage: () => undefined,
       },
     });
     await host.start();
@@ -700,7 +731,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctx,
       createProvider: () => provider,
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     await host.prompt('spin one up');
@@ -726,7 +757,7 @@ describe('ReviewerHost', () => {
       toolContext: ctx,
       createProvider: () => provider,
       conversationFile: join(dir, 'conversation.jsonl'),
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     await host.prompt('set a goal');
@@ -758,6 +789,7 @@ describe('ReviewerHost', () => {
         message: () => undefined,
         goal: () => undefined,
         question: () => undefined,
+      usage: () => undefined,
       },
     });
     await host.start();
@@ -787,6 +819,7 @@ describe('ReviewerHost', () => {
         message: () => undefined,
         goal: () => undefined,
         question: () => undefined,
+      usage: () => undefined,
       },
     });
     await host.start();
@@ -807,7 +840,7 @@ describe('ReviewerHost', () => {
       toolContext: ctxFor(recorder),
       createProvider: () => new FakeProvider([{ text: 'x', toolCalls: [] }]),
       conversationFile: join(dir, 'conversation.jsonl'),
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await reloaded.start();
     expect(reloaded.conversation.find((e) => e.role === 'assistant')?.thinking).toBe('deep reasoning here');
@@ -843,7 +876,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctx,
       createProvider: () => provider,
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     await host.prompt('test the app');
@@ -870,7 +903,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctx,
       createProvider: () => provider,
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     await host.prompt('open');
@@ -918,7 +951,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctx,
       createProvider: () => provider,
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     await host.prompt('run everything');
@@ -944,7 +977,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctxFor(recorder),
       createProvider: () => provider,
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
     await host.prompt('x');
@@ -964,7 +997,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctxFor(recorder),
       createProvider: () => deepseek,
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await hostDs.start();
     await hostDs.prompt('x');
@@ -981,7 +1014,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctxFor(recorder),
       createProvider: () => custom,
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await hostCustom.start();
     await hostCustom.prompt('x');
@@ -1158,5 +1191,162 @@ describe('ReviewerHost', () => {
     const assistants = sent.messages.filter((m) => m.role === 'assistant');
     expect(assistants.every((a) => (a.toolCalls ?? []).length === 0)).toBe(true);
     expect(sent.messages.map((m) => m.content)).toContain('first message');
+  });
+
+  it('compaction never orphans tool messages (the aggressive-compaction 400)', async () => {
+    const recorder = new TileRecorder();
+    // a small token budget forces aggressive compaction on every turn
+    const { host, provider } = makeHost(
+      [
+        { text: '', toolCalls: [{ id: 'a1', name: 'list_tiles', args: {} }, { id: 'a2', name: 'spawn_agent', args: { kind: 'opencode' } }, { id: 'a3', name: 'send_message', args: { to: 'agent-1' } }] },
+        { text: 'turn two reply', toolCalls: [] },
+        { text: 'turn three reply', toolCalls: [] },
+      ],
+      recorder,
+      { contextBudgetTokens: 4 },
+    );
+    await host.start();
+    await host.prompt('launch agents');
+    await settle(80);
+    await host.prompt('second');
+    await settle(80);
+    await host.prompt('third');
+    await settle(80);
+    const sent = provider.complete.mock.calls[provider.complete.mock.calls.length - 1]![0] as { messages: ProviderMsg[] };
+    const msgs = sent.messages;
+    for (let i = 0; i < msgs.length; i++) {
+      const m = msgs[i]!;
+      if (m.role === 'tool') {
+        const owner = msgs[i - 1];
+        expect(owner?.role, `orphan tool at ${i}`).toBe('assistant');
+        expect((owner as ProviderMsg).toolCalls?.some((c) => c.id === m.toolCallId), `tool ${m.toolCallId} has no owner call`).toBe(true);
+      }
+      if (m.role === 'assistant' && (m.toolCalls ?? []).length > 0) {
+        const ids = (m.toolCalls ?? []).map((c) => c.id);
+        const covered = new Set<string>();
+        let j = i + 1;
+        while (j < msgs.length && msgs[j]!.role === 'tool') {
+          if (msgs[j]!.toolCallId) covered.add(msgs[j]!.toolCallId!);
+          j += 1;
+        }
+        expect(ids.every((id) => covered.has(id)), 'assistant tool_calls lack responses after compaction').toBe(true);
+      }
+    }
+    expect(host.status).toBe('running');
+  });
+
+  it('compaction keeps the two newest turns and inserts a user-role note', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost(
+      [
+        { text: '', toolCalls: [{ id: 't1', name: 'list_tiles', args: {} }] },
+        { text: 'two', toolCalls: [] },
+        { text: 'three', toolCalls: [] },
+        { text: 'four', toolCalls: [] },
+      ],
+      recorder,
+      { contextBudgetTokens: 4 },
+    );
+    await host.start();
+    for (const p of ['one', 'two', 'three', 'four']) {
+      await host.prompt(p);
+      await settle(60);
+    }
+    const sent = provider.complete.mock.calls[provider.complete.mock.calls.length - 1]![0] as { messages: ProviderMsg[] };
+    const contents = sent.messages.map((m) => m.content);
+    expect(contents).toContain('three');
+    expect(contents).toContain('four');
+    expect(contents.some((c) => c.includes('context compacted'))).toBe(true);
+    const note = sent.messages.find((m) => typeof m.content === 'string' && m.content.includes('context compacted'));
+    expect(note?.role).toBe('user');
+  });
+
+  it('/compact during an in-flight turn is deferred to the turn boundary', async () => {
+    const recorder = new TileRecorder();
+    // three completed turns first so the deferred forced compact has whole
+    // turns to drop when it lands
+    const { host, provider } = makeHost(
+      [
+        { text: 'one', toolCalls: [] },
+        { text: 'two', toolCalls: [] },
+        { text: 'three', toolCalls: [] },
+        { hang: true },
+        { text: 'done', toolCalls: [] },
+      ],
+      recorder,
+    );
+    await host.start();
+    await host.prompt('one');
+    await settle(50);
+    await host.prompt('two');
+    await settle(50);
+    await host.prompt('three');
+    await settle(50);
+    const p = host.prompt('long turn');
+    await settle(20);
+    host.compact();
+    await settle(20);
+    // still mid-run: nothing may have been spliced
+    const msgsBefore = (provider.complete.mock.calls[0]![0] as { messages: ProviderMsg[] }).messages;
+    expect(msgsBefore.some((m) => (m.content ?? '').includes('context compacted'))).toBe(false);
+    // abort the hang so the run ends; the deferred compact lands in finally
+    host.cancel();
+    await p.catch(() => undefined);
+    await settle(60);
+    expect(host.conversation.some((e) => (e.content ?? '').includes('context compacted'))).toBe(true);
+    expect(host.status).toBe('running');
+  });
+
+  it('goal-armed compaction auto-wakes the loop without a user prompt', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost(
+      [
+        { text: '', toolCalls: [{ id: 'g1', name: 'list_tiles', args: {} }] },
+        { text: 'wake', toolCalls: [] },
+        { text: 'again', toolCalls: [] },
+        { text: 'third', toolCalls: [] },
+        { text: 'final', toolCalls: [] },
+      ],
+      recorder,
+      { contextBudgetTokens: 4 },
+    );
+    await host.start();
+    await host.setGoal('ship the thing');
+    await settle(80);
+    await host.prompt('keep going');
+    await settle(60);
+    await host.prompt('third');
+    await settle(80);
+    expect(host.status).toBe('running');
+    // goal turn + 2 prompts + the automatic watchdog wake
+    expect(provider.complete.mock.calls.length).toBeGreaterThanOrEqual(4);
+    const last = provider.complete.mock.calls[provider.complete.mock.calls.length - 1]![0] as { messages: ProviderMsg[] };
+    expect(last.messages.some((m) => (m.content ?? '').includes('context was compacted'))).toBe(true);
+  });
+
+  it('accumulates usage per turn, emits it, and persists it in state.json', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-usage-${process.pid}-${++hostSeq}`);
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const recorder = new TileRecorder();
+    const { host, provider, events } = makeHost(
+      [
+        { text: 'one', toolCalls: [], usage: { inputTokens: 100, cachedTokens: 40, outputTokens: 20 } },
+        { text: 'two', toolCalls: [], usage: { inputTokens: 160, cachedTokens: 70, outputTokens: 30 } },
+      ],
+      recorder,
+      { dir },
+    );
+    await host.start();
+    await host.prompt('q1');
+    await settle(60);
+    await host.prompt('q2');
+    await settle(60);
+    expect(provider.complete.mock.calls.length).toBe(2);
+    const usageEvents = events.filter((e) => e.startsWith('usage:'));
+    expect(usageEvents).toEqual(['usage:100:40:20', 'usage:260:110:50']);
+    const { readFile } = await import('node:fs/promises');
+    const raw = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')) as ReviewerState;
+    expect(raw.usage).toEqual({ inputTokens: 260, cachedTokens: 110, outputTokens: 50 });
   });
 });

@@ -13,10 +13,12 @@ import {
   type PtySpawnResult,
   type ReviewerEntry,
   type ReviewerGoalEvent,
+  type ReviewerUsageEvent,
   type ReviewerQuestion,
   type ReviewerSpawnRequest,
   type ReviewerStreamEvent,
   type ReviewerToolCallEvent,
+  type RemoteStatus,
   type SendMessageArgs,
   type SessionFile,
   type SessionSavePayload,
@@ -146,6 +148,13 @@ const api = {
     ipcRenderer.on(IPC.reviewerGoal, listener);
     return () => ipcRenderer.removeListener(IPC.reviewerGoal, listener);
   },
+  onReviewerUsage: (sessionId: string, cb: (ev: ReviewerUsageEvent) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, ev: ReviewerUsageEvent): void => {
+      if (sid === sessionId) cb(ev);
+    };
+    ipcRenderer.on(IPC.reviewerUsage, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerUsage, listener);
+  },
   listReviewerModels: (opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]> =>
     ipcRenderer.invoke(IPC.reviewerListModels, opts),
   onReviewerQuestion: (sessionId: string, cb: (ev: ReviewerQuestion) => void): (() => void) => {
@@ -217,6 +226,18 @@ const api = {
   writeFile: (path: string, content: string): Promise<void> =>
     ipcRenderer.invoke(IPC.fsWriteFile, path, content),
   statFile: (path: string): Promise<FsStat> => ipcRenderer.invoke(IPC.fsStat, path),
+
+  getRemoteStatus: (): Promise<RemoteStatus> => ipcRenderer.invoke(IPC.remoteGetState),
+  setRemoteEnabled: (enabled: boolean): Promise<RemoteStatus> =>
+    ipcRenderer.invoke(IPC.remoteSetEnabled, enabled),
+  setRemotePort: (port: number): Promise<RemoteStatus> => ipcRenderer.invoke(IPC.remoteSetPort, port),
+  revokeRemoteDevice: (deviceId: string): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.remoteRevokeDevice, deviceId),
+  onRemoteStatus: (cb: (status: RemoteStatus) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, status: RemoteStatus): void => cb(status);
+    ipcRenderer.on(IPC.remoteStatus, listener);
+    return () => ipcRenderer.removeListener(IPC.remoteStatus, listener);
+  },
 };
 
 contextBridge.exposeInMainWorld('fraktole', api);

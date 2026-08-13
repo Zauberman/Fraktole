@@ -5,6 +5,7 @@ import {
   type ProviderClient,
   type ProviderMsg,
   type ProviderResult,
+  type ProviderUsage,
   type ReviewerToolCall,
 } from '../providers.js';
 
@@ -75,10 +76,24 @@ export class OllamaProvider implements ProviderClient {
 
     let text = '';
     let thinking = '';
+    let usage: ProviderUsage | undefined;
     const toolCalls: ReviewerToolCall[] = [];
 
     for await (const payload of ndjsonPayloads(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
-      const msg = (payload as { message?: { content?: string; thinking?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> } }).message;
+      const msg = (payload as {
+        message?: { content?: string; thinking?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> };
+        done?: boolean;
+        prompt_eval_count?: number;
+        eval_count?: number;
+      }).message;
+      const done = (payload as { done?: boolean }).done;
+      if (done && typeof (payload as { prompt_eval_count?: number }).prompt_eval_count === 'number') {
+        usage = {
+          inputTokens: (payload as { prompt_eval_count: number }).prompt_eval_count,
+          cachedTokens: 0,
+          outputTokens: (payload as { eval_count?: number }).eval_count ?? 0,
+        };
+      }
       if (!msg) continue;
       if (typeof msg.content === 'string' && msg.content.length > 0) {
         text += msg.content;
@@ -99,7 +114,7 @@ export class OllamaProvider implements ProviderClient {
       }
     }
 
-    return { text, toolCalls, thinking };
+    return { text, toolCalls, thinking, usage };
   }
 }
 

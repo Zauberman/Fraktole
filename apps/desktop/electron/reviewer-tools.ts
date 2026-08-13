@@ -67,6 +67,20 @@ export interface ReviewerTool {
 
 const TOOL_RESULT_CAP = 20_000;
 
+/** Named key combos for send_keystroke — shift-tab is the opencode
+ *  plan/build toggle (xterm CSI Z). */
+const KEY_ESCAPES: Record<string, string> = {
+  'shift-tab': '\x1b[Z',
+  tab: '\t',
+  enter: '\r',
+  escape: '\x1b',
+  'ctrl-c': '\x03',
+  up: '\x1b[A',
+  down: '\x1b[B',
+  left: '\x1b[D',
+  right: '\x1b[C',
+};
+
 export function capResult(text: string): string {
   if (text.length <= TOOL_RESULT_CAP) return text;
   return `${text.slice(0, TOOL_RESULT_CAP)}\n…[truncated]`;
@@ -501,6 +515,53 @@ const TOOLS: ReviewerTool[] = [
       const command = typeof args.command === 'string' ? args.command.trim() : '';
       if (agentId.length === 0 || command.length === 0) return 'error: agentId and command required';
       return ctx.writeToAgent?.(agentId, command) ?? 'error: launch unavailable';
+    },
+  },
+  {
+    name: 'send_keystroke',
+    description:
+      "Send key presses into an agent's terminal, like the user pressing keys. Named combos: shift-tab (opencode plan/build toggle), tab, enter, escape, ctrl-c, up, down, left, right. Any other string is sent literally. Verify the effect with read_tile afterwards.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'the agent whose tile receives the keys' },
+        keys: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'named combos (shift-tab, enter, escape, ctrl-c, arrows) or literal text, in order',
+        },
+      },
+      required: ['agentId', 'keys'],
+    },
+    async run(args, ctx) {
+      const agentId = typeof args.agentId === 'string' ? args.agentId.trim() : '';
+      const keys = Array.isArray(args.keys) ? args.keys.filter((k): k is string => typeof k === 'string') : [];
+      if (agentId.length === 0 || keys.length === 0) return 'error: agentId and at least one key required';
+      const bytes = keys.map((k) => KEY_ESCAPES[k] ?? k).join('');
+      const result = await ctx.writeToAgent?.(agentId, bytes);
+      return result ?? `error: unknown agent ${agentId}`;
+    },
+  },
+  {
+    name: 'type_into_tile',
+    description:
+      "Type raw text (an answer, 'yes', a command) into an agent's terminal — the safe-yolo way to answer a question the agent asked inside its own harness (e.g. an opencode permission prompt). Optionally presses Enter. Never leaves input unverified: read_tile afterwards to see the effect.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'the agent whose terminal receives the text' },
+        text: { type: 'string', description: 'the exact characters to type (sent verbatim)' },
+        pressEnter: { type: 'boolean', description: 'whether to press Enter after the text (default false)' },
+      },
+      required: ['agentId', 'text'],
+    },
+    async run(args, ctx) {
+      const agentId = typeof args.agentId === 'string' ? args.agentId.trim() : '';
+      const text = typeof args.text === 'string' ? args.text : '';
+      if (agentId.length === 0 || text.length === 0) return 'error: agentId and text required';
+      const withEnter = args.pressEnter === true ? '\r' : '';
+      const result = await ctx.writeToAgent?.(agentId, `${text}${withEnter}`);
+      return result ?? `error: unknown agent ${agentId}`;
     },
   },
   {

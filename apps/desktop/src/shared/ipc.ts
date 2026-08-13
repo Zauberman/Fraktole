@@ -50,6 +50,7 @@ export const IPC = {
   reviewerTranscript: 'reviewer:transcript',
   reviewerStatus: 'reviewer:status',
   reviewerStream: 'reviewer:stream',
+  reviewerUsage: 'reviewer:usage',
   reviewerToolCall: 'reviewer:tool-call',
   reviewerMessage: 'reviewer:message',
   menuSession: 'menu:session',
@@ -61,6 +62,11 @@ export const IPC = {
   testScreenshotRequest: 'test:screenshot-request',
   testScreenshot: 'test:screenshot',
   testReload: 'test:reload',
+  remoteGetState: 'remote:get-state',
+  remoteSetEnabled: 'remote:set-enabled',
+  remoteSetPort: 'remote:set-port',
+  remoteRevokeDevice: 'remote:revoke-device',
+  remoteStatus: 'remote:status',
 } as const;
 
 export interface MenuSessionAction {
@@ -163,6 +169,13 @@ export interface ReviewerTask {
   updatedAt: number;
 }
 
+/** Cumulative reviewer token usage, persisted in state.json. */
+export interface ReviewerUsage {
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+}
+
 /** Durable watchdog state: the goal + the task ledger. Persisted as
  *  sessionDir/reviewer/state.json — survives compaction and restarts. */
 export interface ReviewerState {
@@ -171,6 +184,16 @@ export interface ReviewerState {
   /** The last agent launcher the user picked for a reviewer spawn — the
    *  model may reuse it without asking again. */
   lastAgentKind: string | null;
+  /** Cumulative model token usage (input / cache-hit / output). */
+  usage: ReviewerUsage;
+}
+
+/** reviewer:usage event payload (cumulative totals). */
+export interface ReviewerUsageEvent {
+  at: number;
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
 }
 
 /** reviewer:goal event payload. */
@@ -330,4 +353,30 @@ export interface SessionSavePayload {
   focusedAgentId?: string | null;
   judgeCwd?: string | null;
   scrollback?: Record<string, string[]>;
+}
+
+/** One paired phone, as shown in the Remote tab. */
+export interface RemoteDeviceInfo {
+  deviceId: string;
+  name: string;
+  connected: boolean;
+  createdAt: number;
+  lastSeen: number;
+}
+
+/** Live status of the remote bridge, pushed to the Remote tab. */
+export interface RemoteStatus {
+  enabled: boolean;
+  /** Configured port (persisted). */
+  port: number;
+  /** True while the WSS server is actually listening. */
+  listening: boolean;
+  /** Self-signed cert SHA-256 fingerprint (hex, no separators). */
+  fingerprint: string | null;
+  /** LAN IPv4 addresses the phone can dial. */
+  lanIps: string[];
+  /** Current pairing code (null while disabled). */
+  pairingCode: string | null;
+  pairingCodeExpiresAt: number | null;
+  devices: RemoteDeviceInfo[];
 }

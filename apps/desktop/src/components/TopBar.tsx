@@ -1,6 +1,6 @@
 import React from 'react';
 
-export type AppTab = 'node' | 'editor' | 'test';
+export type AppTab = 'node' | 'editor' | 'test' | 'remote';
 
 interface TopBarProps {
   tab: AppTab;
@@ -11,6 +11,7 @@ const TABS: Array<{ id: AppTab; label: string }> = [
   { id: 'editor', label: 'File Editor' },
   { id: 'node', label: 'Node' },
   { id: 'test', label: 'Test' },
+  { id: 'remote', label: 'Remote' },
 ];
 
 export function TopBar(props: TopBarProps): React.JSX.Element {

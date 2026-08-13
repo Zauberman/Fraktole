@@ -9,6 +9,7 @@ import { Divider } from './components/Divider.js';
 import { StatusBar } from './components/StatusBar.js';
 import { TopBar, type AppTab } from './components/TopBar.js';
 import { TestTab } from './components/TestTab.js';
+import { RemoteTab } from './components/RemoteTab.js';
 import { ThemeProvider } from './theme-context.js';
 import { applyTheme, DEFAULT_THEME, THEME_IDS, type ThemeId } from './themes.js';
 import { bridge, type Project, type SessionSummary } from './ipc.js';
@@ -272,6 +273,11 @@ export function App(): React.JSX.Element {
           setTab('test');
           return;
         }
+        if (key === '4') {
+          e.preventDefault();
+          setTab('remote');
+          return;
+        }
       }
       if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
       const ws = sessionStates.current.get(activeSessionIdRef.current ?? '');
@@ -441,6 +447,9 @@ export function App(): React.JSX.Element {
                 active={tab === 'test'}
               />
             </div>
+          </div>
+          <div className={`app-main-tab${tab === 'remote' ? '' : ' app-main-tab-hidden'}`}>
+            <RemoteTab />
           </div>
         </main>
       </div>

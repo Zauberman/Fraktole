@@ -5,6 +5,7 @@ import {
   type ProviderClient,
   type ProviderMsg,
   type ProviderResult,
+  type ProviderUsage,
   type ReviewerToolCall,
 } from '../providers.js';
 
@@ -62,6 +63,10 @@ export class OpenAIProvider implements ProviderClient {
 
   async complete(opts: CompleteOpts): Promise<ProviderResult> {
     const url = joinBase(opts.baseUrl || DEFAULT_BASE, '/chat/completions');
+    const base = opts.baseUrl || DEFAULT_BASE;
+    // usage is only returned on the final stream chunk when asked for — and
+    // only official endpoints accept the field (custom proxies can 400)
+    const official = base.includes('api.openai.com') || base.includes('api.deepseek.com');
     const res = await fetch(url, {
       method: 'POST',
       signal: opts.signal,
@@ -75,6 +80,7 @@ export class OpenAIProvider implements ProviderClient {
         max_tokens: 4096,
         messages: toMessages(opts.messages),
         tools: toTools(opts.tools),
+        ...(official ? { stream_options: { include_usage: true } } : {}),
         ...(opts.reasoningEffort !== undefined ? { reasoning_effort: opts.reasoningEffort } : {}),
       }),
     });
@@ -84,6 +90,7 @@ export class OpenAIProvider implements ProviderClient {
 
     let text = '';
     let thinking = '';
+    let usage: ProviderUsage | undefined;
     const calls = new Map<number, { id: string; name: string; args: string }>();
     const ensure = (i: number): { id: string; name: string; args: string } => {
       const cur = calls.get(i) ?? { id: '', name: '', args: '' };
@@ -104,6 +111,25 @@ export class OpenAIProvider implements ProviderClient {
       if (typeof msgReason === 'string' && msgReason.length > 0 && !thinking.includes(msgReason)) {
         thinking += msgReason;
         opts.onDelta('', msgReason);
+      }
+      // usage arrives on the final chunk (only with stream_options asked):
+      // openai shape prompt_tokens/completion_tokens/prompt_tokens_details,
+      // deepseek shape prompt_cache_hit_tokens/prompt_cache_miss_tokens
+      const u = (payload as { usage?: unknown }).usage as
+        | {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            prompt_tokens_details?: { cached_tokens?: number };
+            prompt_cache_hit_tokens?: number;
+          }
+        | undefined;
+      if (u && typeof u.prompt_tokens === 'number') {
+        const cached = u.prompt_tokens_details?.cached_tokens ?? u.prompt_cache_hit_tokens ?? 0;
+        usage = {
+          inputTokens: u.prompt_tokens,
+          cachedTokens: cached,
+          outputTokens: u.completion_tokens ?? 0,
+        };
       }
       const delta = choice?.delta;
       if (!delta) continue;
@@ -131,7 +157,7 @@ export class OpenAIProvider implements ProviderClient {
     const toolCalls: ReviewerToolCall[] = [...calls.values()]
       .filter((c) => c.name.length > 0)
       .map((c) => ({ id: c.id || `tc-${c.name}`, name: c.name, args: parseArgs(c.args) }));
-    return { text, toolCalls, thinking };
+    return { text, toolCalls, thinking, usage };
   }
 }
 

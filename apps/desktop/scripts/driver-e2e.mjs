@@ -98,6 +98,8 @@ const mock = http.createServer((req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const chunk = (delta, finish) =>
         `data: ${JSON.stringify({ id: 'x', object: 'chat.completion.chunk', choices: [{ delta, finish_reason: finish ?? null }] })}\n\n`;
+      const usageChunk = () =>
+        `data: ${JSON.stringify({ id: 'x', object: 'chat.completion.chunk', choices: [], usage: { prompt_tokens: 3200, completion_tokens: 240, prompt_tokens_details: { cached_tokens: 1200 } } })}\n\n`;
       const tool = (id, name, argsObj) =>
         chunk(
           {
@@ -106,8 +108,8 @@ const mock = http.createServer((req, res) => {
             ],
           },
           'tool_calls',
-        ) + `data: [DONE]\n\n`;
-      const text = (t) => chunk({ content: t }, 'stop') + `data: [DONE]\n\n`;
+        ) + usageChunk() + `data: [DONE]\n\n`;
+      const text = (t) => chunk({ content: t }, 'stop') + usageChunk() + `data: [DONE]\n\n`;
       const script = {
         1: chunk({ reasoning_content: 'let me think ' }) +
           chunk({ reasoning_content: 'about the tiles' }) +
@@ -131,6 +133,10 @@ const mock = http.createServer((req, res) => {
         18: text('reloaded'),
         19: tool('call-19', 'read_test_page', {}),
         20: text('verified'),
+        21: text('revived ok'),
+        22: tool('call-22', 'send_keystroke', { agentId: 'agent-1', keys: ['shift-tab'] }),
+        23: tool('call-23', 'type_into_tile', { agentId: 'agent-1', text: 'yes', pressEnter: true }),
+        24: text('done driving'),
       };
       successCount += 1;
       const chunks = script[successCount] ?? text('ok');
@@ -331,6 +337,15 @@ const main = async () => {
   );
   if (!final) fail('final answer missing');
   else ok('model answered (DRIVER-42 in transcript)');
+
+  // live usage counters in the hint line (input / cache / output)
+  const usageLine = await waitFor(
+    `document.querySelector('.pane-reviewer-column .reviewer-usage-line')?.textContent ?? ''`,
+    15000,
+    'usage line',
+  );
+  if (!/in [\d.]+k? · cache [\d.]+k? · out [\d.]+k?/.test(usageLine)) fail(`usage line malformed: ${usageLine}`);
+  else ok(`live usage counters: ${usageLine.trim()}`);
 
   await prompt('/compact');
   await sleep(1200);
@@ -566,6 +581,32 @@ const main = async () => {
 
   if (mockViolations > 0) fail(`${mockViolations} request(s) carried an empty tool_calls array`);
   else ok('no request ever carried an empty tool_calls array');
+
+  // the two new driving tools: keystrokes (shift-tab) and typing answers
+  // into a tile; against an unknown agent they must error cleanly. Each
+  // failed tool ends its turn, so drive them one turn at a time.
+  await prompt('drive the agents');
+  const ksError = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('unknown agent agent-1'))`,
+    20000,
+    'send_keystroke error',
+  );
+  if (!ksError) fail('send_keystroke did not error cleanly on the unknown agent');
+  else ok('send_keystroke surfaced a clean error (shift-tab tool wired)');
+  await prompt('type an answer');
+  await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('unknown agent agent-1'))`,
+    20000,
+    'type_into_tile error',
+  );
+  await prompt('all set?');
+  const typed = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('done driving'))`,
+    20000,
+    'type_into_tile turn',
+  );
+  if (!typed) fail('type_into_tile turn did not complete');
+  else ok('type_into_tile turn completed (safe-yolo tool wired)');
 
   console.log(`\nmock provider calls: ${callCount}`);
   console.log(failures === 0 ? 'DRIVER-E2E OK' : `DRIVER-E2E FAILED (${failures})`);

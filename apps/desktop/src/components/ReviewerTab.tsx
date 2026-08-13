@@ -37,6 +37,11 @@ function timeOf(at: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+/** Compact token formatting: 12500 → '12.5k'. */
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
 function roleLabel(role?: string): string {
   if (role === 'user') return 'you';
   if (role === 'assistant') return 'reviewer';
@@ -71,6 +76,11 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   /** Transient inline note when a prompt could not be accepted — the text
    *  stays in the box, never silently dropped. */
   const [composeError, setComposeError] = useState<string | null>(null);
+  /** Cumulative model token usage (input / cache-hit / output). */
+  const [usage, setUsage] = useState({ inputTokens: 0, cachedTokens: 0, outputTokens: 0 });
+  /** Streamed output chars since the last usage event — a live output-token
+   *  estimate while a turn is still streaming. */
+  const [streamChars, setStreamChars] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(0);
 
@@ -114,6 +124,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       }),
       bridge.onReviewerStream(sessionId, (ev) => {
         const { delta, thinking } = ev;
+        if (delta) setStreamChars((n) => n + delta.length);
         setItems((its) => {
           const last = its[its.length - 1];
           const live =
@@ -186,6 +197,10 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       }),
       bridge.onReviewerGoal(sessionId, (ev) => setGoal(ev.goal)),
       bridge.onReviewerQuestion(sessionId, (ev) => setQuestion(ev)),
+      bridge.onReviewerUsage(sessionId, (ev) => {
+        setUsage({ inputTokens: ev.inputTokens, cachedTokens: ev.cachedTokens, outputTokens: ev.outputTokens });
+        setStreamChars(0);
+      }),
     ];
     return () => {
       for (const unsub of unsubs) unsub();
@@ -597,7 +612,12 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           </button>
         </div>
         <div className={`reviewer-hint-line${composeError ? ' reviewer-hint-error' : ''}`}>
-          {composeError ?? '/compact collapses old turns · /goal <text> arms the watchdog loop — never sent to the model'}
+          {composeError ?? (
+            <span className="reviewer-usage-line">
+              in {fmtTokens(usage.inputTokens)} · cache {fmtTokens(usage.cachedTokens)} · out{' '}
+              {fmtTokens(usage.outputTokens + Math.round(streamChars / 4))}
+            </span>
+          )}
         </div>
       </footer>
     </div>

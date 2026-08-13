@@ -8,6 +8,9 @@ import { JobRegistry } from './jobs.js';
 import { listModels } from './model-list.js';
 import { PtyHost } from './pty-host.js';
 import { ProjectsStore } from './projects.js';
+import { RemoteBridge, lanIps } from './remote/bridge.js';
+import type { RemoteBackend, SessionRow, TileRow, MessageRow } from './remote/backend.js';
+import { RemoteStore } from './remote/store.js';
 import { ReviewerHost, type ReviewerToolCallEvent } from './reviewer.js';
 import { ReviewerTools } from './reviewer-tools.js';
 import { SessionRegistry, SessionRuntime } from './session-runtime.js';
@@ -22,6 +25,7 @@ import {
   type OpenedSession,
   type PtySpawnArgs,
   type PtySpawnResult,
+  type RemoteStatus,
   type SendMessageArgs,
   type SessionFile,
   type SessionSavePayload,
@@ -64,6 +68,12 @@ const pendingTestShots = new Map<string, { resolve(out: string): void; timer: No
 /** Per-session background-job registries (stopped with the session). */
 const sessionJobs = new Map<string, JobRegistry>();
 let testSeq = 0;
+
+/** Per-session live infra the remote bridge reads: the PTY recorder and the
+ *  set of live tile ids (fed by the ptyData/tileExit send hook). */
+const sessionInfra = new Map<string, { recorder: TileRecorder; alive: Set<string> }>();
+/** Durable agentId → tile kind ('agent' launcher vs plain 'shell'). */
+const agentKinds = new Map<string, 'agent' | 'shell' | 'reviewer'>();
 
 function testRoundTrip(
   map: Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>,
@@ -252,13 +262,35 @@ if (!app.requestSingleInstanceLock()) {
       makeRuntime: (session: SessionFile): SessionRuntime => {
         let rt: SessionRuntime | null = null;
         const recorder = new TileRecorder();
+        const alive = new Set<string>();
+        sessionInfra.set(session.id, { recorder, alive });
         const jobs = new JobRegistry({ logger: (line) => console.log(line) });
         sessionJobs.set(session.id, jobs);
         const host = new PtyHost({
           send: (channel, tileId, payload) => {
-            // the recording: every agent PTY chunk is teed into the
-            // in-memory ring before being forwarded to the renderer
-            if (channel === IPC.ptyData) recorder.record(tileId, payload as string);
+            if (channel === IPC.ptyData) {
+              // the recording: every agent PTY chunk is teed into the
+              // in-memory ring before being forwarded to the renderer
+              recorder.record(tileId, payload as string);
+              alive.add(tileId);
+              // remote: stream live output to subscribed phones
+              remote?.publish({
+                type: 'tile.output',
+                sessionId: session.id,
+                tileId,
+                data: payload as string,
+                ts: Date.now(),
+              });
+            } else if (channel === IPC.tileExit) {
+              alive.delete(tileId);
+              remote?.publish({
+                type: 'tile.state',
+                sessionId: session.id,
+                tileId,
+                alive: false,
+                lines: recorder.summary(tileId).lines,
+              });
+            }
             // keep-alive: every live session streams its events, tagged with
             // its sessionId; the renderer filters per mounted SessionView
             mainWindow?.webContents.send(channel, session.id, tileId, payload);
@@ -281,6 +313,11 @@ if (!app.requestSingleInstanceLock()) {
           write: (tileId, text) => host.write(tileId, text),
           emit: (msg) => {
             mainWindow?.webContents.send(IPC.messageEvent, session.id, msg);
+            remote?.publish({
+              type: 'message.new',
+              sessionId: session.id,
+              msg: { kind: msg.kind, from: msg.from, to: msg.to, body: msg.body, ts: msg.at },
+            });
             // agent results feed the reviewer harness as turns
             if (msg.to === ORCHESTRATOR_ID && msg.from !== ORCHESTRATOR_ID) {
               void rt?.reviewer.onAgentMessage(msg);
@@ -312,31 +349,8 @@ if (!app.requestSingleInstanceLock()) {
             agentCount: () => rt?.session.tiles.length ?? 0,
             spawnAgent: async (kind, cwd) => {
               if (!rt) return 'error: no runtime for session';
-              const current = rt;
-              const target = cwd.length > 0 ? cwd : judgeCwdFor(current.session);
-              const agentId = sessions.allocateAgentId(current.session);
-              current.session.tiles.push({ agentId, cwd: target });
-              await sessions.save(current.session);
-              current.updateSession(current.session);
-              await sessions.ensureAgentMailbox(current.session.id, agentId);
-              const requestId = `spawn-${Date.now()}-${agentId}`;
-              return new Promise<string>((resolve) => {
-                const timer = setTimeout(() => {
-                  pendingSpawns.delete(requestId);
-                  resolve(`error: spawn timed out — the renderer never mounted tile for ${agentId}`);
-                }, 20_000);
-                pendingSpawns.set(requestId, { agentId, resolve: (out) => {
-                  clearTimeout(timer);
-                  resolve(out);
-                } });
-                mainWindow?.webContents.send(IPC.reviewerSpawnRequest, {
-                  sessionId: current.session.id,
-                  requestId,
-                  agentId,
-                  cwd: target,
-                  command: kind === 'shell' ? undefined : kind,
-                } satisfies ReviewerSpawnRequest);
-              });
+              const res = await spawnAgentInSession(rt, kind, cwd);
+              return res.ok ? `spawned agent ${res.agentId}` : res.error;
             },
             openTestPage: async (url) => {
               if (!rt) return 'error: no runtime for session';
@@ -387,6 +401,7 @@ if (!app.requestSingleInstanceLock()) {
             message: (entry) => mainWindow?.webContents.send(IPC.reviewerMessage, session.id, entry),
             goal: (ev) => mainWindow?.webContents.send(IPC.reviewerGoal, session.id, ev),
             question: (ev) => mainWindow?.webContents.send(IPC.reviewerQuestion, session.id, ev),
+            usage: (ev) => mainWindow?.webContents.send(IPC.reviewerUsage, session.id, ev),
           },
           logger: (line) => console.log(line),
         });
@@ -414,6 +429,56 @@ if (!app.requestSingleInstanceLock()) {
      *  into two session creations for the same project. Keyed before any
      *  await so concurrent clicks for the same path share one promise. */
     const pendingProjectOpens = new Map<string, Promise<OpenedSession>>();
+
+    /**
+     * Spawns a new agent tile in a session's runtime: allocates the durable
+     * agentId, persists the tile, and asks the renderer to mount it. Shared
+     * by the reviewer harness (spawn_agent tool) and the remote bridge
+     * (agent.spawn RPC). Resolves once the renderer reports the tile.
+     */
+    const spawnAgentInSession = (
+      rt: SessionRuntime,
+      kind: string | undefined,
+      cwd: string,
+    ): Promise<{ ok: true; agentId: string } | { ok: false; error: string }> => {
+      const target = cwd.length > 0 ? cwd : judgeCwdFor(rt.session);
+      const agentId = sessions.allocateAgentId(rt.session);
+      rt.session.tiles.push({ agentId, cwd: target });
+      agentKinds.set(agentId, kind && kind !== 'shell' ? 'agent' : 'shell');
+      const requestId = `spawn-${Date.now()}-${agentId}`;
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pendingSpawns.delete(requestId);
+          resolve({ ok: false, error: `spawn timed out — the renderer never mounted tile for ${agentId}` });
+        }, 20_000);
+        pendingSpawns.set(requestId, {
+          agentId,
+          resolve: (out) => {
+            clearTimeout(timer);
+            if (out.startsWith('error')) resolve({ ok: false, error: out });
+            else resolve({ ok: true, agentId });
+          },
+        });
+        void sessions
+          .save(rt.session)
+          .then(() => sessions.ensureAgentMailbox(rt.session.id, agentId))
+          .then(() => {
+            rt.updateSession(rt.session);
+            mainWindow?.webContents.send(IPC.reviewerSpawnRequest, {
+              sessionId: rt.session.id,
+              requestId,
+              agentId,
+              cwd: target,
+              command: kind === 'shell' ? undefined : kind,
+            } satisfies ReviewerSpawnRequest);
+          })
+          .catch((err: unknown) => {
+            pendingSpawns.delete(requestId);
+            clearTimeout(timer);
+            resolve({ ok: false, error: `error: ${(err as Error).message}` });
+          });
+      });
+    };
     const openProjectSession = async (projectPath: string): Promise<OpenedSession> => {
       let project =
         (await projects.list()).find((p) => p.path === projectPath) ??
@@ -454,6 +519,8 @@ if (!app.requestSingleInstanceLock()) {
         await sessions.save(session);
         rt.updateSession(session);
       }
+      // launcher command present ⇒ an agent tile, otherwise a plain shell
+      agentKinds.set(agentId, args.command && args.command.trim().length > 0 ? 'agent' : 'shell');
       await sessions.ensureAgentMailbox(session.id, agentId);
       rt.agentToTile.set(agentId, args.tileId);
       const env = buildAgentEnv(session.id, agentId, 'agent', rt.sessionDir());
@@ -528,14 +595,19 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle(IPC.sessionOpen, (_e, id: string) => openSession(id));
     ipcMain.handle(IPC.sessionDelete, async (_e, id: string) => {
       registry?.teardown(id);
+      sessionInfra.delete(id);
       await sessions.delete(id);
       refreshMenu();
     });
     ipcMain.handle(IPC.sessionStop, (_e, id: string) => {
       sessionJobs.get(id)?.stopAll();
       registry?.stop(id);
+      remote?.publish({ type: 'session.state', sessionId: id, alive: false });
     });
-    ipcMain.handle(IPC.sessionStart, (_e, id: string) => registry?.start(id));
+    ipcMain.handle(IPC.sessionStart, (_e, id: string) => {
+      registry?.start(id);
+      remote?.publish({ type: 'session.state', sessionId: id, alive: true });
+    });
     ipcMain.handle(IPC.projectOpen, async (_e, path: string): Promise<OpenedSession> => {
       const pending = pendingProjectOpens.get(path);
       if (pending) return pending;
@@ -806,7 +878,272 @@ if (!app.requestSingleInstanceLock()) {
     });
     ipcMain.handle(IPC.clipboardRead, (): string => clipboard.readText());
 
-    app.on('will-quit', () => registry?.killAll());
+    // ————— remote bridge (docs/remote-protocol.md) —————
+
+    const remoteStore = new RemoteStore(join(app.getPath('userData'), 'remote'));
+    let remote: RemoteBridge | null = null;
+
+    const liveTileOf = (agentId: string): { recorder: TileRecorder; tileId: string } | null => {
+      for (const rt of registry?.all() ?? []) {
+        const tileId = rt.agentToTile.get(agentId);
+        if (tileId) {
+          const infra = sessionInfra.get(rt.id);
+          if (infra) return { recorder: infra.recorder, tileId };
+        }
+      }
+      return null;
+    };
+
+    /** On-disk scrollback fallback for tiles with no live runtime. */
+    const readDiskScrollback = async (agentId: string, tail: number): Promise<string> => {
+      const list = await sessions.list();
+      for (const s of list) {
+        if (!(await sessions.listAgentIds(s.id)).includes(agentId)) continue;
+        try {
+          const raw = await readFile(join(sessionsRoot, s.id, 'scrollback', `${agentId}.json`), 'utf8');
+          const parsed = JSON.parse(raw) as { lines?: string[] };
+          const lines = Array.isArray(parsed.lines) ? parsed.lines : [];
+          return lines.slice(Math.max(1, lines.length - tail)).join('\n');
+        } catch {
+          return '';
+        }
+      }
+      return '';
+    };
+
+    const readScrollback = async (agentId: string, tail = 500): Promise<string> => {
+      const live = liveTileOf(agentId);
+      if (live) return live.recorder.tail(live.tileId, tail).join('\n');
+      return readDiskScrollback(agentId, tail);
+    };
+
+    const activeRuntime = (): SessionRuntime | null => {
+      const id = registry?.active ?? null;
+      return id ? (registry?.get(id) ?? null) : null;
+    };
+
+    const runtimeOfAgent = (agentId: string): SessionRuntime | null => {
+      for (const rt of registry?.all() ?? []) {
+        if (rt.session.tiles.some((t) => t.agentId === agentId)) return rt;
+      }
+      return null;
+    };
+
+    const makeRemoteBackend = (): RemoteBackend => ({
+      serverName: 'Fraktole',
+      version: app.getVersion(),
+      listSessions: async (): Promise<SessionRow[]> => {
+        const list = await sessions.list();
+        return list.map((s) => ({
+          id: s.id,
+          name: s.name,
+          project: s.projectPath ?? '',
+          alive: (registry?.get(s.id)?.state ?? 'stopped') !== 'stopped',
+          tileCount: s.agentCount,
+          updatedAt: s.updatedAt,
+        }));
+      },
+      listTiles: async (sessionId: string): Promise<TileRow[]> => {
+        const session = await sessions.load(sessionId);
+        const rt = registry?.get(sessionId) ?? null;
+        const infra = sessionInfra.get(sessionId) ?? null;
+        const now = Date.now();
+        return session.tiles.map((t) => {
+          const tileId = rt?.agentToTile.get(t.agentId) ?? null;
+          const summary = tileId && infra ? infra.recorder.summary(tileId) : { lines: 0, lastAt: 0 };
+          return {
+            id: t.agentId,
+            name: t.agentId,
+            kind: agentKinds.get(t.agentId) ?? 'agent',
+            cwd: t.cwd,
+            lines: summary.lines,
+            lastActiveAgoSec: summary.lastAt > 0 ? Math.max(0, Math.floor((now - summary.lastAt) / 1000)) : 0,
+          };
+        });
+      },
+      liveTileOf: async (sessionId: string, agentId: string): Promise<string | null> => {
+        const rt = registry?.get(sessionId) ?? null;
+        return rt?.agentToTile.get(agentId) ?? null;
+      },
+      readScrollback: async (agentId: string, tail?: number): Promise<string> =>
+        readScrollback(agentId, typeof tail === 'number' && tail > 0 ? Math.min(tail, 2000) : 500),
+      snapshot: async (agentId: string): Promise<string> => readScrollback(agentId, 200),
+      sendTask: async ({ agentId, kind, body }) => {
+        const rt = runtimeOfAgent(agentId);
+        if (!rt) return { ok: false, error: `unknown agent ${agentId}` };
+        const id = messageId();
+        const delivered = await rt.router.sendFromOrchestrator({
+          id,
+          from: ORCHESTRATOR_ID,
+          to: agentId,
+          kind,
+          body,
+          at: Date.now(),
+        });
+        return delivered ? { ok: true, messageId: id } : { ok: false, error: 'message rejected by the mailbox' };
+      },
+      listMessages: async (limit?: number): Promise<MessageRow[]> => {
+        const rt = activeRuntime() ?? null;
+        const rows = (rt
+          ? await rt.router.listMessages(rt.session.id)
+          : await (async () => {
+              const list = await sessions.list();
+              if (list.length === 0) return [];
+              const target = list[0]!;
+              try {
+                const raw = await readFile(join(sessionsRoot, target.id, 'messages.jsonl'), 'utf8');
+                const out: MessageRow[] = [];
+                for (const line of raw.split('\n')) {
+                  if (line.trim().length === 0) continue;
+                  try {
+                    const m = JSON.parse(line) as { kind?: string; from?: string; to?: string; body?: string; at?: number };
+                    if (typeof m.kind !== 'string' || typeof m.body !== 'string') continue;
+                    out.push({ kind: m.kind as MessageRow['kind'], from: m.from ?? '', to: m.to ?? '', body: m.body, ts: m.at ?? 0 });
+                  } catch {
+                    // a corrupt line must not hide the rest of the history
+                  }
+                }
+                return out.sort((a, b) => b.ts - a.ts);
+              } catch {
+                return [];
+              }
+            })()) as MessageRow[];
+        return rows.slice(0, typeof limit === 'number' && limit > 0 ? Math.min(limit, 200) : 50).map((m) => ({
+          kind: m.kind,
+          from: m.from,
+          to: m.to,
+          body: m.body,
+          ts: m.ts,
+        }));
+      },
+      spawnAgent: async ({ cwd, kind, name: _name }) => {
+        let rt = activeRuntime();
+        if (!rt) {
+          const list = await sessions.list();
+          if (list.length === 0) return { ok: false, error: 'no session available' };
+          const session = await sessions.load(list[0]!.id);
+          rt = registry!.open(session.id, session);
+          refreshMenu();
+        }
+        const res = await spawnAgentInSession(rt, kind === 'shell' ? undefined : kind, cwd ?? judgeCwdFor(rt.session));
+        return res.ok ? { ok: true, agentId: res.agentId } : { ok: false, error: res.error };
+      },
+    });
+
+    const buildRemoteStatus = async (): Promise<RemoteStatus> => {
+      const state = await remoteStore.get();
+      const code = remote?.pairingCode ?? null;
+      const devices = await remote?.devices() ?? [];
+      return {
+        enabled: state.enabled,
+        port: state.port,
+        listening: remote?.listening ?? false,
+        fingerprint: remote?.fingerprint256 ?? null,
+        lanIps: lanIps(),
+        pairingCode: code?.code ?? null,
+        pairingCodeExpiresAt: code?.expiresAt ?? null,
+        devices: devices.map((d) => ({
+          deviceId: d.deviceId,
+          name: d.name,
+          connected: d.connected,
+          createdAt: d.createdAt,
+          lastSeen: d.lastSeen,
+        })),
+      };
+    };
+
+    const pushRemoteStatus = (): void => {
+      void buildRemoteStatus().then((status) => mainWindow?.webContents.send(IPC.remoteStatus, status));
+    };
+
+    const enableRemote = async (): Promise<void> => {
+      const state = await remoteStore.get();
+      remote?.stop();
+      remote = new RemoteBridge({
+        port: state.port,
+        backend: makeRemoteBackend(),
+        store: remoteStore,
+        certDir: join(app.getPath('userData'), 'remote'),
+        logger: (line) => console.log(line),
+        onStatusChange: pushRemoteStatus,
+      });
+      await remote.start();
+      pushRemoteStatus();
+    };
+
+    const disableRemote = (): void => {
+      remote?.stop();
+      remote = null;
+      pushRemoteStatus();
+    };
+
+    ipcMain.handle(IPC.remoteGetState, async (): Promise<RemoteStatus> => {
+      // boot-time catch-up: honors a persisted/environment enable
+      const state = await remoteStore.get();
+      if (state.enabled && !remote) {
+        try {
+          await enableRemote();
+        } catch (err) {
+          console.error('remote bridge start failed:', err);
+          pushRemoteStatus();
+        }
+      }
+      return buildRemoteStatus();
+    });
+    ipcMain.handle(IPC.remoteSetEnabled, async (_e, enabled: unknown): Promise<RemoteStatus> => {
+      await remoteStore.setEnabled(enabled === true);
+      if (enabled === true) {
+        try {
+          await enableRemote();
+        } catch (err) {
+          console.error('remote bridge start failed:', err);
+        }
+      } else {
+        disableRemote();
+      }
+      return buildRemoteStatus();
+    });
+    ipcMain.handle(IPC.remoteSetPort, async (_e, port: unknown): Promise<RemoteStatus> => {
+      const next = await remoteStore.setPort(Number(port));
+      if (remote?.listening) {
+        try {
+          await enableRemote();
+        } catch (err) {
+          console.error('remote bridge restart failed:', err);
+        }
+      }
+      void next;
+      return buildRemoteStatus();
+    });
+    ipcMain.handle(IPC.remoteRevokeDevice, async (_e, deviceId: string): Promise<boolean> => {
+      const revoked = await remoteStore.revokeDevice(deviceId);
+      if (revoked) {
+        remote?.revokeDevice(deviceId);
+        pushRemoteStatus();
+      }
+      return revoked;
+    });
+    // keep the Remote tab's last-seen times fresh
+    const remoteHeartbeat = setInterval(() => {
+      if (remote?.listening) pushRemoteStatus();
+    }, 30_000);
+    remoteHeartbeat.unref();
+
+    app.on('will-quit', () => {
+      registry?.killAll();
+      remote?.stop();
+      remote = null;
+    });
+
+    // boot-time bridge start: persisted enable state (or FRAKTOLE_REMOTE_ENABLE)
+    if ((await remoteStore.get()).enabled || process.env.FRAKTOLE_REMOTE_ENABLE === '1') {
+      try {
+        await enableRemote();
+      } catch (err) {
+        console.error('remote bridge start failed:', err);
+        pushRemoteStatus();
+      }
+    }
 
     createWindow();
 
