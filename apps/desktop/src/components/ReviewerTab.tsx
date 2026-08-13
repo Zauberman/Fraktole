@@ -33,6 +33,12 @@ function timeOf(at: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+function roleLabel(role?: string): string {
+  if (role === 'user') return 'you';
+  if (role === 'assistant') return 'reviewer';
+  return role ?? 'system';
+}
+
 interface ReviewerTabProps {
   sessionId: string;
 }
@@ -133,10 +139,17 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     };
   }, [sessionId]);
 
-  // keep the transcript pinned to the newest content
+  // keep the transcript pinned to the newest content — but never yank a
+  // reader who scrolled up; pinning resumes once they return to the bottom
+  const pinnedRef = useRef(true);
+  const onScroll = (): void => {
+    const el = scrollRef.current;
+    if (!el) return;
+    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
   }, [items]);
 
   const submit = (): void => {
@@ -193,17 +206,23 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   return (
     <div className="reviewer">
       <header className="reviewer-header">
-        <div className="pane-title">Reviewer — harness</div>
+        <div className="reviewer-title">
+          <span className="pane-title">Reviewer</span>
+          <span className={`orch-judge-status orch-judge-${status}`}>
+            <span className="reviewer-status-dot" aria-hidden="true" />
+            {status}
+          </span>
+        </div>
         <div className="reviewer-actions">
-          <span className={`orch-judge-status orch-judge-${status}`}>{status}</span>
-          {status !== 'running' && (
-            <button type="button" className="orch-btn" onClick={() => void retry()}>
-              retry
+          {status === 'running' ? (
+            <button type="button" className="orch-btn" onClick={stop}>
+              stop
+            </button>
+          ) : (
+            <button type="button" className="orch-btn orch-btn-primary" onClick={() => void retry()}>
+              start
             </button>
           )}
-          <button type="button" className="orch-btn" onClick={stop}>
-            stop
-          </button>
           <button type="button" className="orch-btn" onClick={() => setConfigOpen((o) => !o)}>
             config
           </button>
@@ -260,72 +279,108 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         </section>
       )}
 
-      <div className="reviewer-transcript" ref={scrollRef}>
+      <div className="reviewer-transcript" ref={scrollRef} onScroll={onScroll}>
         {status === 'unconfigured' && (
           <div className="reviewer-note reviewer-note-error">{statusError ?? 'reviewer not configured — open config'}</div>
         )}
         {status === 'error' && statusError && <div className="reviewer-note reviewer-note-error">{statusError}</div>}
-        {items.length === 0 && (
-          <div className="orch-hint">no activity yet — prompt the reviewer below; it observes every agent tile</div>
+        {items.length === 0 && status !== 'unconfigured' && status !== 'error' && (
+          <div className="reviewer-empty">
+            <div className="reviewer-empty-mark">reviewer</div>
+            <div className="reviewer-empty-hint">prompt the reviewer — it observes every agent tile</div>
+            <div className="reviewer-empty-sub">/compact collapses old turns · config sets the model key</div>
+          </div>
         )}
         {items.map((it) =>
           it.kind === 'message' ? (
-            <div key={it.seq} className={`reviewer-item reviewer-item-${it.role ?? 'system'}${it.finalized ? '' : ' reviewer-live'}`}>
-              <div className="reviewer-item-meta">
-                <span className="reviewer-item-role">{it.role ?? 'system'}</span>
-                <span className="orch-msg-time">{timeOf(it.at)}</span>
+            <div
+              key={it.seq}
+              className={`reviewer-item reviewer-item-${it.role ?? 'system'}${it.finalized ? '' : ' reviewer-live'}`}
+            >
+              <span className="reviewer-rail" aria-hidden="true" />
+              <div className="reviewer-item-main">
+                <div className="reviewer-item-meta">
+                  <span className="reviewer-item-role">{roleLabel(it.role)}</span>
+                  <span className="reviewer-item-time">{timeOf(it.at)}</span>
+                </div>
+                <div className="reviewer-item-body">
+                  {sanitizeChatText(it.content ?? '')}
+                  {!it.finalized && <span className="reviewer-caret" aria-hidden="true" />}
+                </div>
               </div>
-              <div className="reviewer-item-body">{sanitizeChatText(it.content ?? '')}</div>
             </div>
           ) : (
-            <div key={it.seq} className={`reviewer-item reviewer-item-tool reviewer-item-tool-${it.state ?? 'start'}`}>
-              <div className="reviewer-item-meta">
-                <span className="reviewer-item-role">tool</span>
-                <span className="reviewer-tool-name">{it.name}</span>
-                <span className="reviewer-tool-args">{sanitizeChatText(it.args ?? '')}</span>
-                <span className="orch-msg-time">
-                  {it.state === 'start' ? 'running…' : `${it.state}${it.durationMs !== undefined ? ` · ${it.durationMs}ms` : ''}`}
-                </span>
-                {it.state !== 'start' && it.detail !== undefined && (
-                  <button
-                    type="button"
-                    className="orch-btn"
-                    onClick={() => setExpanded((e) => ({ ...e, [it.callId ?? String(it.seq)]: !e[it.callId ?? String(it.seq)] }))}
-                  >
-                    {expanded[it.callId ?? String(it.seq)] ? 'collapse' : 'expand'}
-                  </button>
-                )}
-                {it.state !== 'start' && it.detail !== undefined && (
-                  <button
-                    type="button"
-                    className="orch-btn"
-                    onClick={() => void navigator.clipboard.writeText(it.detail ?? '')}
-                  >
-                    copy
-                  </button>
-                )}
-              </div>
-              {it.state !== 'start' && it.detail !== undefined && (expanded[it.callId ?? String(it.seq)] || it.state === 'error') && (
-                <pre className="reviewer-tool-detail">{sanitizeChatText(it.detail)}</pre>
-              )}
-            </div>
+            (() => {
+              const key = it.callId ?? String(it.seq);
+              const open = expanded[key] || it.state === 'error';
+              return (
+                <div key={it.seq} className={`reviewer-item reviewer-item-tool reviewer-item-tool-${it.state ?? 'start'}`}>
+                  <div className="reviewer-tool-header">
+                    <button type="button" className="reviewer-tool-toggle" onClick={() => setExpanded((e) => ({ ...e, [key]: !e[key] }))}>
+                      <svg
+                        className={`reviewer-tool-chevron${open ? ' reviewer-tool-chevron-open' : ''}`}
+                        width="10"
+                        height="10"
+                        viewBox="0 0 10 10"
+                        fill="none"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 1 L8 5 L3 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="square" />
+                      </svg>
+                      <span className="reviewer-tool-name">{it.name}</span>
+                    </button>
+                    <span className="reviewer-tool-args">{sanitizeChatText(it.args ?? '')}</span>
+                    <span className={`reviewer-tool-state reviewer-tool-state-${it.state ?? 'start'}`}>
+                      {it.state === 'start' ? 'running' : it.state}
+                    </span>
+                    {it.state !== 'start' && it.durationMs !== undefined && (
+                      <span className="reviewer-item-time">{it.durationMs}ms</span>
+                    )}
+                    {it.state !== 'start' && it.detail !== undefined && (
+                      <button
+                        type="button"
+                        className="reviewer-icon-btn"
+                        title="copy result"
+                        onClick={() => void bridge.clipboardWrite(it.detail ?? '')}
+                      >
+                        <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
+                          <rect x="3.5" y="3.5" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" />
+                          <path
+                            d="M7.5 3.5 V2.5 C7.5 1.95 7.05 1.5 6.5 1.5 H2.5 C1.95 1.5 1.5 1.95 1.5 2.5 V6.5 C1.5 7.05 1.95 7.5 2.5 7.5 H3.5"
+                            stroke="currentColor"
+                            strokeWidth="1.2"
+                            strokeLinecap="square"
+                          />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                  {open && it.detail !== undefined && (
+                    <pre className="reviewer-tool-detail">{sanitizeChatText(it.detail)}</pre>
+                  )}
+                </div>
+              );
+            })()
           ),
         )}
       </div>
 
       <footer className="reviewer-input">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') submit();
-          }}
-          placeholder={status === 'running' ? 'prompt the reviewer…  (/compact)' : 'reviewer not running — click retry'}
-          disabled={status !== 'running'}
-        />
-        <button type="button" className="orch-btn" onClick={submit} disabled={status !== 'running'}>
-          send
-        </button>
+        <div className="reviewer-composer">
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submit();
+            }}
+            placeholder={status === 'running' ? 'prompt the reviewer…' : 'reviewer not running'}
+            disabled={status !== 'running'}
+          />
+          <button type="button" className="orch-btn orch-btn-primary" onClick={submit} disabled={status !== 'running'}>
+            send
+          </button>
+        </div>
+        <div className="reviewer-hint-line">/compact collapses old turns — never sent to the model</div>
       </footer>
     </div>
   );

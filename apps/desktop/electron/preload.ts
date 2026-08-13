@@ -131,6 +131,9 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.reviewerMessage, listener);
   },
 
+  clipboardWrite: (text: string): Promise<void> => ipcRenderer.invoke(IPC.clipboardWrite, text),
+  clipboardRead: (): Promise<string> => ipcRenderer.invoke(IPC.clipboardRead),
+
   createSnapshot: (sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot> =>
     ipcRenderer.invoke(IPC.snapshotCreate, sessionId, args),
   getSnapshot: (sessionId: string, id: string): Promise<SessionSnapshot | null> =>

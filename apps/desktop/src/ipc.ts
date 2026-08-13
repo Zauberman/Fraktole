@@ -82,6 +82,8 @@ export interface FraktoleBridge {
   onReviewerStream(sessionId: string, cb: (delta: string) => void): () => void;
   onReviewerToolCall(sessionId: string, cb: (ev: ReviewerToolCallEvent) => void): () => void;
   onReviewerMessage(sessionId: string, cb: (entry: ReviewerEntry) => void): () => void;
+  clipboardWrite(text: string): Promise<void>;
+  clipboardRead(): Promise<string>;
   createSnapshot(sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot>;
   getSnapshot(sessionId: string, id: string): Promise<SessionSnapshot | null>;
   getScrollback(sessionId: string, agentId: string): Promise<string[] | null>;

@@ -44,6 +44,8 @@ export const IPC = {
   reviewerToolCall: 'reviewer:tool-call',
   reviewerMessage: 'reviewer:message',
   menuSession: 'menu:session',
+  clipboardWrite: 'clipboard:write',
+  clipboardRead: 'clipboard:read',
 } as const;
 
 export interface MenuSessionAction {

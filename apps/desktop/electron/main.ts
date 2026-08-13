@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu } from 'electron';
 import { copyFile, existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -576,6 +576,13 @@ if (!app.requestSingleInstanceLock()) {
       });
       return result.canceled ? null : (result.filePaths[0] ?? null);
     });
+
+    // terminal copy/paste: the native clipboard, not the renderer's
+    // permission-gated navigator.clipboard
+    ipcMain.handle(IPC.clipboardWrite, (_e, text: string): void => {
+      clipboard.writeText(String(text));
+    });
+    ipcMain.handle(IPC.clipboardRead, (): string => clipboard.readText());
 
     app.on('will-quit', () => registry?.killAll());
 

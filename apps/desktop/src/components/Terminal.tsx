@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Terminal as Xterm, type ITheme } from 'xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import 'xterm/css/xterm.css';
@@ -37,6 +37,32 @@ export function Terminal({ sessionId, tileId, cwd, agentId, onSpawned }: Termina
   const agentIdRef = useRef(agentId);
   agentIdRef.current = agentId;
   const applyingThemeRef = useRef(false);
+  // right-click context menu (copy/paste), positioned in viewport coords
+  const [menu, setMenu] = useState<{ x: number; y: number; hasSel: boolean } | null>(null);
+
+  // copy/paste through the native clipboard (main's electron.clipboard):
+  // renderer navigator.clipboard.readText is permission-gated, so paste
+  // goes over IPC; copy does too for a single reliable path
+  const copySelection = useCallback((): void => {
+    const term = termRef.current;
+    if (!term) return;
+    const sel = term.getSelection();
+    if (sel) void bridge.clipboardWrite(sel);
+  }, []);
+  const pasteClipboard = useCallback((): void => {
+    const term = termRef.current;
+    if (!term) return;
+    void bridge
+      .clipboardRead()
+      .then((text) => {
+        if (text) term.paste(text);
+      })
+      .catch(() => undefined);
+  }, []);
+  const copyRef = useRef(copySelection);
+  copyRef.current = copySelection;
+  const pasteRef = useRef(pasteClipboard);
+  pasteRef.current = pasteClipboard;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -103,6 +129,29 @@ export function Terminal({ sessionId, tileId, cwd, agentId, onSpawned }: Termina
     });
     const resizeDisposable = term.onResize(({ cols: c, rows: r }) => bridge.ptyResize(sessionId, tileId, c, r));
 
+    // copy/paste: ctrl+shift+c/v (terminal convention — plain ctrl+c stays
+    // SIGINT). Returning false keeps the keystroke away from the PTY.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== 'keydown') return true;
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
+        if (e.code === 'KeyC') {
+          copyRef.current();
+          return false;
+        }
+        if (e.code === 'KeyV') {
+          pasteRef.current();
+          return false;
+        }
+      }
+      return true;
+    });
+
+    const onContextMenu = (e: MouseEvent): void => {
+      e.preventDefault();
+      setMenu({ x: e.clientX, y: e.clientY, hasSel: term.hasSelection() });
+    };
+    host.addEventListener('contextmenu', onContextMenu);
+
     const ro = new ResizeObserver(() => {
       fitVisible();
     });
@@ -110,6 +159,7 @@ export function Terminal({ sessionId, tileId, cwd, agentId, onSpawned }: Termina
 
     return () => {
       ro.disconnect();
+      host.removeEventListener('contextmenu', onContextMenu);
       termDisposable.dispose();
       resizeDisposable.dispose();
       unsubscribeData();
@@ -136,5 +186,44 @@ export function Terminal({ sessionId, tileId, cwd, agentId, onSpawned }: Termina
     return () => window.clearTimeout(timer);
   }, [palette]);
 
-  return <div className="terminal-host" ref={hostRef} />;
+  return (
+    <>
+      <div className="terminal-host" ref={hostRef} />
+      {menu && (
+        <>
+          <div
+            className="term-menu-backdrop"
+            onMouseDown={() => setMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMenu(null);
+            }}
+          />
+          <div className="term-menu" style={{ left: menu.x, top: menu.y }}>
+            <button
+              type="button"
+              className="term-menu-item"
+              disabled={!menu.hasSel}
+              onClick={() => {
+                copySelection();
+                setMenu(null);
+              }}
+            >
+              copy
+            </button>
+            <button
+              type="button"
+              className="term-menu-item"
+              onClick={() => {
+                void pasteClipboard();
+                setMenu(null);
+              }}
+            >
+              paste
+            </button>
+          </div>
+        </>
+      )}
+    </>
+  );
 }
