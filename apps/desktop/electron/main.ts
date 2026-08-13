@@ -62,14 +62,15 @@ const pendingSpawns = new Map<string, { agentId: string; resolve(out: string): v
  *  DevTools in production. Session actions are forwarded to the renderer,
  *  which owns the save/switch flows (it holds the live workspace state). */
 function buildMenu(currentTheme: ThemeId, sessions: Array<{ id: string; name: string }>): Menu {
-  const sessionMenu: Electron.MenuItemConstructorOptions[] = [
+  const sessionItems: Electron.MenuItemConstructorOptions[] = [
     { label: 'New Session…', click: () => mainWindow?.webContents.send(IPC.menuSession, { action: 'new' }) },
     { label: 'Save As…', click: () => mainWindow?.webContents.send(IPC.menuSession, { action: 'save-as' }) },
+    { label: 'Rename…', click: () => mainWindow?.webContents.send(IPC.menuSession, { action: 'rename' }) },
   ];
   if (sessions.length > 0) {
-    sessionMenu.push({ type: 'separator' });
+    sessionItems.push({ type: 'separator' });
     for (const s of sessions) {
-      sessionMenu.push({
+      sessionItems.push({
         label: s.name,
         submenu: [
           { label: 'Open', click: () => mainWindow?.webContents.send(IPC.menuSession, { action: 'open', id: s.id }) },
@@ -91,10 +92,12 @@ function buildMenu(currentTheme: ThemeId, sessions: Array<{ id: string; name: st
           click: () => mainWindow?.webContents.send(IPC.menuNewTile),
         },
         { type: 'separator' },
-        { label: 'Sessions', submenu: sessionMenu },
-        { type: 'separator' },
         { role: 'quit', label: 'Quit' },
       ],
+    },
+    {
+      label: 'Session',
+      submenu: sessionItems,
     },
     {
       label: 'View',

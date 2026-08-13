@@ -57,7 +57,7 @@ export const IPC = {
 } as const;
 
 export interface MenuSessionAction {
-  action: 'new' | 'save-as' | 'open' | 'delete' | 'stop' | 'start';
+  action: 'new' | 'save-as' | 'rename' | 'open' | 'delete' | 'stop' | 'start';
   id?: string;
 }
 

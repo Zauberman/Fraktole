@@ -31,6 +31,7 @@ export function StatusBar(props: StatusBarProps): React.JSX.Element {
           <span>ctrl+shift T tile</span>
           <span>W close</span>
           <span>enter zoom</span>
+          <span>0 reviewer</span>
           <span>alt+1/2/3 tabs</span>
         </span>
         <span className="status-info">{info}</span>

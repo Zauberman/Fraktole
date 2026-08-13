@@ -1,11 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import { Workspace } from './Workspace.js';
 import { Divider } from './Divider.js';
-import { OrchestratorPanel } from './OrchestratorPanel.js';
 import { ReviewerTab } from './ReviewerTab.js';
 import { useSessionState, type SessionState } from '../session-state.js';
-import { useMessages } from '../messages.js';
-import { useSnapshots } from '../snapshots.js';
 import { bridge, type SessionStatus } from '../ipc.js';
 import type { SessionSummary } from '../ipc.js';
 import type { AppTab } from './TopBar.js';
@@ -37,37 +34,30 @@ interface SessionViewProps {
 /**
  * One session's live view. Stays mounted (hidden via CSS) while another
  * session is active, so its PTYs keep running and its terminal buffers keep
- * streaming — the keep-alive core. Shows the Node layout (workspace + right
- * panel) or the Reviewer layout depending on the active tab.
+ * streaming — the keep-alive core. The Node tab shows the tiling workspace
+ * plus the reviewer column on the right; the top-bar Reviewer tab is an
+ * empty placeholder reserved for a future feature.
  */
 export function SessionView(props: SessionViewProps): React.JSX.Element {
   const {
     sessionId,
     active,
     tab,
-    sessions,
     sideRightPct,
     onDragRight,
-    onActivate,
-    onNewSession,
-    onDeleteSession,
-    onStopSession,
-    onStartSession,
     registerState,
     onActiveInfo,
   } = props;
   const ws = useSessionState(sessionId);
-  const { messages, send } = useMessages(sessionId);
-  const snapshots = useSnapshots();
   // (re)activate when this view becomes the active session
   useEffect(() => {
     if (active) void ws.reactivate();
   }, [active, ws.reactivate]);
 
-  // the reviewer starts lazily, when its tab is visited; its status events
-  // are consumed by the ReviewerTab itself
+  // the reviewer starts lazily, when its column becomes visible (the Node
+  // tab); its status events are consumed by the ReviewerTab itself
   useEffect(() => {
-    if (active && tab === 'reviewer') {
+    if (active && tab === 'node') {
       void bridge.ensureReviewer(sessionId);
     }
   }, [active, tab, sessionId]);
@@ -83,12 +73,12 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
     if (!active) return;
     onActiveInfo({
       tileCount: ws.tiles.size,
-      focusedCwd: ws.focusedId ? (ws.tiles.get(ws.focusedId)?.cwd ?? null) : null,
+      focusedCwd: ws.reviewerFocused ? null : (ws.focusedId ? (ws.tiles.get(ws.focusedId)?.cwd ?? null) : null),
       sessionName: ws.session?.name ?? null,
       state: ws.state,
       projectPath: ws.session?.projectPath ?? null,
     });
-  }, [active, ws.tiles, ws.focusedId, ws.session, ws.state, onActiveInfo]);
+  }, [active, ws.tiles, ws.focusedId, ws.reviewerFocused, ws.session, ws.state, onActiveInfo]);
 
   // tiles close when their PTY exits (per-session, tagged channel)
   useEffect(() => {
@@ -114,7 +104,10 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
           zoomedId={ws.zoomedId}
           focusedId={ws.focusedId}
           tiles={ws.tiles}
-          onFocus={ws.setFocusedId}
+          onFocus={(id) => {
+            ws.setFocusedId(id);
+            ws.setReviewerFocused(false);
+          }}
           onClose={ws.closeTile}
           onZoom={ws.toggleZoom}
           onSwap={ws.onSwap}
@@ -122,37 +115,24 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
         />
       </section>
       <Divider onDrag={onDragRight} />
-      <section className="pane pane-side pane-side-right pane-orch" style={{ width: `${sideRightPct}%` }}>
-        <OrchestratorPanel
-          session={ws.session}
-          sessions={sessions}
-          agents={[...ws.tiles.values()].map((m) => ({ tileId: m.id, agentId: m.agentId, cwd: m.cwd }))}
-          messages={messages}
-          onSend={send}
-          onSnapshot={(agentId, text) => snapshots.create(sessionId, agentId, text)}
-          onGetSnapshot={(id) => snapshots.get(sessionId, id)}
-          onFocusAgent={(agentId) => {
-            const tileId = ws.tileOf(agentId);
-            if (tileId) ws.setFocusedId(tileId);
-          }}
-          onCloseAgent={(agentId) => {
-            const tileId = ws.tileOf(agentId);
-            if (tileId) ws.closeTile(tileId);
-          }}
-          onNewSession={onNewSession}
-          onOpenSession={onActivate}
-          onRenameSession={(name) => void ws.renameSession(name)}
-          onDeleteSession={onDeleteSession}
-          onStopSession={onStopSession}
-          onStartSession={onStartSession}
-        />
+      <section
+        className={`pane pane-side pane-side-right pane-reviewer-column${ws.reviewerFocused ? ' reviewer-column-focused' : ''}`}
+        style={{ width: `${sideRightPct}%` }}
+        onMouseDown={() => ws.setReviewerFocused(true)}
+      >
+        <ReviewerTab sessionId={sessionId} />
       </section>
     </>
   );
 
+  // the top-bar Reviewer tab: an empty placeholder reserved for the next
+  // feature — the live reviewer lives in the Node tab's right column
   const reviewerContent = (
     <section className="pane pane-workspace pane-reviewer">
-      <ReviewerTab sessionId={sessionId} />
+      <div className="reviewer-placeholder">
+        <div className="reviewer-placeholder-mark">reviewer</div>
+        <div className="reviewer-placeholder-hint">the reviewer lives in the Node tab's right column</div>
+      </div>
     </section>
   );
 

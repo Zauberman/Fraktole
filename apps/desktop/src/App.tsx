@@ -4,6 +4,7 @@ import { Explorer } from './components/Explorer.js';
 import { FileEditor } from './components/FileEditor.js';
 import { useFileEditor } from './file-state.js';
 import { NewTileDialog } from './components/NewTileDialog.js';
+import { SessionNameDialog } from './components/SessionNameDialog.js';
 import { Divider } from './components/Divider.js';
 import { StatusBar } from './components/StatusBar.js';
 import { TopBar, type AppTab } from './components/TopBar.js';
@@ -56,6 +57,7 @@ export function App(): React.JSX.Element {
   const [projects, setProjects] = useState<Project[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogDefault, setDialogDefault] = useState('/home/walid');
+  const [sessionDialog, setSessionDialog] = useState<{ mode: 'new' } | { mode: 'rename' | 'save-as'; value: string } | null>(null);
   const defaultCwd = useRef('/home/walid');
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const [bodyWidth, setBodyWidth] = useState(0);
@@ -205,8 +207,7 @@ export function App(): React.JSX.Element {
     await refreshSessions();
   }, [refreshSessions]);
 
-  const deleteSession = useCallback(
-    async (sid: string): Promise<void> => {
+  const deleteSession = useCallback(    async (sid: string): Promise<void> => {
       await bridge.deleteSession(sid);
       setOpened((prev) => prev.filter((s) => s !== sid));
       if (sid === activeSessionIdRef.current) {
@@ -221,6 +222,25 @@ export function App(): React.JSX.Element {
       await refreshSessions();
     },
     [activate, refreshSessions],
+  );
+
+  const confirmSessionDialog = useCallback(
+    (name: string): void => {
+      if (!sessionDialog) return;
+      const activeId = activeSessionIdRef.current;
+      if (sessionDialog.mode === 'new') {
+        void newSession(name);
+      } else if (activeId) {
+        const ws = sessionStates.current.get(activeId) ?? null;
+        if (sessionDialog.mode === 'rename') {
+          void ws?.renameSession(name);
+        } else {
+          void bridge.saveSessionAs(activeId, name).then(() => refreshSessions()).catch(() => undefined);
+        }
+      }
+      setSessionDialog(null);
+    },
+    [sessionDialog, newSession, refreshSessions],
   );
 
   const registerState = useCallback((sid: string, state: SessionState): (() => void) => {
@@ -263,15 +283,24 @@ export function App(): React.JSX.Element {
           if (p) void bridge.addProject(p).then(() => refreshProjects()).catch(() => undefined);
         });
       } else if (key === 'w') {
-        if (ws.focusedIdRef.current) ws.closeTile(ws.focusedIdRef.current);
+        if (ws.reviewerFocused) {
+          // the reviewer column is focused — nothing to close
+        } else if (ws.focusedIdRef.current) {
+          ws.closeTile(ws.focusedIdRef.current);
+        }
       } else if (key === 'enter') {
-        const f = ws.focusedIdRef.current;
-        if (f) ws.toggleZoom(f);
+        if (!ws.reviewerFocused) {
+          const f = ws.focusedIdRef.current;
+          if (f) ws.toggleZoom(f);
+        }
       } else if (key === 'arrowleft' || key === 'arrowup') {
         ws.moveFocus('prev');
       } else if (key === 'arrowright' || key === 'arrowdown') {
         ws.moveFocus('next');
+      } else if (key === '0') {
+        ws.setReviewerFocused(true);
       } else if (/^[1-9]$/.test(key)) {
+        ws.setReviewerFocused(false);
         const ids = listIds(ws.treeRef.current);
         const target = ids[Number(key) - 1];
         if (target) ws.setFocusedId(target);
@@ -301,12 +330,37 @@ export function App(): React.JSX.Element {
       const tileId = ws.addTile(ev.cwd, ev.agentId, ev.command);
       void bridge.reviewerSpawnResult(ev.sessionId, ev.requestId, { tileId, agentId: ev.agentId });
     });
+    // the native Session menu forwards its actions here (the orchestrator
+    // panel that used to own them is gone)
+    const unsubSession = bridge.onMenuSession((action) => {
+      const activeId = activeSessionIdRef.current;
+      const activeName = activeId ? (sessionStates.current.get(activeId)?.session?.name ?? null) : null;
+      if (action.action === 'new') {
+        setSessionDialog({ mode: 'new' });
+      } else if (action.action === 'rename') {
+        setSessionDialog({ mode: 'rename', value: activeName ?? 'Session' });
+      } else if (action.action === 'save-as') {
+        setSessionDialog({ mode: 'save-as', value: activeName ?? 'Session' });
+      } else if (action.action === 'open' && action.id) {
+        activate(action.id);
+      } else if (action.action === 'delete' && action.id) {
+        const target = sessions.find((s) => s.id === action.id);
+        if (target && window.confirm(`Delete session "${target.name}"?`)) {
+          void deleteSession(action.id);
+        }
+      } else if (action.action === 'stop' && action.id) {
+        void stopSession(action.id);
+      } else if (action.action === 'start' && action.id) {
+        void startSession(action.id);
+      }
+    });
     return () => {
       unsubTile();
       unsubTheme();
       unsubSpawn();
+      unsubSession();
     };
-  }, [openTileDialog, setTheme]);
+  }, [openTileDialog, setTheme, sessions, activate, deleteSession, stopSession, startSession]);
 
   useEffect(() => {
     const t1 = window.setTimeout(() => setBootLeaving(true), 500);
@@ -395,6 +449,15 @@ export function App(): React.JSX.Element {
             ws?.addTile(path);
           }}
           onCancel={() => setDialogOpen(false)}
+        />
+      )}
+      {sessionDialog && (
+        <SessionNameDialog
+          title={sessionDialog.mode === 'new' ? 'new session' : sessionDialog.mode === 'rename' ? 'rename session' : 'save session as'}
+          initial={sessionDialog.mode === 'new' ? '' : sessionDialog.value}
+          confirmLabel={sessionDialog.mode === 'new' ? 'create' : sessionDialog.mode === 'rename' ? 'rename' : 'save'}
+          onConfirm={confirmSessionDialog}
+          onCancel={() => setSessionDialog(null)}
         />
       )}
       {!bootGone && <BootOverlay leaving={bootLeaving} />}

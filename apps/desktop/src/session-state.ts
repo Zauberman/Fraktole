@@ -4,7 +4,8 @@ import { treeFromSer, treeToSer } from './session-tree.js';
 import { captureAll } from './scrollback.js';
 import type { OpenedSession, SessionSummary } from './ipc.js';
 import type { SplitDir, TileId, TileNode } from './window-tree.js';
-import { insert, listIds, neighbors, remove, swap } from './window-tree.js';
+import { insert, listIds, remove, swap } from './window-tree.js';
+import { nextFocusTarget } from './focus-cycle.js';
 
 export interface SessionTileMeta {
   id: TileId;
@@ -21,6 +22,7 @@ interface SessionStateRefs {
   tilesRef: React.MutableRefObject<Map<TileId, SessionTileMeta>>;
   focusedIdRef: React.MutableRefObject<TileId | null>;
   zoomedIdRef: React.MutableRefObject<TileId | null>;
+  reviewerFocusedRef: React.MutableRefObject<boolean>;
 }
 
 export interface SessionState extends SessionStateRefs {
@@ -31,12 +33,15 @@ export interface SessionState extends SessionStateRefs {
   tiles: Map<TileId, SessionTileMeta>;
   focusedId: TileId | null;
   zoomedId: TileId | null;
+  /** True while the reviewer column (right pane) holds focus. */
+  reviewerFocused: boolean;
   addTile(cwd: string, agentId?: string | null, command?: string): TileId;
   registerAgent(tileId: TileId, agentId: string): void;
   closeTile(id: TileId, external?: boolean): void;
   moveFocus(dir: 'prev' | 'next'): void;
   onSwap(a: TileId, b: TileId): void;
   setFocusedId(id: TileId): void;
+  setReviewerFocused(v: boolean): void;
   toggleZoom(id: TileId): void;
   renameSession(name: string): Promise<void>;
   saveSession(opts?: { scrollback?: Record<string, string[]> }): Promise<void>;
@@ -56,6 +61,7 @@ export function useSessionState(sessionId: string): SessionState {
   const [tree, setTree] = useState<TileNode | null>(null);
   const [focusedId, setFocusedId] = useState<TileId | null>(null);
   const [zoomedId, setZoomedId] = useState<TileId | null>(null);
+  const [reviewerFocused, setReviewerFocusedState] = useState(false);
   const [tiles, setTiles] = useState<Map<TileId, SessionTileMeta>>(new Map());
 
   const nextId = useRef(1);
@@ -86,6 +92,11 @@ export function useSessionState(sessionId: string): SessionState {
   useEffect(() => {
     zoomedIdRef.current = zoomedId;
   }, [zoomedId]);
+
+  const reviewerFocusedRef = useRef(false);
+  useEffect(() => {
+    reviewerFocusedRef.current = reviewerFocused;
+  }, [reviewerFocused]);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -276,7 +287,17 @@ export function useSessionState(sessionId: string): SessionState {
   }, []);
 
   const moveFocus = useCallback((dir: 'prev' | 'next'): void => {
-    setFocusedId((f) => neighbors(treeRef.current, f ?? '', dir));
+    const target = nextFocusTarget(listIds(treeRef.current), focusedIdRef.current, reviewerFocusedRef.current, dir);
+    if (target.kind === 'reviewer') {
+      setReviewerFocusedState(true);
+      return;
+    }
+    setReviewerFocusedState(false);
+    setFocusedId(target.id);
+  }, []);
+
+  const setReviewerFocused = useCallback((v: boolean): void => {
+    setReviewerFocusedState(v);
   }, []);
 
   const onSwap = useCallback((a: TileId, b: TileId): void => {
@@ -295,16 +316,19 @@ export function useSessionState(sessionId: string): SessionState {
     tiles,
     focusedId,
     zoomedId,
+    reviewerFocused,
     treeRef,
     tilesRef,
     focusedIdRef,
     zoomedIdRef,
+    reviewerFocusedRef,
     addTile,
     registerAgent,
     closeTile,
     moveFocus,
     onSwap,
     setFocusedId,
+    setReviewerFocused,
     toggleZoom,
     renameSession,
     saveSession,
