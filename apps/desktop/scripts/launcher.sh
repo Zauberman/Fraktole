@@ -58,14 +58,19 @@ fi
 # XDG_CURRENT_DESKTOP is deliberately NOT passed: Chromium reads it and
 # enables GNOME-specific GTK4 integration (e.g. zorin:GNOME), which collides
 # with GTK3 modules injected by the session.
+#
+# Every passthrough below that the session does not guarantee carries a
+# default: app-menu launches run without TERM/COLORTERM (terminal-only) and
+# may lack SHELL/USER/LOGNAME — with set -u an unbound variable kills the
+# launch before the app ever starts.
 exec env -i \
   HOME="$HOME" \
   PATH="$PATH" \
-  USER="$USER" \
-  LOGNAME="$LOGNAME" \
-  SHELL="$SHELL" \
-  TERM="$TERM" \
-  COLORTERM="$COLORTERM" \
+  USER="${USER:-}" \
+  LOGNAME="${LOGNAME:-}" \
+  SHELL="${SHELL:-}" \
+  TERM="${TERM:-}" \
+  COLORTERM="${COLORTERM:-}" \
   TZ="${TZ:-}" \
   "${locales[@]}" \
   DISPLAY="${DISPLAY:-}" \
