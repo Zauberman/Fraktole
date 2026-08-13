@@ -14,6 +14,7 @@ export const IPC = {
   settingsSet: 'settings:set',
   menuNewTile: 'menu:new-tile',
   menuTheme: 'menu:theme',
+  themeApply: 'theme:apply',
   sessionsList: 'sessions:list',
   sessionNew: 'session:new',
   sessionSaveAs: 'session:save-as',
@@ -59,6 +60,7 @@ export const IPC = {
   testState: 'test:state',
   testScreenshotRequest: 'test:screenshot-request',
   testScreenshot: 'test:screenshot',
+  testReload: 'test:reload',
 } as const;
 
 export interface MenuSessionAction {
@@ -123,6 +125,10 @@ export interface Settings {
   /** Launcher command for reviewer-spawned agent tiles (e.g. "opencode");
    *  empty = the model asks the user which agent to spawn. */
   agentCommand?: string;
+  /** Reasoning effort for models that support it (deepseek/openai).
+   *  Unset = auto: 'high' on official DeepSeek/OpenAI endpoints, omitted
+   *  elsewhere (custom endpoints can reject unknown params). */
+  reasoningEffort?: 'low' | 'medium' | 'high';
 };
 }
 
@@ -136,6 +142,8 @@ export interface TestPageState {
   loading: boolean;
   /** count of console errors since the last navigation */
   consoleErrors: number;
+  /** last console messages since the last navigation (level 0-3) */
+  console: Array<{ level: number; message: string }>;
 }
 
 /** The watchdog goal the user arms with /goal. Only the user sets it; the

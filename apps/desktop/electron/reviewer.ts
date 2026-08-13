@@ -34,6 +34,16 @@ export interface ReviewerConfig {
   baseUrl?: string;
   /** Launcher command for reviewer-spawned agent tiles ('' = ask the user). */
   agentCommand?: string;
+  /** Reasoning effort (deepseek/openai); empty = auto. */
+  reasoningEffort?: 'low' | 'medium' | 'high';
+}
+
+/** Smart default: 'high' on official DeepSeek/OpenAI endpoints (they accept
+ *  reasoning_effort), omitted for custom baseUrls where unknown params can
+ *  400. */
+export function defaultReasoningEffort(res: ProviderResolution): 'high' | undefined {
+  const u = res.baseUrl.toLowerCase();
+  return u.includes('api.deepseek.com') || u.includes('api.openai.com') ? 'high' : undefined;
 }
 
 export interface ReviewerEmitter {
@@ -73,24 +83,28 @@ const GOAL_RECHECK_POLLS = 10;
 
 export function buildSystemPrompt(sessionId: string, cwd: string): string {
   return [
-    `You are the Fraktole reviewer orchestrator for session ${sessionId}.`,
-    `You observe agents through tools (list_tiles, read_tile, read_scrollback), delegate work via`,
-    `send_message (kind task|note), and may run_bash/read_file in the project (cwd: ${cwd}).`,
-    `Start each engagement by calling list_tiles so you know what is running.`,
-    'Read the TAIL of a tile before judging it; use read_scrollback for full history.',
-    'Do not send messages to an agent unless the task warrants it.',
-    'Never use emojis or decorative unicode in any message, body or reply — ASCII only.',
-    'Context compacts automatically near the limit; keep replies tight.',
-    'End each engagement with a concise verdict: what each agent did, and what you recommend.',
-    'When a goal is armed (you receive the [goal: ...] block), you are the loop master:',
-    'keep read_state current, record every assignment in the ledger with update_task',
-    '(pending/active/done/failed), dispatch work via send_message to idle agents,',
-    'verify results with read_tile, and iterate — re-dispatch, re-check — until the goal is met.',
-    'When you judge the goal fully met, start your final message with "GOAL-MET:" followed by your verdict.',
-    'Never set, change or clear the goal yourself — only the user can, via /goal.',
-    'When an agent reports a working dev server or built page, open it in the Test tab',
-    'with open_test_page and verify it with read_test_page (loading flag, console errors).',
-    'screenshot_test_page saves a picture for the user — it cannot be seen by you.',
+    `You are the Fraktole reviewer orchestrator for session ${sessionId}. You lead a workforce of agent terminals and you are accountable for the quality of what it ships. Project root: ${cwd}.`,
+    '',
+    'OPERATING PROTOCOL',
+    '- Start by calling list_tiles so you know what is running.',
+    '- Read the tail of a tile before judging it; read_scrollback for the persisted history.',
+    '- Keep the ledger current: update_task on every assignment (pending/active/done/failed); read_state when unsure.',
+    '- Dispatch work via send_message with precise, verifiable acceptance criteria.',
+    '- run_bash is for quick checks only; long-running work goes to run_background + job_status, or is delegated to an agent.',
+    '- Never send a message to an agent unless the task warrants it.',
+    '',
+    'VERIFYING & JUDGING RESULTS',
+    '- Never take an agent\'s word for a result. Verify important results: read_tile (tail), search_files (stubs, TODOs, wrong symbols), run_bash (tests, builds), read_test_page (console errors, loading).',
+    '- Judge every important result — and its sub-results (builds, tests, pages) — against the goal before accepting it.',
+    '- Reject incomplete, wrong or sloppy work: re-dispatch with a specific, actionable correction, not a vague "do better".',
+    '- Do not micro-check trivia; spend your scrutiny where correctness matters.',
+    '- When a goal is armed (the [goal: ...] block), you are the loop master: dispatch, verify, re-dispatch until the goal is genuinely met, then reply with "GOAL-MET:" and your verdict.',
+    '- For destructive or uncertain steps (killing an agent, unknown spawn choices), ask the user first with ask_user.',
+    '',
+    'REPORTING',
+    '- End every engagement with a verdict: what each agent did, what you verified, what you recommend.',
+    '- Keep replies tight. ASCII only — never emojis or decorative unicode in any message, body or reply.',
+    '- Never set, change or clear the goal yourself — only the user can, via /goal.',
   ].join('\n');
 }
 
@@ -114,6 +128,7 @@ export class ReviewerHost {
   private readonly conversationFile: string;
   private readonly stateFile: string;
   private agentCommand = '';
+  private reasoningEffort: ReviewerConfig['reasoningEffort'] = undefined;
   /** Durable goal + task ledger (survives compaction and restarts). */
   private state: ReviewerState = emptyState();
   private watchTimer: NodeJS.Timeout | null = null;
@@ -154,6 +169,12 @@ export class ReviewerHost {
       openTestPage: (url) => this.opts.toolContext.openTestPage?.(url) ?? Promise.resolve('error: test tab unavailable'),
       readTestPage: () => this.opts.toolContext.readTestPage?.() ?? Promise.resolve('error: test tab unavailable'),
       screenshotTestPage: () => this.opts.toolContext.screenshotTestPage?.() ?? Promise.resolve('error: test tab unavailable'),
+      runBackground: (command, cwd) => this.opts.toolContext.runBackground?.(command, cwd) ?? Promise.resolve('error: background jobs unavailable'),
+      jobStatus: (jobId) => this.opts.toolContext.jobStatus?.(jobId) ?? Promise.resolve('error: background jobs unavailable'),
+      jobStop: (jobId) => this.opts.toolContext.jobStop?.(jobId) ?? Promise.resolve('error: background jobs unavailable'),
+      listMessages: () => this.opts.toolContext.listMessages?.() ?? Promise.resolve([]),
+      writeToAgent: (agentId, command) => this.opts.toolContext.writeToAgent?.(agentId, command) ?? Promise.resolve('error: launch unavailable'),
+      reloadTestPage: () => this.opts.toolContext.reloadTestPage?.() ?? Promise.resolve('error: test tab unavailable'),
     };
   }
 
@@ -179,6 +200,7 @@ export class ReviewerHost {
     this.resolved = res;
     this.apiKey = key;
     this.agentCommand = cfg.agentCommand?.trim() ?? '';
+    this.reasoningEffort = cfg.reasoningEffort;
     this.provider = (this.opts.createProvider ?? createProvider)(res.adapter);
     await this.load();
     if (this.messages.length === 0) {
@@ -441,6 +463,7 @@ export class ReviewerHost {
             messages: this.messages,
             tools: this.tools.definitions(),
             signal: aborter.signal,
+            reasoningEffort: this.reasoningEffort ?? defaultReasoningEffort(res),
             onDelta: (delta, thinking) =>
               this.opts.emit.stream({
                 delta,

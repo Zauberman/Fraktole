@@ -39,6 +39,7 @@ export function TestTab(props: TestTabProps): React.JSX.Element {
   const [ready, setReady] = useState(false);
   const wvRef = useRef<WebviewTag | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const consoleRef = useRef<Array<{ level: number; message: string }>>([]);
 
   // reviewer-driven navigation (open_test_page)
   useEffect(() => {
@@ -49,6 +50,7 @@ export function TestTab(props: TestTabProps): React.JSX.Element {
       setUrl(target);
       setFailed(null);
       setErrors(0);
+      consoleRef.current = [];
     }
     onPendingUrlConsumed();
   }, [pendingUrl, onPendingUrlConsumed]);
@@ -60,6 +62,7 @@ export function TestTab(props: TestTabProps): React.JSX.Element {
     setUrl(target);
     setFailed(null);
     setErrors(0);
+    consoleRef.current = [];
   };
 
   // imperative webview listeners (React does not know these events); the
@@ -87,6 +90,7 @@ export function TestTab(props: TestTabProps): React.JSX.Element {
     const onConsole = (e: Event): void => {
       const ev = e as unknown as WebviewConsoleMessageEvent;
       if (ev.level >= 3) setErrors((n) => n + 1);
+      consoleRef.current = [...consoleRef.current.slice(-19), { level: ev.level, message: ev.message }];
     };
     wv.addEventListener('dom-ready', onReady);
     wv.addEventListener('did-start-loading', onStart);
@@ -119,11 +123,23 @@ export function TestTab(props: TestTabProps): React.JSX.Element {
         title: wv ? wv.getTitle() : '',
         loading,
         consoleErrors: errors,
+        console: consoleRef.current,
       };
       void bridge.testStateResponse(sessionId, requestId, state);
     });
     return unsub;
   }, [sessionId, url, loading, errors, ready]);
+
+  // reload_test_page round-trip
+  useEffect(() => {
+    const unsub = bridge.onTestReload(sessionId, () => {
+      if (!ready) return;
+      setErrors(0);
+      consoleRef.current = [];
+      wvRef.current?.reload();
+    });
+    return unsub;
+  }, [sessionId, ready]);
 
   // screenshot_test_page round-trip: capture only while the tab is visible
   useEffect(() => {
@@ -206,7 +222,7 @@ export function TestTab(props: TestTabProps): React.JSX.Element {
         <div className="test-error">
           <div className="test-error-title">failed to load</div>
           <div className="test-error-message">{failed}</div>
-          <button type="button" className="orch-btn orch-btn-primary" onClick={() => load(url)}>
+          <button type="button" className="btn btn-sm btn-primary" onClick={() => load(url)}>
             retry
           </button>
         </div>

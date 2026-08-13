@@ -36,10 +36,10 @@ export function SessionNameDialog(props: SessionNameDialogProps): React.JSX.Elem
           }}
         />
         <div className="dialog-actions">
-          <button type="button" className="orch-btn" onClick={onCancel}>
+          <button type="button" className="btn btn-sm" onClick={onCancel}>
             cancel
           </button>
-          <button type="button" className="orch-btn orch-btn-primary" disabled={value.trim().length === 0} onClick={confirm}>
+          <button type="button" className="btn btn-sm btn-primary" disabled={value.trim().length === 0} onClick={confirm}>
             {confirmLabel}
           </button>
         </div>

@@ -39,6 +39,8 @@ export interface CompleteOpts {
   messages: ProviderMsg[];
   tools: ReviewerTool[];
   signal: AbortSignal;
+  /** Reasoning effort for models that support it; undefined = provider default. */
+  reasoningEffort?: 'low' | 'medium' | 'high';
   /** Streamed deltas, delivered as they arrive: content text and/or a
    *  thinking delta (the provider's reasoning output). */
   onDelta: (text: string, thinking?: string) => void;

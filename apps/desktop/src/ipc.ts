@@ -65,6 +65,7 @@ export interface FraktoleBridge {
   onTileExit(sessionId: string, tileId: string, cb: (payload: PtyExitPayload) => void): () => void;
   onMenuNewTile(cb: () => void): () => void;
   onMenuTheme(cb: (id: string) => void): () => void;
+  applyTheme(id: string): Promise<void>;
   onMenuSession(cb: (action: MenuSessionAction) => void): () => void;
   listProjects(): Promise<Project[]>;
   addProject(path: string): Promise<Project>;
@@ -113,6 +114,7 @@ export interface FraktoleBridge {
   testStateResponse(sessionId: string, requestId: string, state: TestPageState): Promise<void>;
   onTestScreenshotRequest(sessionId: string, cb: (ev: { requestId: string }) => void): () => void;
   testScreenshotResponse(sessionId: string, requestId: string, dataUrl: string | null): Promise<void>;
+  onTestReload(sessionId: string, cb: () => void): () => void;
   createSnapshot(sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot>;
   getSnapshot(sessionId: string, id: string): Promise<SessionSnapshot | null>;
   getScrollback(sessionId: string, agentId: string): Promise<string[] | null>;

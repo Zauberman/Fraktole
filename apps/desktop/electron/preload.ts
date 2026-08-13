@@ -62,6 +62,7 @@ const api = {
     ipcRenderer.on(IPC.menuTheme, listener);
     return () => ipcRenderer.removeListener(IPC.menuTheme, listener);
   },
+  applyTheme: (id: string): Promise<void> => ipcRenderer.invoke(IPC.themeApply, id),
   onMenuSession: (cb: (action: MenuSessionAction) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, action: MenuSessionAction): void => cb(action);
     ipcRenderer.on(IPC.menuSession, listener);
@@ -195,6 +196,13 @@ const api = {
   },
   testScreenshotResponse: (sessionId: string, requestId: string, dataUrl: string | null): Promise<void> =>
     ipcRenderer.invoke(IPC.testScreenshot, sessionId, requestId, dataUrl),
+  onTestReload: (sessionId: string, cb: () => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string): void => {
+      if (sid === sessionId) cb();
+    };
+    ipcRenderer.on(IPC.testReload, listener);
+    return () => ipcRenderer.removeListener(IPC.testReload, listener);
+  },
 
   createSnapshot: (sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot> =>
     ipcRenderer.invoke(IPC.snapshotCreate, sessionId, args),

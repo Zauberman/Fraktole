@@ -27,6 +27,13 @@ export class SettingsStore {
               : undefined,
           model: typeof parsed.reviewer?.model === 'string' ? parsed.reviewer.model : undefined,
           baseUrl: typeof parsed.reviewer?.baseUrl === 'string' ? parsed.reviewer.baseUrl : undefined,
+          agentCommand: typeof parsed.reviewer?.agentCommand === 'string' ? parsed.reviewer.agentCommand : undefined,
+          reasoningEffort:
+            parsed.reviewer?.reasoningEffort === 'low' ||
+            parsed.reviewer?.reasoningEffort === 'medium' ||
+            parsed.reviewer?.reasoningEffort === 'high'
+              ? parsed.reviewer.reasoningEffort
+              : undefined,
         },
       };
     } catch {

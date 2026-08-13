@@ -870,4 +870,115 @@ describe('ReviewerHost', () => {
     expect(ctx.openTestPage).not.toHaveBeenCalled();
     expect(host.conversation.some((e) => e.content.includes('url required'))).toBe(true);
   });
+
+  it('the new tool families route through the context', async () => {
+    const recorder = new TileRecorder();
+    const written: string[] = [];
+    const ctx = ctxFor(recorder, {
+      runBackground: vi.fn(async (c: string) => `started j-1 (${c})`) as never,
+      jobStatus: vi.fn(async () => '{"jobId":"j-1","state":"exited","code":0,"output":"JOB-42"}') as never,
+      jobStop: vi.fn(async () => 'stopped j-1') as never,
+      listMessages: vi.fn(async () => [
+        { id: 'm1', from: 'orchestrator', to: 'agent-1', kind: 'task', body: 'go', at: 1 },
+        { id: 'm2', from: 'agent-1', to: 'orchestrator', kind: 'result', body: 'done', at: 2 },
+      ]) as never,
+      writeToAgent: vi.fn(async (agentId: string, command: string) => {
+        written.push(`${agentId}:${command}`);
+        return `launched "${command}" in ${agentId}`;
+      }) as never,
+      reloadTestPage: vi.fn(async () => 'reload sent to the Test tab') as never,
+    });
+    const provider = new FakeProvider([
+      {
+        text: '',
+        toolCalls: [
+          { id: 'c1', name: 'run_background', args: { command: 'npm run dev' } },
+          { id: 'c2', name: 'job_status', args: { jobId: 'j-1' } },
+          { id: 'c3', name: 'job_stop', args: { jobId: 'j-1' } },
+          { id: 'c4', name: 'list_messages', args: { kind: 'task' } },
+          { id: 'c5', name: 'launch_agent', args: { agentId: 'agent-1', command: 'opencode' } },
+          { id: 'c6', name: 'reload_test_page', args: {} },
+        ],
+      },
+      { text: 'all routed', toolCalls: [] },
+    ]);
+    const host = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
+      sessionId: 's1',
+      sessionDir: '/tmp/sessions/s1',
+      cwd: '/tmp/proj',
+      recorder,
+      toolContext: ctx,
+      createProvider: () => provider,
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+    });
+    await host.start();
+    await host.prompt('run everything');
+    await settle(200);
+    const contents = host.conversation.map((e) => e.content);
+    expect(contents.some((c) => c.includes('started j-1'))).toBe(true);
+    expect(contents.some((c) => c.includes('"state":"exited"'))).toBe(true);
+    expect(contents.some((c) => c.includes('stopped j-1'))).toBe(true);
+    expect(contents.some((c) => c.includes('"kind": "task"'))).toBe(true);
+    expect(contents.some((c) => c.includes('"kind": "result"'))).toBe(false); // kind filter
+    expect(written).toEqual(['agent-1:opencode']);
+    expect(contents.some((c) => c.includes('reload sent to the Test tab'))).toBe(true);
+  });
+
+  it('passes an explicit reasoningEffort through to the provider', async () => {
+    const recorder = new TileRecorder();
+    const provider = new FakeProvider([{ text: 'ok', toolCalls: [] }]);
+    const host = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'openai', model: 'm', reasoningEffort: 'medium' }),
+      sessionId: 's1',
+      sessionDir: '/tmp/sessions/s1',
+      cwd: '/tmp/proj',
+      recorder,
+      toolContext: ctxFor(recorder),
+      createProvider: () => provider,
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+    });
+    await host.start();
+    await host.prompt('x');
+    await settle(60);
+    const call = provider.complete.mock.calls[0]![0] as { reasoningEffort?: string };
+    expect(call.reasoningEffort).toBe('medium');
+  });
+
+  it('defaults to high effort on official deepseek and omits it on custom endpoints', async () => {
+    const recorder = new TileRecorder();
+    const deepseek = new FakeProvider([{ text: 'ok', toolCalls: [] }]);
+    const hostDs = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ apiKey: 'sk-ds-1', provider: 'deepseek' }),
+      sessionId: 's1',
+      sessionDir: '/tmp/sessions/s1',
+      cwd: '/tmp/proj',
+      recorder,
+      toolContext: ctxFor(recorder),
+      createProvider: () => deepseek,
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+    });
+    await hostDs.start();
+    await hostDs.prompt('x');
+    await settle(60);
+    const call1 = deepseek.complete.mock.calls[0]![0] as { reasoningEffort?: string };
+    expect(call1.reasoningEffort).toBe('high');
+
+    const custom = new FakeProvider([{ text: 'ok', toolCalls: [] }]);
+    const hostCustom = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ apiKey: 'sk-kimi-1', baseUrl: 'https://api.moonshot.cn/v1' }),
+      sessionId: 's1',
+      sessionDir: '/tmp/sessions/s1',
+      cwd: '/tmp/proj',
+      recorder,
+      toolContext: ctxFor(recorder),
+      createProvider: () => custom,
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+    });
+    await hostCustom.start();
+    await hostCustom.prompt('x');
+    await settle(60);
+    const call2 = custom.complete.mock.calls[0]![0] as { reasoningEffort?: string };
+    expect(call2.reasoningEffort).toBeUndefined();
+  });
 });

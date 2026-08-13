@@ -159,6 +159,18 @@ describe('OpenAIProvider', () => {
     expect(res.text).toBe('a');
     expect(events).toContainEqual(['', 'qwen-style final reasoning']);
   });
+
+  it('sends reasoning_effort only when set', async () => {
+    stubFetch(sseStream(['{"choices":[{"delta":{"content":"x"}}]}', '[DONE]']));
+    await new OpenAIProvider().complete({ ...baseOpts(), reasoningEffort: 'high' });
+    const body1 = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { reasoning_effort?: string };
+    expect(body1.reasoning_effort).toBe('high');
+
+    stubFetch(sseStream(['{"choices":[{"delta":{"content":"y"}}]}', '[DONE]']));
+    await new OpenAIProvider().complete(baseOpts());
+    const body2 = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { reasoning_effort?: string };
+    expect(body2.reasoning_effort).toBeUndefined();
+  });
 });
 
 describe('AnthropicProvider', () => {
@@ -226,7 +238,7 @@ describe('AnthropicProvider', () => {
     stubFetch(sseStream(['{"type":"message_stop"}']));
     await new AnthropicProvider().complete(baseOpts());
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { thinking?: unknown };
-    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
+    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 4096 });
   });
 });
 

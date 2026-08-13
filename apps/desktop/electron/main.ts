@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildAgentEnv } from './agent-env.js';
 import { MailboxRouter, ORCHESTRATOR_ID, messageId } from './mailbox.js';
+import { JobRegistry } from './jobs.js';
 import { listModels } from './model-list.js';
 import { PtyHost } from './pty-host.js';
 import { ProjectsStore } from './projects.js';
@@ -60,6 +61,8 @@ const pendingSpawns = new Map<string, { agentId: string; resolve(out: string): v
 /** In-flight test-page reads/screenshots awaiting the renderer. */
 const pendingTestReads = new Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>();
 const pendingTestShots = new Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>();
+/** Per-session background-job registries (stopped with the session). */
+const sessionJobs = new Map<string, JobRegistry>();
 let testSeq = 0;
 
 function testRoundTrip(
@@ -249,6 +252,8 @@ if (!app.requestSingleInstanceLock()) {
       makeRuntime: (session: SessionFile): SessionRuntime => {
         let rt: SessionRuntime | null = null;
         const recorder = new TileRecorder();
+        const jobs = new JobRegistry({ logger: (line) => console.log(line) });
+        sessionJobs.set(session.id, jobs);
         const host = new PtyHost({
           send: (channel, tileId, payload) => {
             // the recording: every agent PTY chunk is teed into the
@@ -347,6 +352,29 @@ if (!app.requestSingleInstanceLock()) {
             screenshotTestPage: () => {
               if (!rt) return Promise.resolve('error: no runtime for session');
               return testRoundTrip(pendingTestShots, IPC.testScreenshotRequest, rt.session.id);
+            },
+            reloadTestPage: () => {
+              if (!rt) return Promise.resolve('error: no runtime for session');
+              mainWindow?.webContents.send(IPC.testReload, rt.session.id);
+              return Promise.resolve('reload sent to the Test tab');
+            },
+            runBackground: (command, cwd) => {
+              if (!rt) return Promise.resolve('error: no runtime for session');
+              const res = jobs.start(command, cwd.length > 0 ? cwd : judgeCwdFor(rt.session));
+              return Promise.resolve('error' in res ? `error: ${res.error}` : `started ${res.jobId} (pid ${res.pid})`);
+            },
+            jobStatus: (jobId) => {
+              const info = jobs.status(jobId);
+              return Promise.resolve(info ? JSON.stringify({ jobId: info.jobId, state: info.state, code: info.code, output: info.output.slice(-4000) }) : 'error: unknown job');
+            },
+            jobStop: (jobId) => Promise.resolve(jobs.stop(jobId) ? `stopped ${jobId}` : `error: unknown job ${jobId}`),
+            listMessages: () => router.listMessages(session.id),
+            writeToAgent: (agentId, command) => {
+              if (agentId === ORCHESTRATOR_ID) return Promise.resolve('error: the orchestrator is not an agent tile');
+              const tileId = tileOfAgent(agentId);
+              if (!tileId) return Promise.resolve(`error: unknown agent ${agentId}`);
+              host.write(tileId, `${command}\n`);
+              return Promise.resolve(`launched "${command}" in ${agentId}`);
             },
           },
           tools,
@@ -472,6 +500,15 @@ if (!app.requestSingleInstanceLock()) {
       }
       return next;
     });
+    // programmatic theme switch — persists and re-broadcasts through the
+    // exact native-menu path (used by the E2E driver's theme walk)
+    ipcMain.handle(IPC.themeApply, async (_e, id: unknown) => {
+      if (typeof id !== 'string' || !THEME_IDS.includes(id as ThemeId)) return;
+      const next = await settings.set({ theme: id as ThemeId });
+      currentTheme = next.theme as ThemeId;
+      refreshMenu();
+      mainWindow?.webContents.send(IPC.menuTheme, id);
+    });
     ipcMain.handle(IPC.sessionsList, async () => {
       const list = await sessions.list();
       return list.map((s) => ({ ...s, state: registry?.get(s.id)?.state ?? 'stopped' }));
@@ -494,7 +531,10 @@ if (!app.requestSingleInstanceLock()) {
       await sessions.delete(id);
       refreshMenu();
     });
-    ipcMain.handle(IPC.sessionStop, (_e, id: string) => registry?.stop(id));
+    ipcMain.handle(IPC.sessionStop, (_e, id: string) => {
+      sessionJobs.get(id)?.stopAll();
+      registry?.stop(id);
+    });
     ipcMain.handle(IPC.sessionStart, (_e, id: string) => registry?.start(id));
     ipcMain.handle(IPC.projectOpen, async (_e, path: string): Promise<OpenedSession> => {
       const pending = pendingProjectOpens.get(path);
@@ -631,7 +671,13 @@ if (!app.requestSingleInstanceLock()) {
         pendingTestReads.delete(requestId);
         clearTimeout(pending.timer);
         pending.resolve(
-          JSON.stringify({ url: state.url, title: state.title, loading: state.loading, consoleErrors: state.consoleErrors }),
+          JSON.stringify({
+            url: state.url,
+            title: state.title,
+            loading: state.loading,
+            consoleErrors: state.consoleErrors,
+            console: (state.console ?? []).slice(-20),
+          }),
         );
       },
     );

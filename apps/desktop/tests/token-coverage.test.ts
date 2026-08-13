@@ -10,15 +10,16 @@ import { THEMES } from '../src/themes.js';
 const CSS_NATIVE = new Set([
   '--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s8',
   '--r0', '--r-xs', '--r-sm', '--r-md', '--r-pill',
-  '--text-2xs', '--text-xs', '--text-sm', '--text-md',
+  '--text-2xs', '--text-xs', '--text-sm', '--text-md', '--text-lg',
   '--track-wide', '--track-tight',
   '--lh-tight', '--lh-body',
   '--dur-fast', '--dur-med', '--dur-slow',
   '--ease-out', '--ease-in',
-  '--font-ui', '--font-mono',
+  '--font-ui', '--font-mono', '--font-mono-alt', '--font-display',
 ]);
 
 const THEME_TOKENS = new Set(THEMES[0]!.tokens ? Object.keys(THEMES[0]!.tokens) : []);
+const THEME_TOKENS_ARR = THEMES[0]!.tokens ? Object.keys(THEMES[0]!.tokens) : [];
 
 describe('theme.css token coverage', () => {
   it('every var() used in theme.css is a defined token', async () => {
@@ -28,6 +29,12 @@ describe('theme.css token coverage', () => {
     );
     const missing = [...used].filter((name) => !CSS_NATIVE.has(name) && !THEME_TOKENS.has(name));
     expect(missing, `undefined tokens referenced by theme.css: ${missing.join(', ')}`).toEqual([]);
+  });
+
+  it('every theme token is actually used by theme.css (no dead tokens)', async () => {
+    const css = await readFile(join(import.meta.dirname, '..', 'src', 'theme.css'), 'utf8');
+    const dead = THEME_TOKENS_ARR.filter((name) => !css.includes(`var(${name}`));
+    expect(dead, `theme tokens never used: ${dead.join(', ')}`).toEqual([]);
   });
 
   it('theme.css contains no raw colors outside the :root token block', async () => {

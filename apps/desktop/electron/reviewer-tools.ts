@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, readdir, stat } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import type { FraktoleMessage, ReviewerQuestion, ReviewerState, ReviewerTask } from '../src/shared/ipc.js';
 import { sanitizeChatText } from '../src/shared/sanitize.js';
 import { emptyState } from './reviewer-state.js';
@@ -38,6 +38,18 @@ export interface ReviewerToolContext {
   getAgentCommand?(): string;
   /** Set or clear the watchdog goal (user-authorized: always allowed). */
   setGoal?(text: string): Promise<void>;
+  /** Start a long-running background process; returns a job id. */
+  runBackground?(command: string, cwd: string): Promise<string>;
+  /** Poll a background job's state and recent output. */
+  jobStatus?(jobId: string): Promise<string>;
+  /** Stop a background job. */
+  jobStop?(jobId: string): Promise<string>;
+  /** The mailbox message log for the session. */
+  listMessages?(): Promise<FraktoleMessage[]>;
+  /** Write a command into an existing agent's terminal (launch_agent). */
+  writeToAgent?(agentId: string, command: string): Promise<string>;
+  /** Reload the Test tab's guest page. */
+  reloadTestPage?(): Promise<string>;
   /** Open a URL in the Test tab (the embedded mini browser). */
   openTestPage?(url: string): Promise<string>;
   /** Read the Test tab's live state (url/title/loading/console errors). */
@@ -63,12 +75,19 @@ export function capResult(text: string): string {
 const TOOLS: ReviewerTool[] = [
   {
     name: 'list_tiles',
-    description: 'List every agent tile in this session: agent id, tile id, working dir, recorded line count.',
+    description: 'List every agent tile: agent id, tile id, working dir, recorded line count, and seconds since the tile last produced output (dead-tile detection). Call this FIRST at the start of an engagement.',
     inputSchema: { type: 'object', properties: {} },
     async run(_args, ctx) {
+      const now = Date.now();
       const rows = Array.from(ctx.recorder.list().entries()).map(([tileId, summary]) => {
         const agentId = ctx.agentOfTile(tileId) ?? tileId;
-        return { tileId, agentId, cwd: ctx.cwdOfAgent(agentId), lines: summary.lines };
+        return {
+          tileId,
+          agentId,
+          cwd: ctx.cwdOfAgent(agentId),
+          lines: summary.lines,
+          lastActiveAgoSec: Math.max(0, Math.round((now - summary.lastAt) / 1000)),
+        };
       });
       if (rows.length === 0) return 'no tiles recorded yet';
       return JSON.stringify(rows, null, 2);
@@ -77,12 +96,12 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'read_tile',
     description:
-      'Read the live recording of an agent tile: the last `tail` lines, or lines matching `grep`. Use a small tail (5-40) unless you need more; full history lives in read_scrollback.',
+      'Read the live recording of an agent tile: the last `tail` lines, or lines matching `grep`. Prefer a small tail (5-40). The recording is transient — use read_scrollback for the persisted full history.',
     inputSchema: {
       type: 'object',
       properties: {
         agentId: { type: 'string', description: 'agent id (from list_tiles)' },
-        tileId: { type: 'string' },
+        tileId: { type: 'string', description: 'tile id (from list_tiles); agentId also works' },
         tail: { type: 'number', description: 'last N lines to return (default 40)' },
         grep: { type: 'string', description: 'return only lines matching this regex' },
       },
@@ -105,11 +124,11 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'read_scrollback',
-    description: 'Read the persisted scrollback of an agent (full history captured at save time). Returns up to 1000 lines.',
+    description: "Read the persisted scrollback of an agent (full history captured at save time, up to 1000 lines). Use it when read_tile's live tail is not enough to judge a completed piece of work.",
     inputSchema: {
       type: 'object',
       properties: {
-        agentId: { type: 'string' },
+        agentId: { type: 'string', description: 'agent id (from list_tiles)' },
         tail: { type: 'number', description: 'last N lines (default 200, max 1000)' },
       },
     },
@@ -134,13 +153,13 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'send_message',
-    description: 'Send a task or note to an agent. Tasks get results back through the mailboxes; notes are informational.',
+    description: 'Send a task or note to an agent. Tasks get results back through the mailboxes and wake you; notes are informational. Always state precise, verifiable acceptance criteria in the body. Prefer this over doing work yourself when an agent owns the area.',
     inputSchema: {
       type: 'object',
       properties: {
         to: { type: 'string', description: 'agent id (from list_tiles)' },
-        kind: { type: 'string', enum: ['task', 'note'] },
-        body: { type: 'string' },
+        kind: { type: 'string', enum: ['task', 'note'], description: 'task = work to do (a result wakes you); note = informational' },
+        body: { type: 'string', description: 'the message body, with precise acceptance criteria for tasks' },
       },
       required: ['to', 'kind', 'body'],
     },
@@ -162,7 +181,7 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'read_state',
-    description: 'Return the current goal and task ledger (the durable watchdog state).',
+    description: 'Return the current goal and task ledger (the durable watchdog state). Check it when you need to recall what was assigned, to whom, and in what state.',
     inputSchema: { type: 'object', properties: {} },
     async run(_args, ctx) {
       return JSON.stringify(ctx.getState?.() ?? emptyState(), null, 2);
@@ -171,14 +190,14 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'update_task',
     description:
-      'Upsert a row in the task ledger: give id to update an existing task, or omit it to create one (a fresh id is assigned). status is one of pending, active, done, failed.',
+      'Upsert a row in the task ledger: give id to update an existing task, omit it to create one. status: pending/active/done/failed. Keep the ledger current on every assignment and every completion — it is your durable memory across compactions.',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string' },
-        agentId: { type: 'string' },
-        title: { type: 'string' },
-        status: { type: 'string', enum: ['pending', 'active', 'done', 'failed'] },
+        id: { type: 'string', description: 'existing task id to update (omit to create)' },
+        agentId: { type: 'string', description: 'agent id (from list_tiles)' },
+        title: { type: 'string', description: 'short task title' },
+        status: { type: 'string', enum: ['pending', 'active', 'done', 'failed'], description: 'ledger state of the task' },
       },
       required: ['title'],
     },
@@ -203,13 +222,13 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'ask_user',
     description:
-      'Ask the user a question and WAIT for their answer (the loop suspends until they reply or skip). Use it before destructive or uncertain steps: kind confirm-kill shows yes/no buttons and a "yes" grants one kill of agentId; kind agent-kind lets the user pick an agent launcher; kind free is a plain question.',
+      'Ask the user a question and WAIT for the answer (the loop suspends). Use it before destructive or uncertain steps: kill confirmations (kind confirm-kill, a yes grants one kill), spawn launcher picks (kind agent-kind), or any free-form decision (kind free).',
     inputSchema: {
       type: 'object',
       properties: {
-        question: { type: 'string' },
-        kind: { type: 'string', enum: ['free', 'confirm-kill', 'agent-kind'] },
-        agentId: { type: 'string' },
+        question: { type: 'string', description: 'the question shown to the user' },
+        kind: { type: 'string', enum: ['free', 'confirm-kill', 'agent-kind'], description: 'confirm-kill shows yes/no and grants a kill; agent-kind picks a launcher; free is plain text' },
+        agentId: { type: 'string', description: 'agent id (from list_tiles)' },
       },
       required: ['question'],
     },
@@ -230,7 +249,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'kill_agent',
     description:
-      'Kill an agent tile (terminates its PTY and closes the tile). REQUIRES a single-use user grant: ask the user first with ask_user (kind confirm-kill, agentId <id>) and only call this after they answer yes. The user may also kill directly with the /kill <id> command.',
+      'Kill an agent tile (terminates its PTY and closes the tile). REQUIRES a single-use user grant: ask the user first with ask_user (kind confirm-kill, agentId) and only call this after they answer yes. The user may also kill directly with /kill. Never target the orchestrator.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -247,7 +266,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'spawn_agent',
     description:
-      'Spawn a new agent tile. The tile runs a shell in cwd (default: the session project) and the launch command is written into it — e.g. kind "opencode" launches the opencode CLI, "shell" keeps a plain shell. You may fire a known kind directly (the user already picked it — check the state ledger), or omit kind to let the user choose (the choice is remembered). Spawning is capped at 8 agents per session. After the spawn, read the tile tail to verify the launch; if it failed, re-prompt the user.',
+      "Spawn a NEW agent tile (a shell in cwd with the launch command written into it). Fire a known kind directly (the ledger remembers the user's choice) or omit kind to let the user pick. Capped at 8 agents. To run a harness inside an EXISTING tile instead, use launch_agent.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -276,7 +295,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'set_goal',
     description:
-      'Set a new watchdog goal (replaces the current one and re-arms the loop) or clear it by omitting text. Only the user may authorize this — but the user has authorized you to set goals whenever the situation calls for it. Use it to formalize what the loop is working toward.',
+      'Set a new watchdog goal (replaces the current one and re-arms the loop) or clear it by omitting text. You are authorized to set goals when the situation calls for it — formalize what the loop is working toward.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -293,7 +312,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'open_test_page',
     description:
-      'Open a URL in the Test tab — the embedded mini browser for exercising webapp results (an agent\'s dev server, a built artifact, any http/https URL). The Test tab switches into view so the user can watch. Use it when an agent reports a working server or page.',
+      "Open a URL in the Test tab — the embedded mini browser for exercising webapp results (an agent's dev server, a built artifact). The Test tab switches into view for the user. Use it when an agent reports a working server or page.",
     inputSchema: {
       type: 'object',
       properties: { url: { type: 'string', description: 'the URL to open (http/https; localhost allowed)' } },
@@ -308,7 +327,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'read_test_page',
     description:
-      'Read the current state of the Test tab: the page URL, document title, loading flag and the number of console errors since the last navigation. Use it to verify the page actually loaded and spot JavaScript errors.',
+      "Read the Test tab's state: URL, title, loading flag, console-error count and the last 20 console messages (levels + text). Use it to verify a page loaded cleanly and to debug failures after a fix.",
     inputSchema: { type: 'object', properties: {} },
     async run(_args, ctx) {
       return ctx.readTestPage?.() ?? 'error: test tab unavailable';
@@ -317,7 +336,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'screenshot_test_page',
     description:
-      'Save a PNG screenshot of the Test tab\'s current page. The image is written under the session\'s reviewer/shots directory for the USER to open — the reviewer itself cannot see images.',
+      "Save a PNG screenshot of the Test tab's current page under the session's reviewer/shots directory FOR THE USER. You cannot see images — prefer read_test_page for verification.",
     inputSchema: { type: 'object', properties: {} },
     async run(_args, ctx) {
       return ctx.screenshotTestPage?.() ?? 'error: test tab unavailable';
@@ -325,12 +344,14 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'run_bash',
-    description: 'Run a shell command in the session project (or an agent\'s working dir). Output is capped at 64 KiB.',
+    description:
+      "Run a quick shell command in the session project (or an agent's cwd). Output capped at 64 KiB. timeout is 1-300s (default 30). For anything longer or long-running servers, use run_background + job_status instead.",
     inputSchema: {
       type: 'object',
       properties: {
-        command: { type: 'string' },
+        command: { type: 'string', description: 'the command to run' },
         cwd: { type: 'string', description: 'working directory (defaults to the project root)' },
+        timeout: { type: 'number', description: 'seconds before the command is killed (1–300, default 30)' },
       },
       required: ['command'],
     },
@@ -338,16 +359,166 @@ const TOOLS: ReviewerTool[] = [
       const command = typeof args.command === 'string' ? args.command : '';
       if (!command) return 'error: command required';
       const cwd = typeof args.cwd === 'string' && args.cwd.length > 0 ? args.cwd : ctx.cwd;
-      return runShell(command, cwd);
+      const timeoutSec = clampInt(args.timeout, 30, 1, 300);
+      return runShell(command, cwd, timeoutSec * 1000);
+    },
+  },
+  {
+    name: 'list_dir',
+    description:
+      'List a directory: directories first (trailing slash), then files with sizes. depth 1-3 (default 1), hidden entries skipped unless asked, node_modules/.git/dist-like dirs skipped. Browse the project before judging agent work.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'directory (defaults to the project root)' },
+        depth: { type: 'number', description: 'recursion depth (1–3, default 1)' },
+        includeHidden: { type: 'boolean', description: 'include dotfiles/dot-directories' },
+      },
+    },
+    async run(args, ctx) {
+      const path = typeof args.path === 'string' && args.path.trim().length > 0 ? args.path.trim() : '';
+      const abs = path.startsWith('/') ? path : join(ctx.cwd, path);
+      const depth = clampInt(args.depth, 1, 1, 3);
+      const includeHidden = args.includeHidden === true;
+      return listDir(abs, depth, includeHidden);
+    },
+  },
+  {
+    name: 'search_files',
+    description:
+      'Search the project for lines matching a regex (e.g. stubs, TODOs, wrong symbols) — returns path:line: text, capped. Use it to verify an agent actually implemented something and did not leave placeholders.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'regular expression to match against each line' },
+        path: { type: 'string', description: 'directory to search (defaults to the project root)' },
+        glob: { type: 'string', description: 'file-name filter, e.g. "*.tsx" or "*.{ts,tsx}" (* wildcard only)' },
+        maxMatches: { type: 'number', description: 'maximum hits (default 100)' },
+      },
+      required: ['pattern'],
+    },
+    async run(args, ctx) {
+      const pattern = typeof args.pattern === 'string' ? args.pattern : '';
+      if (pattern.length === 0) return 'error: pattern required';
+      const path = typeof args.path === 'string' && args.path.trim().length > 0 ? args.path.trim() : '';
+      const abs = path.startsWith('/') ? path : join(ctx.cwd, path);
+      const glob = typeof args.glob === 'string' && args.glob.trim().length > 0 ? args.glob.trim() : undefined;
+      const maxMatches = clampInt(args.maxMatches, 100, 1, 500);
+      return searchFiles(pattern, abs, glob, maxMatches);
+    },
+  },
+  {
+    name: 'run_background',
+    description:
+      'Start a long-running process in the background (dev servers, builds, test suites) and get a job id. Poll with job_status, stop with job_stop. Output ring 32 KiB, 4 jobs max, jobs die with the session. Prefer this over run_bash for anything slow.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'the command to run' },
+        cwd: { type: 'string', description: 'working directory (defaults to the project root)' },
+      },
+      required: ['command'],
+    },
+    async run(args, ctx) {
+      const command = typeof args.command === 'string' ? args.command : '';
+      if (command.length === 0) return 'error: command required';
+      const cwd = typeof args.cwd === 'string' && args.cwd.length > 0 ? args.cwd : ctx.cwd;
+      return ctx.runBackground?.(command, cwd) ?? 'error: background jobs unavailable';
+    },
+  },
+  {
+    name: 'job_status',
+    description:
+      "Read a background job's state (running/exited + exit code) and recent output. Poll it after run_background to know when a build or test finished.",
+    inputSchema: {
+      type: 'object',
+      properties: { jobId: { type: 'string', description: 'the job id from run_background' } },
+      required: ['jobId'],
+    },
+    async run(args, ctx) {
+      const jobId = typeof args.jobId === 'string' ? args.jobId.trim() : '';
+      if (jobId.length === 0) return 'error: jobId required';
+      return ctx.jobStatus?.(jobId) ?? 'error: background jobs unavailable';
+    },
+  },
+  {
+    name: 'job_stop',
+    description: 'Stop a background job started with run_background (SIGTERM, SIGKILL after 2s).',
+    inputSchema: {
+      type: 'object',
+      properties: { jobId: { type: 'string', description: 'the job id from run_background' } },
+      required: ['jobId'],
+    },
+    async run(args, ctx) {
+      const jobId = typeof args.jobId === 'string' ? args.jobId.trim() : '';
+      if (jobId.length === 0) return 'error: jobId required';
+      return ctx.jobStop?.(jobId) ?? 'error: background jobs unavailable';
+    },
+  },
+  {
+    name: 'list_messages',
+    description:
+      "Read the session's mailbox log (tasks, results, notes routed between you and the agents) — filter by kind, limit to the last N. Use it to audit what was dispatched and returned.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['task', 'result', 'note'], description: 'only messages of this kind' },
+        limit: { type: 'number', description: 'last N messages (default 50, max 200)' },
+      },
+    },
+    async run(args, ctx) {
+      const kind = args.kind === 'task' || args.kind === 'result' || args.kind === 'note' ? args.kind : null;
+      const limit = clampInt(args.limit, 50, 1, 200);
+      const all = await ctx.listMessages?.();
+      if (!all) return 'error: message log unavailable';
+      const rows = all
+        .filter((m) => kind === null || m.kind === kind)
+        .slice(-limit)
+        .map((m) => ({
+          from: m.from,
+          to: m.to,
+          kind: m.kind,
+          at: new Date(m.at).toISOString(),
+          body: sanitizeChatText(m.body).slice(0, 300),
+        }));
+      return rows.length > 0 ? JSON.stringify(rows, null, 2) : '(no messages)';
+    },
+  },
+  {
+    name: 'launch_agent',
+    description:
+      "Run a command inside an EXISTING agent's terminal — e.g. launch an agent harness like opencode in a shell tile — without spawning a new tile. Its output lands in the tile recording (read with read_tile). For a brand-new tile use spawn_agent.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'the agent\'s tile to type into (from list_tiles)' },
+        command: { type: 'string', description: 'the command to run inside the tile' },
+      },
+      required: ['agentId', 'command'],
+    },
+    async run(args, ctx) {
+      const agentId = typeof args.agentId === 'string' ? args.agentId.trim() : '';
+      const command = typeof args.command === 'string' ? args.command.trim() : '';
+      if (agentId.length === 0 || command.length === 0) return 'error: agentId and command required';
+      return ctx.writeToAgent?.(agentId, command) ?? 'error: launch unavailable';
+    },
+  },
+  {
+    name: 'reload_test_page',
+    description:
+      "Reload the Test tab's current page. Use it after a fix: reload, then read_test_page to verify the console is clean.",
+    inputSchema: { type: 'object', properties: {} },
+    async run(_args, ctx) {
+      return ctx.reloadTestPage?.() ?? 'error: test tab unavailable';
     },
   },
   {
     name: 'read_file',
-    description: 'Read a file from the project (or an absolute path). Cap: 4 MiB.',
+    description: 'Read a file from the project (or an absolute path), up to 4 MiB. For browsing use list_dir; for finding code use search_files.',
     inputSchema: {
       type: 'object',
       properties: {
-        path: { type: 'string' },
+        path: { type: 'string', description: 'directory to search (defaults to the project root)' },
       },
       required: ['path'],
     },
@@ -407,17 +578,137 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
   return Math.max(min, Math.min(max, n));
 }
 
-function runShell(command: string, cwd: string): Promise<string> {
+/** Directories that are never worth browsing or searching. */
+const SKIP_DIRS = new Set([
+  'node_modules', '.git', '.hg', '.svn', 'dist', 'build', 'out', 'coverage',
+  '.cache', 'target', '.venv', 'venv', '__pycache__', '.next', '.turbo',
+]);
+
+const LIST_ENTRY_CAP = 500;
+const SEARCH_SCAN_CAP = 5_000;
+const SEARCH_LINE_CAP = 200;
+
+async function listDir(abs: string, depth: number, includeHidden: boolean): Promise<string> {
+  const out: string[] = [];
+  const walk = async (dir: string, remaining: number): Promise<void> => {
+    if (out.length >= LIST_ENTRY_CAP) return;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      out.push(`error: ${(err as NodeJS.ErrnoException).message}`);
+      return;
+    }
+    entries.sort((a, b) =>
+      a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1,
+    );
+    for (const e of entries) {
+      if (out.length >= LIST_ENTRY_CAP) {
+        out.push('…[entry cap reached]');
+        return;
+      }
+      if (!includeHidden && e.name.startsWith('.')) continue;
+      const full = join(dir, e.name);
+      const rel = relative(abs, full);
+      if (e.isDirectory()) {
+        if (remaining > 1 && SKIP_DIRS.has(e.name)) continue;
+        out.push(`${rel}/`);
+        if (remaining > 1) await walk(full, remaining - 1);
+      } else {
+        let size = 0;
+        try {
+          size = (await stat(full)).size;
+        } catch {
+          continue; // broken symlink or unreadable
+        }
+        out.push(`${rel} (${size} B)`);
+      }
+    }
+  };
+  await walk(abs, Math.max(1, Math.min(3, depth)));
+  return out.length > 0 ? out.join('\n') : '(empty)';
+}
+
+async function searchFiles(
+  pattern: string,
+  abs: string,
+  glob: string | undefined,
+  maxMatches: number,
+): Promise<string> {
+  let re: RegExp;
+  try {
+    re = new RegExp(pattern);
+  } catch (err) {
+    return `error: bad regex: ${String(err)}`;
+  }
+  const fileRe = glob !== undefined ? new RegExp(globToRe(glob)) : null;
+  const hits: string[] = [];
+  let scanned = 0;
+  const walk = async (dir: string, remaining: number): Promise<void> => {
+    if (hits.length >= maxMatches || scanned >= SEARCH_SCAN_CAP) return;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (hits.length >= maxMatches || scanned >= SEARCH_SCAN_CAP) return;
+      if (e.name.startsWith('.')) continue;
+      const full = join(dir, e.name);
+      if (e.isDirectory()) {
+        if (remaining > 1 && SKIP_DIRS.has(e.name)) continue;
+        if (remaining > 1) await walk(full, remaining - 1);
+      } else {
+        if (fileRe && !fileRe.test(e.name)) continue;
+        scanned += 1;
+        try {
+          const st = await stat(full);
+          if (st.size > 2 * 1024 * 1024) continue; // skip big/binary files
+          const content = await readFile(full, 'utf8');
+          const lines = content.split('\n');
+          for (let i = 0; i < lines.length && hits.length < maxMatches; i++) {
+            if (re.test(lines[i]!)) {
+              hits.push(`${relative(abs, full)}:${i + 1}: ${lines[i]!.slice(0, SEARCH_LINE_CAP)}`);
+            }
+          }
+        } catch {
+          // unreadable — skip
+        }
+      }
+    }
+  };
+  await walk(abs, 12);
+  if (hits.length === 0) return '(no matches)';
+  const note = scanned >= SEARCH_SCAN_CAP ? '\n…[scan cap reached]' : '';
+  return `${capResult(hits.join('\n'))}${note}`;
+}
+
+function globToRe(glob: string): string {
+  let out = '^';
+  for (const ch of glob) {
+    if (ch === '*') {
+      out += '.*';
+    } else if (/[.+^${}()|[\]\\]/.test(ch)) {
+      out += `\\${ch}`;
+    } else {
+      out += ch;
+    }
+  }
+  return `${out}$`;
+}
+
+function runShell(command: string, cwd: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
     const child = execFile(
       '/bin/bash',
       ['-lc', command],
-      { cwd, timeout: 30_000, maxBuffer: 64 * 1024 + 4096, env: { ...process.env, PWD: cwd } },
+      { cwd, timeout: timeoutMs, maxBuffer: 64 * 1024 + 4096, env: { ...process.env, PWD: cwd } },
       (err, stdout, stderr) => {
         const out = `${stdout}\n${stderr}`.trim();
         if (err) {
           const killed = (err as { killed?: boolean }).killed === true;
-          const kind = killed ? 'timed out after 30s' : (err as Error).message;
+          const kind = killed ? `timed out after ${Math.round(timeoutMs / 1000)}s` : (err as Error).message;
           resolve(out.length > 0 ? `error: ${kind}\n${out}` : `error: ${kind}`);
           return;
         }

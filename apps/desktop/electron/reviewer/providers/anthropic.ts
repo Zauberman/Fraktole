@@ -11,8 +11,9 @@ import {
 const DEFAULT_BASE = 'https://api.anthropic.com';
 const ANTHROPIC_VERSION = '2023-06-01';
 /** Extended thinking budget; reasoning is always enabled so the thinking
- *  output is capturable. */
-const THINKING_BUDGET_TOKENS = 2048;
+ *  output is capturable. 4096 — the reviewer is a judge and deeper thinking
+ *  pays for itself. */
+const THINKING_BUDGET_TOKENS = 4096;
 
 function toMessages(messages: ProviderMsg[]): { system: string; messages: unknown[] } {
   const system = messages

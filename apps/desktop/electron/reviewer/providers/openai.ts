@@ -62,6 +62,7 @@ export class OpenAIProvider implements ProviderClient {
         max_tokens: 4096,
         messages: toMessages(opts.messages),
         tools: toTools(opts.tools),
+        ...(opts.reasoningEffort !== undefined ? { reasoning_effort: opts.reasoningEffort } : {}),
       }),
     });
     if (!res.ok || !res.body) {

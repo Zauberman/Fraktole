@@ -1,7 +1,7 @@
 {
   "name": "@fraktole/desktop",
   "desktopName": "Fraktole",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Tiling command center for AI agents",
   "homepage": "https://fraktole.dev",
   "author": "Fraktole",

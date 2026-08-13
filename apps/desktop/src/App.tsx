@@ -9,7 +9,6 @@ import { Divider } from './components/Divider.js';
 import { StatusBar } from './components/StatusBar.js';
 import { TopBar, type AppTab } from './components/TopBar.js';
 import { TestTab } from './components/TestTab.js';
-import { ViewMenu } from './components/ViewMenu.js';
 import { ThemeProvider } from './theme-context.js';
 import { applyTheme, DEFAULT_THEME, THEME_IDS, type ThemeId } from './themes.js';
 import { bridge, type Project, type SessionSummary } from './ipc.js';
@@ -53,7 +52,6 @@ export function App(): React.JSX.Element {
   const [bootLeaving, setBootLeaving] = useState(false);
   const [bootGone, setBootGone] = useState(false);
   const [themeId, setThemeIdState] = useState<ThemeId>(DEFAULT_THEME);
-  const [viewOpen, setViewOpen] = useState(false);
   const [sidePct, setSidePct] = useState({ left: 10, right: 40 });
   const [projects, setProjects] = useState<Project[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -384,8 +382,7 @@ export function App(): React.JSX.Element {
   return (
     <ThemeProvider themeId={themeId} setTheme={setTheme}>
       <div className="app-shell">
-        <TopBar viewOpen={viewOpen} onViewClick={() => setViewOpen((v) => !v)} tab={tab} onTabChange={setTab} />
-        {viewOpen && <ViewMenu open={viewOpen} current={themeId} onSelect={setTheme} onClose={() => setViewOpen(false)} />}
+        <TopBar tab={tab} onTabChange={setTab} />
         <div ref={bodyRef} className="app-body">
         <section className="pane pane-side" style={{ width: `${sidePct.left}%` }}>
           <Explorer
@@ -415,14 +412,9 @@ export function App(): React.JSX.Element {
               sessionId={sid}
               active={sid === activeSessionId}
               tab={tab}
-              sessions={sessions}
               sideRightPct={rightOfMain}
               onDragRight={(x) => dragDivider('right', x)}
               onActivate={activate}
-              onNewSession={(name) => void newSession(name)}
-              onDeleteSession={(sid2) => void deleteSession(sid2)}
-              onStopSession={(sid2) => void stopSession(sid2)}
-              onStartSession={(sid2) => void startSession(sid2)}
               registerState={registerState}
               onActiveInfo={setActiveInfo}
             />

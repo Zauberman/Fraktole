@@ -4,7 +4,6 @@ import { Divider } from './Divider.js';
 import { ReviewerTab } from './ReviewerTab.js';
 import { useSessionState, type SessionState } from '../session-state.js';
 import { bridge, type SessionStatus } from '../ipc.js';
-import type { SessionSummary } from '../ipc.js';
 import type { AppTab } from './TopBar.js';
 
 export interface ActiveInfo {
@@ -19,14 +18,9 @@ interface SessionViewProps {
   sessionId: string;
   active: boolean;
   tab: AppTab;
-  sessions: SessionSummary[];
   sideRightPct: number;
   onDragRight(clientX: number): void;
   onActivate(sessionId: string): void;
-  onNewSession(name: string): void;
-  onDeleteSession(sessionId: string): void;
-  onStopSession(sessionId: string): void;
-  onStartSession(sessionId: string): void;
   registerState(sessionId: string, state: SessionState): () => void;
   onActiveInfo(info: ActiveInfo): void;
 }
@@ -35,8 +29,7 @@ interface SessionViewProps {
  * One session's live view. Stays mounted (hidden via CSS) while another
  * session is active, so its PTYs keep running and its terminal buffers keep
  * streaming — the keep-alive core. The Node tab shows the tiling workspace
- * plus the reviewer column on the right; the top-bar Reviewer tab is an
- * empty placeholder reserved for a future feature.
+ * plus the reviewer column on the right.
  */
 export function SessionView(props: SessionViewProps): React.JSX.Element {
   const {

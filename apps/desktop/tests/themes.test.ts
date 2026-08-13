@@ -17,7 +17,7 @@ const TOKEN_NAMES = [
   '--bg-raised',
   '--bg-overlay',
   '--hover-surface',
-  '--active-surface',
+  '--chrome-bg',
   '--text',
   '--text-muted',
   '--text-faint',
@@ -129,6 +129,13 @@ describe('theme contrast matrix', () => {
         expect(contrastOklch(t['--text-faint'], t['--bg-raised'])).toBeGreaterThanOrEqual(4.5);
       });
 
+      it('chrome text levels ≥ 4.5:1 on --chrome-bg (top/status bars)', () => {
+        expect(contrastOklch(t['--text'], t['--chrome-bg'])).toBeGreaterThanOrEqual(4.5);
+        expect(contrastOklch(t['--text-muted'], t['--chrome-bg'])).toBeGreaterThanOrEqual(4.5);
+        expect(contrastOklch(t['--text-faint'], t['--chrome-bg'])).toBeGreaterThanOrEqual(4.5);
+        expect(contrastOklch(t['--accent'], t['--chrome-bg'])).toBeGreaterThanOrEqual(4.5);
+      });
+
       it('accent ≥ 4.5:1 on bg (it is used for small text)', () => {
         expect(contrastOklch(t['--accent'], t['--bg'])).toBeGreaterThanOrEqual(4.5);
         expect(contrastOklch(t['--accent'], t['--bg-raised'])).toBeGreaterThanOrEqual(4.5);
@@ -149,9 +156,21 @@ describe('theme contrast matrix', () => {
         }
       });
 
-      it('status hues are theme-tinted but distinct from the accent (≥30°)', () => {
-        expect(hueDistance(t['--accent'], t['--ok'])).toBeGreaterThanOrEqual(30);
-        expect(hueDistance(t['--accent'], t['--warn'])).toBeGreaterThanOrEqual(30);
+      it('status hues are theme-tinted but distinct from the accent (≥35°)', () => {
+        for (const s of ['--ok', '--warn', '--err'] as const) {
+          expect(hueDistance(t['--accent'], t[s]), `${s} vs accent`).toBeGreaterThanOrEqual(35);
+        }
+      });
+
+      it('accent hues are pairwise distinct across themes (≥8°)', () => {
+        // a shared accent hue would make two themes feel like clones
+        for (let i = 0; i < THEMES.length; i += 1) {
+          for (let j = i + 1; j < THEMES.length; j += 1) {
+            const a = THEMES[i]!.tokens['--accent'];
+            const b = THEMES[j]!.tokens['--accent'];
+            expect(hueDistance(a, b), `${THEMES[i]!.id} vs ${THEMES[j]!.id}`).toBeGreaterThanOrEqual(8);
+          }
+        }
       });
 
       it('tints carry the same hue as their parent', () => {

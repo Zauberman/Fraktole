@@ -66,7 +66,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '', agentCommand: '' });
+  const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '', agentCommand: '', reasoningEffort: '' });
   const [liveModels, setLiveModels] = useState<string[] | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(0);
@@ -91,6 +91,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         model: s.reviewer.model ?? '',
         baseUrl: s.reviewer.baseUrl ?? '',
         agentCommand: s.reviewer.agentCommand ?? '',
+        reasoningEffort: s.reviewer.reasoningEffort ?? '',
       });
     });
   }, [sessionId]);
@@ -273,6 +274,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         model: draft.model.trim() || undefined,
         baseUrl: draft.baseUrl.trim() || undefined,
         agentCommand: draft.agentCommand.trim() || undefined,
+        reasoningEffort: (draft.reasoningEffort || undefined) as Settings['reviewer']['reasoningEffort'],
       },
     };
     void bridge.setSettings(next).then(() => {
@@ -296,80 +298,94 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         <div className="reviewer-actions">
           <button
             type="button"
-            className={`orch-btn${thinkingGlobal ? ' orch-btn-thinking-on' : ''}`}
+            className={`btn btn-sm${thinkingGlobal ? ' btn-active' : ''}`}
             title="show or hide the model's thinking output"
             onClick={() => setThinkingGlobal((v) => !v)}
           >
             think
           </button>
           {status === 'running' ? (
-            <button type="button" className="orch-btn" onClick={stop}>
+            <button type="button" className="btn btn-sm" onClick={stop}>
               stop
             </button>
           ) : (
-            <button type="button" className="orch-btn orch-btn-primary" onClick={() => void retry()}>
+            <button type="button" className="btn btn-sm btn-primary" onClick={() => void retry()}>
               start
             </button>
           )}
-          <button type="button" className="orch-btn" onClick={() => setConfigOpen((o) => !o)}>
+          <button type="button" className="btn btn-sm" onClick={() => setConfigOpen((o) => !o)}>
             config
           </button>
         </div>
       </header>
 
       {configOpen && (
-        <section className="reviewer-config">
-          <label>
-            api key
-            <input
-              type="password"
-              value={draft.apiKey}
-              onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
-              placeholder="sk-…  (provider detected from the key)"
-              autoComplete="off"
-            />
-          </label>
-          <label>
-            model
-            <input
-              list="reviewer-models"
-              value={draft.model}
-              onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
-              placeholder={DEFAULT_MODELS[derived]}
-            />
-            <datalist id="reviewer-models">
-              {(liveModels ?? REVIEWER_MODEL_SUGGESTIONS[derived]).map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
-          </label>
-          <label>
-            baseUrl (optional)
-            <input value={draft.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))} placeholder="(provider default)" />
-          </label>
-          <label>
-            agent launcher (optional)
-            <input value={draft.agentCommand ?? ''} onChange={(e) => setDraft((d) => ({ ...d, agentCommand: e.target.value }))} placeholder="e.g. opencode — spawned agents run it" />
-          </label>
-          <div className="reviewer-config-provider">
-            <span className="orch-judge-status orch-judge-running">{derived}</span>
-            {det.model && <span className="reviewer-model-label">{det.model}</span>}
-            {det.ambiguous && (
-              <select value={draft.provider} onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value }))}>
-                <option value="">openai (default)</option>
-                <option value="deepseek">deepseek</option>
-              </select>
-            )}
-          </div>
-          <div className="reviewer-config-actions">
-            <button type="button" className="orch-btn" onClick={saveConfig}>
-              save &amp; restart
-            </button>
-            <button type="button" className="orch-btn" onClick={() => setConfigOpen(false)}>
-              cancel
-            </button>
-          </div>
-        </section>
+        <div className="dialog-backdrop" onMouseDown={() => setConfigOpen(false)}>
+          <section className="dialog" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="dialog-title">reviewer config</div>
+            <div className="reviewer-config">
+              <label className="reviewer-config-wide">
+                api key
+                <input
+                  type="password"
+                  value={draft.apiKey}
+                  onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
+                  placeholder="sk-…  (provider detected from the key)"
+                  autoComplete="off"
+                />
+              </label>
+              <label>
+                model
+                <input
+                  list="reviewer-models"
+                  value={draft.model}
+                  onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+                  placeholder={DEFAULT_MODELS[derived]}
+                />
+                <datalist id="reviewer-models">
+                  {(liveModels ?? REVIEWER_MODEL_SUGGESTIONS[derived]).map((m) => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
+              </label>
+              <label>
+                baseUrl (optional)
+                <input value={draft.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))} placeholder="(provider default)" />
+              </label>
+              <label>
+                agent launcher (optional)
+                <input value={draft.agentCommand ?? ''} onChange={(e) => setDraft((d) => ({ ...d, agentCommand: e.target.value }))} placeholder="e.g. opencode — spawned agents run it" />
+              </label>
+              <label>
+                reasoning effort
+                <select value={draft.reasoningEffort} onChange={(e) => setDraft((d) => ({ ...d, reasoningEffort: e.target.value }))}>
+                  <option value="">auto (high on deepseek/openai)</option>
+                  <option value="high">high</option>
+                  <option value="medium">medium</option>
+                  <option value="low">low</option>
+                </select>
+              </label>
+              <div className="reviewer-config-provider">
+                <span className="orch-judge-status orch-judge-running">{derived}</span>
+                {det.model && <span className="reviewer-model-label">{det.model}</span>}
+                {det.ambiguous && (
+                  <select value={draft.provider} onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value }))}>
+                    <option value="">openai (default)</option>
+                    <option value="deepseek">deepseek</option>
+                  </select>
+                )}
+              </div>
+              <div className="reviewer-config-actions">
+                <button type="button" className="btn btn-sm btn-primary" onClick={saveConfig}>
+                  save &amp; restart
+                </button>
+                <button type="button" className="btn btn-sm" onClick={() => setConfigOpen(false)}>
+                  cancel
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
       )}
 
       <div className="reviewer-transcript" ref={scrollRef} onScroll={onScroll}>
@@ -407,7 +423,10 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
                   <span className="reviewer-item-time">{timeOf(it.at)}</span>
                 </div>
                 {(thinkingGlobal || thinkingOpen[it.seq]) && it.thinking !== undefined && (
-                  <div className="reviewer-thinking">{sanitizeChatText(it.thinking)}</div>
+                  <div className="reviewer-thinking">
+                    <span className="reviewer-thinking-caption">thinking</span>
+                    {sanitizeChatText(it.thinking)}
+                  </div>
                 )}
                 <div className="reviewer-item-body">
                   {sanitizeChatText(it.content ?? '')}
@@ -421,6 +440,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               const open = expanded[key] || it.state === 'error';
               return (
                 <div key={it.seq} className={`reviewer-item reviewer-item-tool reviewer-item-tool-${it.state ?? 'start'}`}>
+                  <span className={`reviewer-tool-band reviewer-tool-band-${it.state ?? 'running'}`} aria-hidden="true" />
                   <div className="reviewer-tool-header">
                     <div className="reviewer-tool-row">
                       <button type="button" className="reviewer-tool-toggle" onClick={() => setExpanded((e) => ({ ...e, [key]: !e[key] }))}>
@@ -486,25 +506,25 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             <div className="reviewer-question-actions">
               {question.kind === 'confirm-kill' && (
                 <>
-                  <button type="button" className="orch-btn orch-btn-primary" onClick={() => answerQuestion('yes')}>
+                  <button type="button" className="btn btn-sm btn-primary" onClick={() => answerQuestion('yes')}>
                     yes, kill
                   </button>
-                  <button type="button" className="orch-btn" onClick={() => answerQuestion('no')}>
+                  <button type="button" className="btn btn-sm" onClick={() => answerQuestion('no')}>
                     no
                   </button>
                 </>
               )}
               {question.kind === 'agent-kind' && (
                 <>
-                  <button type="button" className="orch-btn" onClick={() => answerQuestion('opencode')}>
+                  <button type="button" className="btn btn-sm" onClick={() => answerQuestion('opencode')}>
                     opencode
                   </button>
-                  <button type="button" className="orch-btn" onClick={() => answerQuestion('shell')}>
+                  <button type="button" className="btn btn-sm" onClick={() => answerQuestion('shell')}>
                     shell
                   </button>
                 </>
               )}
-              <button type="button" className="orch-btn" onClick={() => answerQuestion('skipped')}>
+              <button type="button" className="btn btn-sm" onClick={() => answerQuestion('skipped')}>
                 skip
               </button>
             </div>
@@ -527,7 +547,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         <div className="reviewer-goal-banner">
           <span className={`reviewer-goal-state reviewer-goal-state-${goal.state}`}>{goal.state}</span>
           <span className="reviewer-goal-text">{sanitizeChatText(goal.text)}</span>
-          <button type="button" className="orch-btn" title="clear the goal" onClick={() => void bridge.setReviewerGoal(sessionId, null)}>
+          <button type="button" className="btn btn-sm" title="clear the goal" onClick={() => void bridge.setReviewerGoal(sessionId, null)}>
             clear
           </button>
         </div>
@@ -544,7 +564,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             placeholder={status === 'running' ? 'prompt the reviewer…  (/goal <text> arms the watchdog)' : 'reviewer not running'}
             disabled={status !== 'running'}
           />
-          <button type="button" className="orch-btn orch-btn-primary" onClick={submit} disabled={status !== 'running'}>
+          <button type="button" className="btn btn-sm btn-primary" onClick={submit} disabled={status !== 'running'}>
             send
           </button>
         </div>
