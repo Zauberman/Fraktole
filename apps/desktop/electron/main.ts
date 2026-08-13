@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildAgentEnv } from './agent-env.js';
 import { MailboxRouter, ORCHESTRATOR_ID, messageId } from './mailbox.js';
+import { listModels } from './model-list.js';
 import { PtyHost } from './pty-host.js';
 import { ProjectsStore } from './projects.js';
 import { ReviewerHost, type ReviewerToolCallEvent } from './reviewer.js';
@@ -26,6 +27,7 @@ import {
   type SessionSnapshot,
   type Settings,
   type ReviewerEntry,
+  type ReviewerSpawnRequest,
 } from '../src/shared/ipc.js';
 import { THEME_IDS, type ThemeId } from '../src/themes.js';
 
@@ -52,6 +54,8 @@ async function waitForDevServer(url: string, timeoutMs = 15_000): Promise<void> 
 let mainWindow: BrowserWindow | null = null;
 let currentTheme: ThemeId = 'midnight';
 let registry: SessionRegistry | null = null;
+/** In-flight reviewer spawns awaiting the renderer's tile mount. */
+const pendingSpawns = new Map<string, { agentId: string; resolve(out: string): void }>();
 
 /** Custom application menu: File → New Tile/Sessions/Quit, View → Theme.
  *  The default Electron menu would expose Reload (orphaning every PTY) and
@@ -256,16 +260,50 @@ if (!app.requestSingleInstanceLock()) {
             tileOfAgent,
             agentOfTile,
             cwdOfAgent,
+            killAgent: async (tileId) => {
+              host.kill(tileId);
+              return `killed ${tileId}`;
+            },
+            agentCount: () => rt?.session.tiles.length ?? 0,
+            spawnAgent: async (kind, cwd) => {
+              if (!rt) return 'error: no runtime for session';
+              const current = rt;
+              const target = cwd.length > 0 ? cwd : judgeCwdFor(current.session);
+              const agentId = sessions.allocateAgentId(current.session);
+              current.session.tiles.push({ agentId, cwd: target });
+              await sessions.save(current.session);
+              current.updateSession(current.session);
+              await sessions.ensureAgentMailbox(current.session.id, agentId);
+              const requestId = `spawn-${Date.now()}-${agentId}`;
+              return new Promise<string>((resolve) => {
+                const timer = setTimeout(() => {
+                  pendingSpawns.delete(requestId);
+                  resolve(`error: spawn timed out — the renderer never mounted tile for ${agentId}`);
+                }, 20_000);
+                pendingSpawns.set(requestId, { agentId, resolve: (out) => {
+                  clearTimeout(timer);
+                  resolve(out);
+                } });
+                mainWindow?.webContents.send(IPC.reviewerSpawnRequest, {
+                  sessionId: current.session.id,
+                  requestId,
+                  agentId,
+                  cwd: target,
+                  command: kind === 'shell' ? undefined : kind,
+                } satisfies ReviewerSpawnRequest);
+              });
+            },
           },
           tools,
           emit: {
-            status: (status, error) =>
-              mainWindow?.webContents.send(IPC.reviewerStatus, session.id, { status, error }),
+            status: (status, error, model) =>
+              mainWindow?.webContents.send(IPC.reviewerStatus, session.id, { status, error, model }),
             stream: (delta) => mainWindow?.webContents.send(IPC.reviewerStream, session.id, delta),
             toolCall: (ev: ReviewerToolCallEvent) =>
               mainWindow?.webContents.send(IPC.reviewerToolCall, session.id, ev),
             message: (entry) => mainWindow?.webContents.send(IPC.reviewerMessage, session.id, entry),
             goal: (ev) => mainWindow?.webContents.send(IPC.reviewerGoal, session.id, ev),
+            question: (ev) => mainWindow?.webContents.send(IPC.reviewerQuestion, session.id, ev),
           },
           logger: (line) => console.log(line),
         });
@@ -338,6 +376,9 @@ if (!app.requestSingleInstanceLock()) {
       const env = buildAgentEnv(session.id, agentId, 'agent', rt.sessionDir());
       try {
         rt.host.spawn(args.tileId, { cwd: args.cwd, cols: args.cols, rows: args.rows, envExt: env });
+        if (args.command && args.command.trim().length > 0) {
+          rt.host.write(args.tileId, `${args.command.trim()}\n`);
+        }
       } catch (err) {
         // a failed spawn must close the tile through the normal exit path,
         // otherwise the renderer would keep a dead tile forever
@@ -505,6 +546,28 @@ if (!app.requestSingleInstanceLock()) {
       const rt = registry?.get(sessionId) ?? null;
       await rt?.reviewer.setGoal(typeof text === 'string' && text.trim().length > 0 ? text.trim() : null);
     });
+    ipcMain.handle(IPC.reviewerAnswer, async (_e, sessionId: string, askId: string, answer: string): Promise<void> => {
+      const rt = registry?.get(sessionId) ?? null;
+      rt?.reviewer.answerQuestion(askId, answer);
+    });
+    ipcMain.handle(IPC.reviewerKillNow, async (_e, sessionId: string, agentId: string): Promise<string> => {
+      const rt = registry?.get(sessionId) ?? null;
+      if (!rt) return 'error: no runtime for session';
+      return rt.reviewer.killAgentNow(agentId);
+    });
+    ipcMain.handle(
+      IPC.reviewerSpawnResult,
+      async (_e, sessionId: string, requestId: string, payload: { tileId: string | null; agentId: string | null }): Promise<void> => {
+        const pending = pendingSpawns.get(requestId);
+        if (!pending) return;
+        pendingSpawns.delete(requestId);
+        if (!payload?.tileId) {
+          pending.resolve(`error: the renderer could not mount the tile for ${payload?.agentId ?? '?'}`);
+          return;
+        }
+        pending.resolve(`spawned agent ${payload.agentId} (tile ${payload.tileId})`);
+      },
+    );
     ipcMain.handle(IPC.reviewerStop, async (_e, sessionId: string): Promise<void> => {
       const rt = registry?.get(sessionId) ?? null;
       rt?.reviewer.cancel();
@@ -523,6 +586,14 @@ if (!app.requestSingleInstanceLock()) {
       if (!rt) return [];
       return rt.reviewer.conversation;
     });
+    ipcMain.handle(
+      IPC.reviewerListModels,
+      async (_e, opts: { adapter: 'openai' | 'anthropic' | 'ollama'; apiKey: string; baseUrl: string }): Promise<string[]> => {
+        const key = typeof opts?.apiKey === 'string' ? opts.apiKey.trim() : '';
+        if (opts?.adapter !== 'ollama' && key.length === 0) return [];
+        return listModels({ adapter: opts.adapter, apiKey: key, baseUrl: typeof opts?.baseUrl === 'string' ? opts.baseUrl : '' });
+      },
+    );
     ipcMain.handle(IPC.scrollbackGet, async (_e, sessionId: string, agentId: string): Promise<string[] | null> => {
       const rt = registry?.get(sessionId) ?? null;
       if (!rt) return null;

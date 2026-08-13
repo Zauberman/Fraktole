@@ -8,6 +8,7 @@ interface TileProps {
   cwd: string;
   zoomed: boolean;
   agentId?: string | null;
+  command?: string;
   onSpawned?(agentId: string): void;
   onClose(id: TileId): void;
   onZoom(id: TileId): void;
@@ -36,7 +37,7 @@ const ICONS = {
 };
 
 export function Tile(props: TileProps): React.JSX.Element {
-  const { sessionId, id, cwd, zoomed, agentId, onSpawned, onClose, onZoom, onDragStart, onDragEnd } = props;
+  const { sessionId, id, cwd, zoomed, agentId, command, onSpawned, onClose, onZoom, onDragStart, onDragEnd } = props;
   return (
     <>
       <header
@@ -74,7 +75,7 @@ export function Tile(props: TileProps): React.JSX.Element {
         </span>
       </header>
       <div className="tile-body">
-        <Terminal sessionId={sessionId} tileId={id} cwd={cwd} agentId={agentId} onSpawned={onSpawned} />
+        <Terminal sessionId={sessionId} tileId={id} cwd={cwd} agentId={agentId} command={command} onSpawned={onSpawned} />
       </div>
     </>
   );

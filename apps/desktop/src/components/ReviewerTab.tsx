@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { ReviewerEntry, ReviewerGoal, ReviewerStatus, ReviewerToolCallEvent } from '../ipc.js';
+import type { ReviewerEntry, ReviewerGoal, ReviewerQuestion, ReviewerStatus, ReviewerToolCallEvent } from '../ipc.js';
 import { bridge, type Settings } from '../ipc.js';
 import {
   DEFAULT_MODELS,
@@ -52,13 +52,16 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const { sessionId } = props;
   const [status, setStatus] = useState<ReviewerStatus>('offline');
   const [statusError, setStatusError] = useState<string | undefined>(undefined);
+  const [runningModel, setRunningModel] = useState<string | undefined>(undefined);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [goal, setGoal] = useState<ReviewerGoal | null>(null);
+  const [question, setQuestion] = useState<ReviewerQuestion | null>(null);
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '' });
+  const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '', agentCommand: '' });
+  const [liveModels, setLiveModels] = useState<string[] | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(0);
 
@@ -81,6 +84,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         provider: s.reviewer.provider ?? '',
         model: s.reviewer.model ?? '',
         baseUrl: s.reviewer.baseUrl ?? '',
+        agentCommand: s.reviewer.agentCommand ?? '',
       });
     });
   }, [sessionId]);
@@ -90,6 +94,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       bridge.onReviewerStatus(sessionId, (s) => {
         setStatus(s.status as ReviewerStatus);
         setStatusError(s.error);
+        setRunningModel(s.model);
       }),
       bridge.onReviewerStream(sessionId, (delta) => {
         setItems((its) => {
@@ -135,6 +140,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         });
       }),
       bridge.onReviewerGoal(sessionId, (ev) => setGoal(ev.goal)),
+      bridge.onReviewerQuestion(sessionId, (ev) => setQuestion(ev)),
     ];
     return () => {
       for (const unsub of unsubs) unsub();
@@ -167,6 +173,11 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       void bridge.setReviewerGoal(sessionId, rest.length > 0 ? rest : null);
       return;
     }
+    if (text.startsWith('/kill')) {
+      const rest = text.slice(5).trim();
+      if (rest.length > 0) void bridge.killReviewerAgent(sessionId, rest);
+      return;
+    }
     void bridge.promptReviewer(sessionId, text);
   };
 
@@ -181,6 +192,12 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     void bridge.stopReviewer(sessionId);
   };
 
+  const answerQuestion = (answer: string): void => {
+    if (!question) return;
+    void bridge.answerReviewerQuestion(sessionId, question.askId, answer);
+    setQuestion(null);
+  };
+
   // live provider resolution from the pasted key (same logic the harness uses)
   const det = resolveProvider(draft.apiKey, {
     baseUrl: draft.baseUrl.trim() || undefined,
@@ -192,6 +209,25 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       ? 'deepseek'
       : det.adapter;
 
+  // fetch the live model list from the provider API (debounced); null = fall
+  // back to the offline suggestions; [] = the API had nothing to say
+  useEffect(() => {
+    if (!configOpen) return;
+    const key = draft.apiKey.trim();
+    if (derived !== 'ollama' && key.length === 0) {
+      setLiveModels(null);
+      return;
+    }
+    const adapter = derived === 'deepseek' ? 'openai' : derived;
+    const timer = window.setTimeout(() => {
+      void bridge
+        .listReviewerModels({ adapter, apiKey: key, baseUrl: det.baseUrl })
+        .then((models) => setLiveModels(models.length > 0 ? models : null))
+        .catch(() => setLiveModels(null));
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [configOpen, draft.apiKey, draft.baseUrl, draft.provider, det.baseUrl, derived]);
+
   const saveConfig = (): void => {
     if (!settings) return;
     const next = {
@@ -201,6 +237,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         provider: (draft.provider || undefined) as Settings['reviewer']['provider'],
         model: draft.model.trim() || undefined,
         baseUrl: draft.baseUrl.trim() || undefined,
+        agentCommand: draft.agentCommand.trim() || undefined,
       },
     };
     void bridge.setSettings(next).then(() => {
@@ -219,6 +256,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             <span className="reviewer-status-dot" aria-hidden="true" />
             {status}
           </span>
+          {runningModel && <span className="reviewer-model-label">{runningModel}</span>}
         </div>
         <div className="reviewer-actions">
           {status === 'running' ? (
@@ -257,7 +295,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               placeholder={DEFAULT_MODELS[derived]}
             />
             <datalist id="reviewer-models">
-              {REVIEWER_MODEL_SUGGESTIONS[derived].map((m) => (
+              {(liveModels ?? REVIEWER_MODEL_SUGGESTIONS[derived]).map((m) => (
                 <option key={m} value={m} />
               ))}
             </datalist>
@@ -266,8 +304,13 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             baseUrl (optional)
             <input value={draft.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))} placeholder="(provider default)" />
           </label>
+          <label>
+            agent launcher (optional)
+            <input value={draft.agentCommand ?? ''} onChange={(e) => setDraft((d) => ({ ...d, agentCommand: e.target.value }))} placeholder="e.g. opencode — spawned agents run it" />
+          </label>
           <div className="reviewer-config-provider">
             <span className="orch-judge-status orch-judge-running">{derived}</span>
+            {det.model && <span className="reviewer-model-label">{det.model}</span>}
             {det.ambiguous && (
               <select value={draft.provider} onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value }))}>
                 <option value="">openai (default)</option>
@@ -369,6 +412,54 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               );
             })()
           ),
+        )}
+        {question && (
+          <div className="reviewer-question-card">
+            <div className="reviewer-question-meta">
+              <span className="reviewer-question-mark" aria-hidden="true">
+                ?
+              </span>
+              <span className="reviewer-item-role">question</span>
+              <span className="reviewer-item-time">{timeOf(question.at ?? Date.now())}</span>
+            </div>
+            <div className="reviewer-question-text">{sanitizeChatText(question.question)}</div>
+            <div className="reviewer-question-actions">
+              {question.kind === 'confirm-kill' && (
+                <>
+                  <button type="button" className="orch-btn orch-btn-primary" onClick={() => answerQuestion('yes')}>
+                    yes, kill
+                  </button>
+                  <button type="button" className="orch-btn" onClick={() => answerQuestion('no')}>
+                    no
+                  </button>
+                </>
+              )}
+              {question.kind === 'agent-kind' && (
+                <>
+                  <button type="button" className="orch-btn" onClick={() => answerQuestion('opencode')}>
+                    opencode
+                  </button>
+                  <button type="button" className="orch-btn" onClick={() => answerQuestion('shell')}>
+                    shell
+                  </button>
+                </>
+              )}
+              <button type="button" className="orch-btn" onClick={() => answerQuestion('skipped')}>
+                skip
+              </button>
+            </div>
+            <div className="reviewer-question-row">
+              <input
+                className="reviewer-question-input"
+                placeholder="type your answer…"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && e.currentTarget.value.trim().length > 0) {
+                    answerQuestion(e.currentTarget.value.trim());
+                  }
+                }}
+              />
+            </div>
+          </div>
         )}
       </div>
 

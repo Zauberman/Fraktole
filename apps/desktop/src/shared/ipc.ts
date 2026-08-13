@@ -40,6 +40,12 @@ export const IPC = {
   reviewerCompact: 'reviewer:compact',
   reviewerSetGoal: 'reviewer:set-goal',
   reviewerGoal: 'reviewer:goal',
+  reviewerListModels: 'reviewer:list-models',
+  reviewerQuestion: 'reviewer:question',
+  reviewerAnswer: 'reviewer:answer',
+  reviewerKillNow: 'reviewer:kill-now',
+  reviewerSpawnRequest: 'reviewer:spawn-request',
+  reviewerSpawnResult: 'reviewer:spawn-result',
   reviewerTranscript: 'reviewer:transcript',
   reviewerStatus: 'reviewer:status',
   reviewerStream: 'reviewer:stream',
@@ -71,6 +77,9 @@ export interface PtySpawnArgs {
   /** Durable agent id. Omitted on live spawns (main allocates and registers
    *  one); provided on session restore so mailboxes stay intact. */
   agentId?: string;
+  /** Launcher command written into the spawned shell (reviewer-spawned
+   *  agent tiles). */
+  command?: string;
 }
 
 export interface PtySpawnResult {
@@ -104,9 +113,12 @@ export interface Settings {
     provider?: 'openai' | 'anthropic' | 'ollama' | 'deepseek';
     /** User's model pick; empty → per-provider default. */
     model?: string;
-    /** Custom OpenAI-compatible endpoint. */
-    baseUrl?: string;
-  };
+  /** Custom OpenAI-compatible endpoint. */
+  baseUrl?: string;
+  /** Launcher command for reviewer-spawned agent tiles (e.g. "opencode");
+   *  empty = the model asks the user which agent to spawn. */
+  agentCommand?: string;
+};
 }
 
 /** The harness reviewer's lifecycle status. */
@@ -134,11 +146,38 @@ export interface ReviewerTask {
 export interface ReviewerState {
   goal: ReviewerGoal | null;
   tasks: ReviewerTask[];
+  /** The last agent launcher the user picked for a reviewer spawn — the
+   *  model may reuse it without asking again. */
+  lastAgentKind: string | null;
 }
 
 /** reviewer:goal event payload. */
 export interface ReviewerGoalEvent {
   goal: ReviewerGoal | null;
+}
+
+/** A pending ask_user question. The loop suspends until the user answers
+ *  (reviewer:answer with the same askId) or skips. */
+export interface ReviewerQuestion {
+  askId: string;
+  question: string;
+  /** confirm-kill: yes/no buttons (a yes grants one kill of agentId);
+   *  agent-kind: quick picks for the spawn launcher; free: plain input. */
+  kind: 'free' | 'confirm-kill' | 'agent-kind';
+  agentId?: string;
+  at: number;
+}
+
+/** Main → renderer: the reviewer wants a new agent tile. The renderer adds
+ *  it to its window tree with the pre-allocated agentId and reports back on
+ *  reviewer:spawn-result. */
+export interface ReviewerSpawnRequest {
+  sessionId: string;
+  requestId: string;
+  agentId: string;
+  cwd: string;
+  /** Launcher command written into the shell ('' = plain shell). */
+  command?: string;
 }
 
 export interface ReviewerEntry {

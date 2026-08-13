@@ -1,7 +1,9 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { FraktoleMessage, ReviewerState, ReviewerTask } from '../src/shared/ipc.js';
+import type { FraktoleMessage, ReviewerQuestion, ReviewerState, ReviewerTask } from '../src/shared/ipc.js';
+import { sanitizeChatText } from '../src/shared/sanitize.js';
+import { emptyState } from './reviewer-state.js';
 import { ORCHESTRATOR_ID, messageId } from './mailbox.js';
 import type { TileRecorder } from './tile-recorder.js';
 
@@ -19,9 +21,23 @@ export interface ReviewerToolContext {
   agentOfTile(tileId: string): string | null;
   cwdOfAgent(agentId: string): string | null;
   /** The durable goal/task ledger; the host owns persistence and always
-   *  injects these two callbacks when it builds the merged context. */
+   *  injects these callbacks when it builds the merged context. */
   getState?(): ReviewerState;
   updateTask?(task: ReviewerTask): Promise<void>;
+  /** Suspends the loop until the user answers the question card. */
+  askUser?(question: string, kind: ReviewerQuestion['kind'], agentId?: string): Promise<string>;
+  /** Raw PTY kill (the host guards grants before routing here). */
+  killAgent?(tileId: string): Promise<string>;
+  /** Grant-checked kill (single-use per agent); the host enforces policy. */
+  tryKillAgent?(agentId: string): Promise<string>;
+  /** Spawn an agent tile; main allocates the id and mounts it in the UI. */
+  spawnAgent?(kind: string, cwd: string): Promise<string>;
+  /** Live agent tile count (spawn cap). */
+  agentCount?(): number;
+  /** The configured launcher command ('' = none). */
+  getAgentCommand?(): string;
+  /** Set or clear the watchdog goal (user-authorized: always allowed). */
+  setGoal?(text: string): Promise<void>;
 }
 
 export interface ReviewerTool {
@@ -143,7 +159,7 @@ const TOOLS: ReviewerTool[] = [
     description: 'Return the current goal and task ledger (the durable watchdog state).',
     inputSchema: { type: 'object', properties: {} },
     async run(_args, ctx) {
-      return JSON.stringify(ctx.getState?.() ?? ({ goal: null, tasks: [] } as ReviewerState), null, 2);
+      return JSON.stringify(ctx.getState?.() ?? emptyState(), null, 2);
     },
   },
   {
@@ -176,6 +192,96 @@ const TOOLS: ReviewerTool[] = [
       };
       await ctx.updateTask?.(task);
       return `task ${task.id} ${task.status === 'pending' ? 'recorded' : `→ ${task.status}`}`;
+    },
+  },
+  {
+    name: 'ask_user',
+    description:
+      'Ask the user a question and WAIT for their answer (the loop suspends until they reply or skip). Use it before destructive or uncertain steps: kind confirm-kill shows yes/no buttons and a "yes" grants one kill of agentId; kind agent-kind lets the user pick an agent launcher; kind free is a plain question.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        question: { type: 'string' },
+        kind: { type: 'string', enum: ['free', 'confirm-kill', 'agent-kind'] },
+        agentId: { type: 'string' },
+      },
+      required: ['question'],
+    },
+    async run(args, ctx) {
+      const question = typeof args.question === 'string' ? args.question.trim() : '';
+      if (question.length === 0) return 'error: question required';
+      const kind = args.kind === 'confirm-kill' || args.kind === 'agent-kind' ? args.kind : 'free';
+      const agentId = typeof args.agentId === 'string' && args.agentId.length > 0 ? args.agentId : undefined;
+      if (!ctx.askUser) return 'error: ask_user unavailable';
+      try {
+        const answer = await ctx.askUser(question, kind, agentId);
+        return `user answered: ${sanitizeChatText(answer)}`;
+      } catch (err) {
+        return `error: ${(err as Error).message}`;
+      }
+    },
+  },
+  {
+    name: 'kill_agent',
+    description:
+      'Kill an agent tile (terminates its PTY and closes the tile). REQUIRES a single-use user grant: ask the user first with ask_user (kind confirm-kill, agentId <id>) and only call this after they answer yes. The user may also kill directly with the /kill <id> command.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'agent id (from list_tiles)' },
+      },
+      required: ['agentId'],
+    },
+    async run(args, ctx) {
+      const agentId = typeof args.agentId === 'string' ? args.agentId.trim() : '';
+      if (agentId.length === 0) return 'error: agentId required';
+      return ctx.tryKillAgent?.(agentId) ?? 'error: kill unavailable';
+    },
+  },
+  {
+    name: 'spawn_agent',
+    description:
+      'Spawn a new agent tile. The tile runs a shell in cwd (default: the session project) and the launch command is written into it — e.g. kind "opencode" launches the opencode CLI, "shell" keeps a plain shell. You may fire a known kind directly (the user already picked it — check the state ledger), or omit kind to let the user choose (the choice is remembered). Spawning is capped at 8 agents per session. After the spawn, read the tile tail to verify the launch; if it failed, re-prompt the user.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cwd: { type: 'string', description: 'working directory (defaults to the project root)' },
+        kind: { type: 'string', description: 'launcher (e.g. opencode, shell, or a command); empty = user picks' },
+      },
+    },
+    async run(args, ctx) {
+      const cwd = typeof args.cwd === 'string' && args.cwd.trim().length > 0 ? args.cwd.trim() : '';
+      const kindArg = typeof args.kind === 'string' ? args.kind.trim() : '';
+      const configCommand = ctx.getAgentCommand?.() ?? '';
+      let kind = kindArg;
+      if (kind.length === 0) kind = ctx.getState?.().lastAgentKind ?? '';
+      if (kind.length === 0) kind = configCommand;
+      if (kind.length === 0) {
+        if (!ctx.askUser) return 'error: no agent kind — ask the user which agent to spawn';
+        kind = (await ctx.askUser('which agent should I spawn? (opencode, shell, or a launcher command)', 'agent-kind')).trim();
+        if (/^(skipped?|skip)$/i.test(kind)) return 'error: spawn cancelled by the user';
+      }
+      if (kind.length === 0) return 'error: no agent kind';
+      const count = ctx.agentCount?.() ?? 0;
+      if (count >= 8) return `error: agent cap (8) reached — ${count} tiles running`;
+      return ctx.spawnAgent?.(kind, cwd) ?? 'error: spawn unavailable';
+    },
+  },
+  {
+    name: 'set_goal',
+    description:
+      'Set a new watchdog goal (replaces the current one and re-arms the loop) or clear it by omitting text. Only the user may authorize this — but the user has authorized you to set goals whenever the situation calls for it. Use it to formalize what the loop is working toward.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'the new goal (omit or empty to clear)' },
+      },
+    },
+    async run(args, ctx) {
+      if (!ctx.setGoal) return 'error: set_goal unavailable';
+      const text = typeof args.text === 'string' ? args.text.trim() : '';
+      await ctx.setGoal(text.length > 0 ? text : '');
+      return text.length > 0 ? `goal set: ${sanitizeChatText(text)}` : 'goal cleared';
     },
   },
   {

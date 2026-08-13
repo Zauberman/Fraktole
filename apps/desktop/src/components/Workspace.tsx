@@ -7,6 +7,7 @@ export interface WorkspaceTileMeta {
   id: TileId;
   cwd: string;
   agentId: string | null;
+  command?: string;
 }
 
 interface WorkspaceProps {
@@ -137,6 +138,7 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
               cwd={meta?.cwd ?? id}
               zoomed={zoomed}
               agentId={meta?.agentId ?? null}
+              command={meta?.command}
               onSpawned={(agentId) => onSpawned(id, agentId)}
               onClose={onClose}
               onZoom={onZoom}

@@ -127,6 +127,22 @@ body {
   user-select: none;
 }
 
+/* ————— interaction primitives ————— */
+
+/* every interactive element gets a visible keyboard ring; components with
+   their own focus rule keep it (more specific selectors win) */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[role='button']:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 1px;
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
 /* ————— chrome ————— */
 
 .app-shell {
@@ -187,6 +203,7 @@ body {
 .tab-btn-active {
   color: var(--accent);
   background: var(--accent-tint);
+  box-shadow: inset 0 -1px 0 var(--accent);
 }
 
 /* ————— session views ————— */
@@ -279,6 +296,22 @@ body {
   background: currentColor;
   display: inline-block;
   flex-shrink: 0;
+}
+
+.reviewer-model-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  color: var(--text-faint);
+  text-transform: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.reviewer-model-label-inline {
+  text-transform: none;
 }
 
 .orch-judge-running .reviewer-status-dot {
@@ -664,6 +697,79 @@ body {
   font-size: var(--text-2xs);
 }
 
+.reviewer-question-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  margin: var(--s2) 0 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--bg-raised);
+  animation: reviewer-in 200ms var(--ease-out);
+}
+
+.reviewer-question-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.reviewer-question-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-pill);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1;
+}
+
+.reviewer-question-text {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+  line-height: var(--lh-body);
+  user-select: text;
+}
+
+.reviewer-question-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.reviewer-question-row {
+  display: flex;
+  gap: var(--s2);
+}
+
+.reviewer-question-input {
+  flex: 1;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-xs);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  outline: none;
+  padding: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.reviewer-question-input::placeholder {
+  color: var(--text-faint);
+}
+
+.reviewer-question-input:focus {
+  border-color: var(--focus-border);
+  box-shadow: 0 0 0 1px var(--focus-ring);
+}
+
 .reviewer-composer {
   display: flex;
   align-items: center;
@@ -939,7 +1045,7 @@ body {
 
 .divider:hover,
 .is-resizing .divider {
-  background: var(--focus-ring);
+  background: var(--accent-tint);
 }
 
 .is-resizing {
@@ -1030,6 +1136,11 @@ body {
   color: var(--accent);
   border-color: var(--accent);
   background: var(--accent-tint);
+}
+
+.file-tab:hover {
+  color: var(--text);
+  background: var(--hover-surface);
 }
 
 .file-tab-dirty {
@@ -1393,7 +1504,8 @@ body {
 }
 
 .orch-btn-primary:hover:not(:disabled) {
-  color: var(--btn-primary-hover);
+  background: var(--accent);
+  color: var(--btn-primary-fg);
   border-color: var(--accent);
 }
 
@@ -1630,9 +1742,20 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg);
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 45%, var(--accent-glow), transparent 70%),
+    var(--bg);
   opacity: 1;
   pointer-events: none;
+}
+
+.boot-overlay::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 .boot-wordmark {
@@ -1693,7 +1816,9 @@ body {
   .reviewer-item-assistant,
   .reviewer-item-system,
   .reviewer-item-tool,
-  .reviewer-config {
+  .reviewer-config,
+  .reviewer-question-card,
+  .reviewer-goal-banner {
     animation: none;
   }
 
@@ -1935,6 +2060,11 @@ body {
   background: var(--hover-surface);
 }
 
+.term-menu-item:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: -1px;
+}
+
 .term-menu-item:disabled {
   color: var(--text-faint);
   cursor: default;
@@ -2160,6 +2290,7 @@ body {
 
 .dialog-input:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--focus-ring);
 }
 
 .dialog-projects {

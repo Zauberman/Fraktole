@@ -6,7 +6,7 @@ import { emptyState, isGoalMet, loadState, persistState } from '../electron/revi
 
 describe('reviewer state', () => {
   it('emptyState has no goal and no tasks', () => {
-    expect(emptyState()).toEqual({ goal: null, tasks: [] });
+    expect(emptyState()).toEqual({ goal: null, tasks: [], lastAgentKind: null });
   });
 
   it('persist + load roundtrips a full state', async () => {
@@ -15,6 +15,7 @@ describe('reviewer state', () => {
     const state = {
       goal: { text: 'ship it', setAt: 123, state: 'met' as const },
       tasks: [{ id: 't-1', agentId: 'agent-1', title: 'build', status: 'done' as const, updatedAt: 456 }],
+      lastAgentKind: 'opencode',
     };
     await persistState(file, state);
     expect(await loadState(file)).toEqual(state);
@@ -22,21 +23,28 @@ describe('reviewer state', () => {
 
   it('a missing file loads as empty', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fraktole-state-'));
-    expect(await loadState(join(dir, 'nope.json'))).toEqual({ goal: null, tasks: [] });
+    expect(await loadState(join(dir, 'nope.json'))).toEqual({ goal: null, tasks: [], lastAgentKind: null });
   });
 
   it('a corrupt file loads as empty, never throws', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fraktole-state-'));
     const file = join(dir, 'state.json');
     await writeFile(file, '{not json!!', 'utf8');
-    expect(await loadState(file)).toEqual({ goal: null, tasks: [] });
+    expect(await loadState(file)).toEqual({ goal: null, tasks: [], lastAgentKind: null });
   });
 
   it('a malformed goal (bad state value) loads as empty', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fraktole-state-'));
     const file = join(dir, 'state.json');
     await writeFile(file, JSON.stringify({ goal: { text: 'x', setAt: 1, state: 'weird' }, tasks: [] }), 'utf8');
-    expect(await loadState(file)).toEqual({ goal: null, tasks: [] });
+    expect(await loadState(file)).toEqual({ goal: null, tasks: [], lastAgentKind: null });
+  });
+
+  it('loadState keeps a persisted lastAgentKind', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fraktole-state-'));
+    const file = join(dir, 'state.json');
+    await writeFile(file, JSON.stringify({ goal: null, tasks: [], lastAgentKind: 'opencode' }), 'utf8');
+    expect((await loadState(file)).lastAgentKind).toBe('opencode');
   });
 
   it('isGoalMet matches only the sentinel prefix', () => {

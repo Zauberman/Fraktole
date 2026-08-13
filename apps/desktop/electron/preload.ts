@@ -13,6 +13,8 @@ import {
   type PtySpawnResult,
   type ReviewerEntry,
   type ReviewerGoalEvent,
+  type ReviewerQuestion,
+  type ReviewerSpawnRequest,
   type ReviewerToolCallEvent,
   type SendMessageArgs,
   type SessionFile,
@@ -103,8 +105,8 @@ const api = {
   reviewerTranscript: (sessionId: string): Promise<ReviewerEntry[]> =>
     ipcRenderer.invoke(IPC.reviewerTranscript, sessionId),
 
-  onReviewerStatus: (sessionId: string, cb: (s: { status: string; error?: string }) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, sid: string, s: { status: string; error?: string }): void => {
+  onReviewerStatus: (sessionId: string, cb: (s: { status: string; error?: string; model?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, s: { status: string; error?: string; model?: string }): void => {
       if (sid === sessionId) cb(s);
     };
     ipcRenderer.on(IPC.reviewerStatus, listener);
@@ -141,6 +143,29 @@ const api = {
     ipcRenderer.on(IPC.reviewerGoal, listener);
     return () => ipcRenderer.removeListener(IPC.reviewerGoal, listener);
   },
+  listReviewerModels: (opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]> =>
+    ipcRenderer.invoke(IPC.reviewerListModels, opts),
+  onReviewerQuestion: (sessionId: string, cb: (ev: ReviewerQuestion) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, ev: ReviewerQuestion): void => {
+      if (sid === sessionId) cb(ev);
+    };
+    ipcRenderer.on(IPC.reviewerQuestion, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerQuestion, listener);
+  },
+  answerReviewerQuestion: (sessionId: string, askId: string, answer: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.reviewerAnswer, sessionId, askId, answer),
+  killReviewerAgent: (sessionId: string, agentId: string): Promise<string> =>
+    ipcRenderer.invoke(IPC.reviewerKillNow, sessionId, agentId),
+  onReviewerSpawnRequest: (cb: (ev: ReviewerSpawnRequest) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, payload: ReviewerSpawnRequest): void => cb(payload);
+    ipcRenderer.on(IPC.reviewerSpawnRequest, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerSpawnRequest, listener);
+  },
+  reviewerSpawnResult: (
+    sessionId: string,
+    requestId: string,
+    payload: { tileId: string | null; agentId: string | null },
+  ): Promise<void> => ipcRenderer.invoke(IPC.reviewerSpawnResult, sessionId, requestId, payload),
 
   clipboardWrite: (text: string): Promise<void> => ipcRenderer.invoke(IPC.clipboardWrite, text),
   clipboardRead: (): Promise<string> => ipcRenderer.invoke(IPC.clipboardRead),

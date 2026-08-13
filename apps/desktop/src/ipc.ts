@@ -12,6 +12,8 @@ import type {
   ReviewerEntry,
   ReviewerGoal,
   ReviewerGoalEvent,
+  ReviewerQuestion,
+  ReviewerSpawnRequest,
   ReviewerStatus,
   ReviewerToolCallEvent,
   SendMessageArgs,
@@ -36,6 +38,8 @@ export type {
   ReviewerEntry,
   ReviewerGoal,
   ReviewerGoalEvent,
+  ReviewerQuestion,
+  ReviewerSpawnRequest,
   ReviewerStatus,
   ReviewerToolCallEvent,
   SendMessageArgs,
@@ -82,12 +86,22 @@ export interface FraktoleBridge {
   restartReviewer(sessionId: string): Promise<boolean>;
   compactReviewer(sessionId: string): Promise<void>;
   reviewerTranscript(sessionId: string): Promise<ReviewerEntry[]>;
-  onReviewerStatus(sessionId: string, cb: (s: { status: string; error?: string }) => void): () => void;
+  onReviewerStatus(sessionId: string, cb: (s: { status: string; error?: string; model?: string }) => void): () => void;
   onReviewerStream(sessionId: string, cb: (delta: string) => void): () => void;
   onReviewerToolCall(sessionId: string, cb: (ev: ReviewerToolCallEvent) => void): () => void;
   onReviewerMessage(sessionId: string, cb: (entry: ReviewerEntry) => void): () => void;
   setReviewerGoal(sessionId: string, text: string | null): Promise<void>;
   onReviewerGoal(sessionId: string, cb: (ev: ReviewerGoalEvent) => void): () => void;
+  listReviewerModels(opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]>;
+  onReviewerQuestion(sessionId: string, cb: (ev: ReviewerQuestion) => void): () => void;
+  answerReviewerQuestion(sessionId: string, askId: string, answer: string): Promise<void>;
+  killReviewerAgent(sessionId: string, agentId: string): Promise<string>;
+  onReviewerSpawnRequest(cb: (ev: ReviewerSpawnRequest) => void): () => void;
+  reviewerSpawnResult(
+    sessionId: string,
+    requestId: string,
+    payload: { tileId: string | null; agentId: string | null },
+  ): Promise<void>;
   clipboardWrite(text: string): Promise<void>;
   clipboardRead(): Promise<string>;
   createSnapshot(sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot>;

@@ -4,6 +4,7 @@ import type {
   FraktoleMessage,
   ReviewerEntry,
   ReviewerGoalEvent,
+  ReviewerQuestion,
   ReviewerState,
   ReviewerStatus,
   ReviewerTask,
@@ -11,6 +12,7 @@ import type {
 } from '../src/shared/ipc.js';
 import { resolveProvider, type ProviderResolution } from '../src/shared/reviewer-detect.js';
 import { sanitizeChatText } from '../src/shared/sanitize.js';
+import { ORCHESTRATOR_ID } from './mailbox.js';
 import { ReviewerTools, type ReviewerToolContext } from './reviewer-tools.js';
 import { emptyState, isGoalMet, loadState, persistState } from './reviewer-state.js';
 import { createProvider, type ProviderClient, type ProviderMsg } from './reviewer/providers.js';
@@ -29,14 +31,17 @@ export interface ReviewerConfig {
   model?: string;
   /** Custom OpenAI-compatible endpoint. */
   baseUrl?: string;
+  /** Launcher command for reviewer-spawned agent tiles ('' = ask the user). */
+  agentCommand?: string;
 }
 
 export interface ReviewerEmitter {
-  status(status: ReviewerStatus, error?: string): void;
+  status(status: ReviewerStatus, error?: string, model?: string): void;
   stream(delta: string): void;
   toolCall(ev: ReviewerToolCallEvent): void;
   message(entry: ReviewerEntry): void;
   goal(ev: ReviewerGoalEvent): void;
+  question(ev: ReviewerQuestion): void;
 }
 
 export interface ReviewerHostOpts {
@@ -104,12 +109,26 @@ export class ReviewerHost {
   private readonly tools: ReviewerTools;
   private readonly conversationFile: string;
   private readonly stateFile: string;
+  private agentCommand = '';
   /** Durable goal + task ledger (survives compaction and restarts). */
   private state: ReviewerState = emptyState();
   private watchTimer: NodeJS.Timeout | null = null;
   /** Per-tile line counts from the last poll (the cheap activity signal). */
   private lastLines = new Map<string, number>();
   private pollsSinceWake = 0;
+  /** The in-flight ask_user question; the tool promise resolves on the
+   *  user's answer (or rejects on restart/stop). At most one — the loop is
+   *  exclusive. */
+  private pendingAsk: {
+    askId: string;
+    kind: ReviewerQuestion['kind'];
+    agentId?: string;
+    resolve(v: string): void;
+    reject(e: Error): void;
+  } | null = null;
+  private askSeq = 0;
+  /** Single-use kill grants per agent, earned from confirm-kill "yes". */
+  private killGrants = new Set<string>();
   /** Tool context merged with the ledger callbacks (state lives here). */
   private readonly toolContext: ReviewerToolContext;
 
@@ -122,6 +141,12 @@ export class ReviewerHost {
       ...opts.toolContext,
       getState: () => this.state,
       updateTask: (task) => this.updateTask(task),
+      askUser: (question, kind, agentId) => this.askUser(question, kind, agentId),
+      tryKillAgent: (agentId) => this.tryKillAgent(agentId),
+      getAgentCommand: () => this.agentCommand,
+      agentCount: () => this.agentCount(),
+      spawnAgent: (kind, cwd) => this.spawnAgent(kind, cwd),
+      setGoal: (text) => this.setGoal(text.length > 0 ? text : null),
     };
   }
 
@@ -146,6 +171,7 @@ export class ReviewerHost {
     }
     this.resolved = res;
     this.apiKey = key;
+    this.agentCommand = cfg.agentCommand?.trim() ?? '';
     this.provider = (this.opts.createProvider ?? createProvider)(res.adapter);
     await this.load();
     if (this.messages.length === 0) {
@@ -164,6 +190,7 @@ export class ReviewerHost {
   async restart(): Promise<boolean> {
     this.cancel();
     this.stopWatch();
+    this.rejectPendingAsk();
     this.messages = [];
     this.queue = [];
     this.state = emptyState();
@@ -177,6 +204,7 @@ export class ReviewerHost {
   stop(): void {
     this.cancel();
     this.stopWatch();
+    this.rejectPendingAsk();
     this.queue = [];
     this.setStatus('stopped');
   }
@@ -186,6 +214,7 @@ export class ReviewerHost {
   idleOut(): void {
     this.cancel();
     this.stopWatch();
+    this.rejectPendingAsk();
     this.setStatus('idle');
   }
 
@@ -258,6 +287,86 @@ export class ReviewerHost {
     await persistState(this.stateFile, this.state, this.opts.logger);
   }
 
+  /** Suspends the current tool run until the user answers the question
+   *  card (answerQuestion) — or rejects on restart/stop. The loop is
+   *  exclusive, so only one question can ever be pending. */
+  private askUser(question: string, kind: ReviewerQuestion['kind'], agentId?: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      if (this.pendingAsk) {
+        reject(new Error('another question is already pending'));
+        return;
+      }
+      this.askSeq += 1;
+      const ask = {
+        askId: `q-${Date.now()}-${this.askSeq}`,
+        kind,
+        agentId,
+        resolve,
+        reject,
+      };
+      this.pendingAsk = ask;
+      this.opts.emit.question({ askId: ask.askId, question, kind, agentId, at: Date.now() });
+    });
+  }
+
+  /** Resolves the pending question with the user's answer (from the UI). A
+   *  "yes" to a confirm-kill question grants one kill of that agent. */
+  answerQuestion(askId: string, answer: string): void {
+    const pending = this.pendingAsk;
+    if (!pending || pending.askId !== askId) return;
+    this.pendingAsk = null;
+    if (pending.kind === 'confirm-kill' && pending.agentId && /^yes\b/i.test(answer.trim())) {
+      this.killGrants.add(pending.agentId);
+    }
+    pending.resolve(answer);
+  }
+
+  private rejectPendingAsk(): void {
+    const pending = this.pendingAsk;
+    if (!pending) return;
+    this.pendingAsk = null;
+    pending.reject(new Error('question cancelled'));
+  }
+
+  /** User-commanded kill (/kill <id>): no grant needed — the user is the
+   *  authority. Never touches the orchestrator. */
+  async killAgentNow(agentId: string): Promise<string> {
+    return this.killById(agentId, false);
+  }
+
+  /** Model kill path: single-use grant per agent (from confirm-kill "yes").
+   *  Without a grant the tool is told to ask the user first. */
+  private async tryKillAgent(agentId: string): Promise<string> {
+    return this.killById(agentId, true);
+  }
+
+  private async killById(agentId: string, grantRequired: boolean): Promise<string> {
+    if (agentId === ORCHESTRATOR_ID) return 'error: the orchestrator is not an agent tile';
+    if (grantRequired && !this.killGrants.delete(agentId)) {
+      return `error: no kill grant for ${agentId} — ask the user first (ask_user, kind confirm-kill)`;
+    }
+    const tileId = this.opts.toolContext.tileOfAgent(agentId);
+    if (!tileId) return `error: unknown agent ${agentId}`;
+    return (await this.opts.toolContext.killAgent?.(tileId)) ?? 'error: kill unavailable';
+  }
+
+  /** Routes a reviewer spawn to main (which allocates the agent id and asks
+   *  the renderer to mount the tile). On success the chosen kind becomes
+   *  the durable default so the next spawn can skip the question. */
+  private async spawnAgent(kind: string, cwd: string): Promise<string> {
+    const result = (await this.opts.toolContext.spawnAgent?.(kind, cwd)) ?? 'error: spawn unavailable';
+    if (!result.startsWith('error:') && kind.length > 0 && this.state.lastAgentKind !== kind) {
+      this.state.lastAgentKind = kind;
+      await persistState(this.stateFile, this.state, this.opts.logger);
+    }
+    return result;
+  }
+
+  /** Live agent tile count (the spawn cap reads this). */
+  private agentCount(): number {
+    return this.opts.toolContext.agentCount?.() ?? 0;
+  }
+
   /** While a goal is armed, every trigger carries a compact state block so
    *  auto-compaction can never erase what the loop is working on. */
   private withStateBlock(content: string): string {
@@ -293,7 +402,7 @@ export class ReviewerHost {
 
   private setStatus(status: ReviewerStatus, error?: string): void {
     this.status = status;
-    this.opts.emit.status(status, error);
+    this.opts.emit.status(status, error, this.resolved?.model);
   }
 
   private drainQueue(): void {

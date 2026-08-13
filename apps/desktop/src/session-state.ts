@@ -11,6 +11,9 @@ export interface SessionTileMeta {
   cwd: string;
   /** Durable identity within the session; null until the PTY spawn returns. */
   agentId: string | null;
+  /** Launcher command written into the shell after spawn (reviewer-spawned
+   *  agent tiles; undefined = plain shell). */
+  command?: string;
 }
 
 interface SessionStateRefs {
@@ -28,7 +31,7 @@ export interface SessionState extends SessionStateRefs {
   tiles: Map<TileId, SessionTileMeta>;
   focusedId: TileId | null;
   zoomedId: TileId | null;
-  addTile(cwd: string): TileId;
+  addTile(cwd: string, agentId?: string | null, command?: string): TileId;
   registerAgent(tileId: TileId, agentId: string): void;
   closeTile(id: TileId, external?: boolean): void;
   moveFocus(dir: 'prev' | 'next'): void;
@@ -240,14 +243,14 @@ export function useSessionState(sessionId: string): SessionState {
   }, [saveSession]);
 
   const addTile = useCallback(
-    (cwd: string): TileId => {
+    (cwd: string, agentId: string | null = null, command?: string): TileId => {
       const id = `tile-${nextId.current}`;
       nextId.current += 1;
       const dir = insertDir.current;
       insertDir.current = dir === 'h' ? 'v' : 'h';
       setTiles((m) => {
         const copy = new Map(m);
-        copy.set(id, { id, cwd, agentId: null });
+        copy.set(id, { id, cwd, agentId, command });
         return copy;
       });
       setTree((t) => insert(t, focusedIdRef.current, id, dir));

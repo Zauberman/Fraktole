@@ -27,7 +27,7 @@ export interface ProviderResolution {
 export const DEFAULT_MODELS: Record<DetectedProvider, string> = {
   anthropic: 'claude-sonnet-4-5',
   openai: 'gpt-4o',
-  deepseek: 'deepseek-chat',
+  deepseek: 'deepseek-v4-flash',
   ollama: 'qwen2.5',
 };
 
@@ -37,11 +37,13 @@ export const BASE_URLS: Record<'anthropic' | 'openai' | 'deepseek', string> = {
   deepseek: 'https://api.deepseek.com/v1',
 };
 
-/** Model suggestions per detected provider (the user picks; free text ok). */
+/** Model suggestions per detected provider (the user picks; free text ok).
+ *  The config form also fetches the live model list from the API
+ *  (electron/model-list.ts) and prefers it — these are the offline fallback. */
 export const REVIEWER_MODEL_SUGGESTIONS: Record<DetectedProvider, string[]> = {
   anthropic: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5', 'claude-3-7-sonnet-latest'],
   openai: ['gpt-4o', 'gpt-5', 'gpt-5-mini', 'o4-mini'],
-  deepseek: ['deepseek-chat', 'deepseek-reasoner'],
+  deepseek: ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-chat', 'deepseek-reasoner'],
   ollama: ['qwen2.5', 'llama3.2', 'qwen3', 'mistral'],
 };
 

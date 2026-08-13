@@ -24,6 +24,8 @@ export interface RuntimeReviewer {
   prompt(text: string): Promise<void>;
   cancel(): void;
   setGoal(text: string | null): Promise<void>;
+  answerQuestion(askId: string, answer: string): void;
+  killAgentNow(agentId: string): Promise<string>;
   onAgentMessage(msg: FraktoleMessage): void;
   /** Live transcript entries, for the Reviewer tab on mount. */
   conversation: ReviewerEntry[];

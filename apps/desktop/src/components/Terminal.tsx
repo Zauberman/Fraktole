@@ -12,6 +12,8 @@ interface TerminalProps {
   cwd: string;
   /** Durable session agent id; provided on restore, omitted on live spawns. */
   agentId?: string | null;
+  /** Launcher command written into the shell after spawn. */
+  command?: string;
   /** Reports the agent id assigned by main (live spawns allocate one). */
   onSpawned?(agentId: string): void;
 }
@@ -25,7 +27,7 @@ function token(name: string): string {
  * forward keys to the main process and stream data back. One PTY per tile,
  * spawned on mount.
  */
-export function Terminal({ sessionId, tileId, cwd, agentId, onSpawned }: TerminalProps): React.JSX.Element {
+export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }: TerminalProps): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Xterm | null>(null);
   const palette = useXtermPalette();
@@ -36,6 +38,8 @@ export function Terminal({ sessionId, tileId, cwd, agentId, onSpawned }: Termina
   onSpawnedRef.current = onSpawned;
   const agentIdRef = useRef(agentId);
   agentIdRef.current = agentId;
+  const commandRef = useRef(command);
+  commandRef.current = command;
   const applyingThemeRef = useRef(false);
   // right-click context menu (copy/paste), positioned in viewport coords
   const [menu, setMenu] = useState<{ x: number; y: number; hasSel: boolean } | null>(null);
@@ -94,7 +98,15 @@ export function Terminal({ sessionId, tileId, cwd, agentId, onSpawned }: Termina
     const cols = term.cols;
     const rows = term.rows;
     void bridge
-      .ptySpawn({ sessionId, tileId, cwd, cols, rows, agentId: agentIdRef.current ?? undefined })
+      .ptySpawn({
+        sessionId,
+        tileId,
+        cwd,
+        cols,
+        rows,
+        agentId: agentIdRef.current ?? undefined,
+        command: commandRef.current,
+      })
       .then((res) => {
         onSpawnedRef.current?.(res.agentId);
       })

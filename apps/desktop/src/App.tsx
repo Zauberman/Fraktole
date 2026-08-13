@@ -292,9 +292,19 @@ export function App(): React.JSX.Element {
     const unsubTheme = bridge.onMenuTheme((id) => {
       if (THEME_IDS.includes(id as ThemeId)) setTheme(id as ThemeId);
     });
+    const unsubSpawn = bridge.onReviewerSpawnRequest((ev) => {
+      const ws = sessionStates.current.get(ev.sessionId) ?? null;
+      if (!ws) {
+        void bridge.reviewerSpawnResult(ev.sessionId, ev.requestId, { tileId: null, agentId: ev.agentId });
+        return;
+      }
+      const tileId = ws.addTile(ev.cwd, ev.agentId, ev.command);
+      void bridge.reviewerSpawnResult(ev.sessionId, ev.requestId, { tileId, agentId: ev.agentId });
+    });
     return () => {
       unsubTile();
       unsubTheme();
+      unsubSpawn();
     };
   }, [openTileDialog, setTheme]);
 
