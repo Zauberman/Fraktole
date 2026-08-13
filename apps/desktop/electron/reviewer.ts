@@ -7,6 +7,7 @@ import type {
   ReviewerQuestion,
   ReviewerState,
   ReviewerStatus,
+  ReviewerStreamEvent,
   ReviewerTask,
   ReviewerToolCallEvent,
 } from '../src/shared/ipc.js';
@@ -37,7 +38,7 @@ export interface ReviewerConfig {
 
 export interface ReviewerEmitter {
   status(status: ReviewerStatus, error?: string, model?: string): void;
-  stream(delta: string): void;
+  stream(ev: ReviewerStreamEvent): void;
   toolCall(ev: ReviewerToolCallEvent): void;
   message(entry: ReviewerEntry): void;
   goal(ev: ReviewerGoalEvent): void;
@@ -87,6 +88,9 @@ export function buildSystemPrompt(sessionId: string, cwd: string): string {
     'verify results with read_tile, and iterate — re-dispatch, re-check — until the goal is met.',
     'When you judge the goal fully met, start your final message with "GOAL-MET:" followed by your verdict.',
     'Never set, change or clear the goal yourself — only the user can, via /goal.',
+    'When an agent reports a working dev server or built page, open it in the Test tab',
+    'with open_test_page and verify it with read_test_page (loading flag, console errors).',
+    'screenshot_test_page saves a picture for the user — it cannot be seen by you.',
   ].join('\n');
 }
 
@@ -147,6 +151,9 @@ export class ReviewerHost {
       agentCount: () => this.agentCount(),
       spawnAgent: (kind, cwd) => this.spawnAgent(kind, cwd),
       setGoal: (text) => this.setGoal(text.length > 0 ? text : null),
+      openTestPage: (url) => this.opts.toolContext.openTestPage?.(url) ?? Promise.resolve('error: test tab unavailable'),
+      readTestPage: () => this.opts.toolContext.readTestPage?.() ?? Promise.resolve('error: test tab unavailable'),
+      screenshotTestPage: () => this.opts.toolContext.screenshotTestPage?.() ?? Promise.resolve('error: test tab unavailable'),
     };
   }
 
@@ -434,9 +441,18 @@ export class ReviewerHost {
             messages: this.messages,
             tools: this.tools.definitions(),
             signal: aborter.signal,
-            onDelta: (delta) => this.opts.emit.stream(delta),
+            onDelta: (delta, thinking) =>
+              this.opts.emit.stream({
+                delta,
+                thinking: thinking && thinking.length > 0 ? thinking : undefined,
+              }),
           });
-          this.messages.push({ role: 'assistant', content: response.text, toolCalls: response.toolCalls });
+          this.messages.push({
+            role: 'assistant',
+            content: response.text,
+            toolCalls: response.toolCalls,
+            thinking: response.thinking.length > 0 ? response.thinking : undefined,
+          });
           await this.persist();
           const entry = toEntry(this.messages[this.messages.length - 1]!);
           this.opts.emit.message(entry);
@@ -492,7 +508,7 @@ export class ReviewerHost {
    *  pass never drops the most recent user turn. */
   private compactIfNeeded(force = false): void {
     let total = 0;
-    for (const m of this.messages) total += m.content.length;
+    for (const m of this.messages) total += m.content.length + (m.thinking?.length ?? 0);
     if (!force && total <= COMPACT_THRESHOLD) return;
     let stopAt = Number.MAX_SAFE_INTEGER;
     if (force) {
@@ -506,7 +522,7 @@ export class ReviewerHost {
     let dropped = 0;
     while (this.messages.length > 4 && 1 < stopAt && (force || total > COMPACT_THRESHOLD)) {
       const victim = this.messages[1]!;
-      total -= victim.content.length;
+      total -= victim.content.length + (victim.thinking?.length ?? 0);
       this.messages.splice(1, 1);
       stopAt -= 1;
       dropped += 1;
@@ -565,6 +581,7 @@ function toEntry(msg: ProviderMsg): ReviewerEntry {
     content: msg.content,
     toolCalls: msg.toolCalls,
     toolCallId: msg.toolCallId,
+    thinking: msg.thinking,
     at: Date.now(),
   };
 }

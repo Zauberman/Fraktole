@@ -20,6 +20,10 @@ interface TranscriptItem {
   content?: string;
   /** streaming: the last assistant message is finalized by its message event */
   finalized?: boolean;
+  /** the model's reasoning output (hidden behind a chip by default) */
+  thinking?: string;
+  /** streaming: thinking deltas still arriving */
+  thinkingLive?: boolean;
   callId?: string;
   name?: string;
   args?: string;
@@ -55,6 +59,8 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const [runningModel, setRunningModel] = useState<string | undefined>(undefined);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [thinkingOpen, setThinkingOpen] = useState<Record<number, boolean>>({});
+  const [thinkingGlobal, setThinkingGlobal] = useState(false);
   const [goal, setGoal] = useState<ReviewerGoal | null>(null);
   const [question, setQuestion] = useState<ReviewerQuestion | null>(null);
   const [input, setInput] = useState('');
@@ -74,7 +80,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   useEffect(() => {
     void bridge.reviewerTranscript(sessionId).then((rows) => {
       if (rows.length > 0) {
-        setItems(rows.map((entry) => ({ seq: nextSeq(), at: entry.at, kind: 'message', role: entry.role, content: entry.content, finalized: true })));
+        setItems(rows.map((entry) => ({ seq: nextSeq(), at: entry.at, kind: 'message', role: entry.role, content: entry.content, thinking: entry.thinking, finalized: true })));
       }
     });
     void bridge.getSettings().then((s) => {
@@ -96,15 +102,38 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         setStatusError(s.error);
         setRunningModel(s.model);
       }),
-      bridge.onReviewerStream(sessionId, (delta) => {
+      bridge.onReviewerStream(sessionId, (ev) => {
+        const { delta, thinking } = ev;
         setItems((its) => {
           const last = its[its.length - 1];
-          if (last && last.kind === 'message' && last.role === 'assistant' && !last.finalized) {
+          const live =
+            last && last.kind === 'message' && last.role === 'assistant' && !last.finalized ? last : null;
+          if (live) {
             const next = [...its];
-            next[next.length - 1] = { ...last, content: `${last.content ?? ''}${delta}` };
+            next[next.length - 1] = {
+              ...live,
+              content: delta ? `${live.content ?? ''}${delta}` : live.content,
+              thinking: thinking ? `${live.thinking ?? ''}${thinking}` : live.thinking,
+              thinkingLive: thinking ? true : live.thinkingLive,
+            };
             return next;
           }
-          return [...its, { seq: nextSeq(), at: Date.now(), kind: 'message', role: 'assistant', content: delta, finalized: false }];
+          if (delta || thinking) {
+            return [
+              ...its,
+              {
+                seq: nextSeq(),
+                at: Date.now(),
+                kind: 'message',
+                role: 'assistant',
+                content: delta ?? '',
+                thinking,
+                thinkingLive: thinking ? true : undefined,
+                finalized: false,
+              },
+            ];
+          }
+          return its;
         });
       }),
       bridge.onReviewerToolCall(sessionId, (ev: ReviewerToolCallEvent) => {
@@ -132,11 +161,17 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             const last = its[its.length - 1];
             if (last && last.kind === 'message' && last.role === 'assistant' && !last.finalized) {
               const next = [...its];
-              next[next.length - 1] = { ...last, content: entry.content, finalized: true };
+              next[next.length - 1] = {
+                ...last,
+                content: entry.content,
+                thinking: entry.thinking ?? last.thinking,
+                thinkingLive: false,
+                finalized: true,
+              };
               return next;
             }
           }
-          return [...its, { seq: nextSeq(), at: entry.at, kind: 'message', role: entry.role, content: entry.content, finalized: true }];
+          return [...its, { seq: nextSeq(), at: entry.at, kind: 'message', role: entry.role, content: entry.content, thinking: entry.thinking, finalized: true }];
         });
       }),
       bridge.onReviewerGoal(sessionId, (ev) => setGoal(ev.goal)),
@@ -259,6 +294,14 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           {runningModel && <span className="reviewer-model-label">{runningModel}</span>}
         </div>
         <div className="reviewer-actions">
+          <button
+            type="button"
+            className={`orch-btn${thinkingGlobal ? ' orch-btn-thinking-on' : ''}`}
+            title="show or hide the model's thinking output"
+            onClick={() => setThinkingGlobal((v) => !v)}
+          >
+            think
+          </button>
           {status === 'running' ? (
             <button type="button" className="orch-btn" onClick={stop}>
               stop
@@ -351,8 +394,21 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               <div className="reviewer-item-main">
                 <div className="reviewer-item-meta">
                   <span className="reviewer-item-role">{roleLabel(it.role)}</span>
+                  {it.thinking !== undefined && (
+                    <button
+                      type="button"
+                      className={`reviewer-thinking-chip${thinkingGlobal || thinkingOpen[it.seq] ? ' reviewer-thinking-chip-on' : ''}${it.thinkingLive ? ' reviewer-thinking-live' : ''}`}
+                      title={it.thinkingLive ? 'thinking…' : 'toggle thinking output'}
+                      onClick={() => setThinkingOpen((o) => ({ ...o, [it.seq]: !o[it.seq] }))}
+                    >
+                      thinking{it.thinkingLive ? '…' : ''}
+                    </button>
+                  )}
                   <span className="reviewer-item-time">{timeOf(it.at)}</span>
                 </div>
+                {(thinkingGlobal || thinkingOpen[it.seq]) && it.thinking !== undefined && (
+                  <div className="reviewer-thinking">{sanitizeChatText(it.thinking)}</div>
+                )}
                 <div className="reviewer-item-body">
                   {sanitizeChatText(it.content ?? '')}
                   {!it.finalized && <span className="reviewer-caret" aria-hidden="true" />}
@@ -366,43 +422,47 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               return (
                 <div key={it.seq} className={`reviewer-item reviewer-item-tool reviewer-item-tool-${it.state ?? 'start'}`}>
                   <div className="reviewer-tool-header">
-                    <button type="button" className="reviewer-tool-toggle" onClick={() => setExpanded((e) => ({ ...e, [key]: !e[key] }))}>
-                      <svg
-                        className={`reviewer-tool-chevron${open ? ' reviewer-tool-chevron-open' : ''}`}
-                        width="10"
-                        height="10"
-                        viewBox="0 0 10 10"
-                        fill="none"
-                        aria-hidden="true"
-                      >
-                        <path d="M3 1 L8 5 L3 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="square" />
-                      </svg>
-                      <span className="reviewer-tool-name">{it.name}</span>
-                    </button>
-                    <span className="reviewer-tool-args">{sanitizeChatText(it.args ?? '')}</span>
-                    <span className={`reviewer-tool-state reviewer-tool-state-${it.state ?? 'start'}`}>
-                      {it.state === 'start' ? 'running' : it.state}
-                    </span>
-                    {it.state !== 'start' && it.durationMs !== undefined && (
-                      <span className="reviewer-item-time">{it.durationMs}ms</span>
-                    )}
-                    {it.state !== 'start' && it.detail !== undefined && (
-                      <button
-                        type="button"
-                        className="reviewer-icon-btn"
-                        title="copy result"
-                        onClick={() => void bridge.clipboardWrite(it.detail ?? '')}
-                      >
-                        <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
-                          <rect x="3.5" y="3.5" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" />
-                          <path
-                            d="M7.5 3.5 V2.5 C7.5 1.95 7.05 1.5 6.5 1.5 H2.5 C1.95 1.5 1.5 1.95 1.5 2.5 V6.5 C1.5 7.05 1.95 7.5 2.5 7.5 H3.5"
-                            stroke="currentColor"
-                            strokeWidth="1.2"
-                            strokeLinecap="square"
-                          />
+                    <div className="reviewer-tool-row">
+                      <button type="button" className="reviewer-tool-toggle" onClick={() => setExpanded((e) => ({ ...e, [key]: !e[key] }))}>
+                        <svg
+                          className={`reviewer-tool-chevron${open ? ' reviewer-tool-chevron-open' : ''}`}
+                          width="10"
+                          height="10"
+                          viewBox="0 0 10 10"
+                          fill="none"
+                          aria-hidden="true"
+                        >
+                          <path d="M3 1 L8 5 L3 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="square" />
                         </svg>
+                        <span className="reviewer-tool-name">{it.name}</span>
                       </button>
+                      <span className={`reviewer-tool-state reviewer-tool-state-${it.state ?? 'start'}`}>
+                        {it.state === 'start' ? 'running' : it.state}
+                      </span>
+                      {it.state !== 'start' && it.durationMs !== undefined && (
+                        <span className="reviewer-item-time">{it.durationMs}ms</span>
+                      )}
+                      {it.state !== 'start' && it.detail !== undefined && (
+                        <button
+                          type="button"
+                          className="reviewer-icon-btn"
+                          title="copy result"
+                          onClick={() => void bridge.clipboardWrite(it.detail ?? '')}
+                        >
+                          <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
+                            <rect x="3.5" y="3.5" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" />
+                            <path
+                              d="M7.5 3.5 V2.5 C7.5 1.95 7.05 1.5 6.5 1.5 H2.5 C1.95 1.5 1.5 1.95 1.5 2.5 V6.5 C1.5 7.05 1.95 7.5 2.5 7.5 H3.5"
+                              stroke="currentColor"
+                              strokeWidth="1.2"
+                              strokeLinecap="square"
+                            />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+                    {it.args !== undefined && (
+                      <span className="reviewer-tool-args">{sanitizeChatText(it.args)}</span>
                     )}
                   </div>
                   {open && it.detail !== undefined && (

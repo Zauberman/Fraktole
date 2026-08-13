@@ -4,6 +4,7 @@ import {
   type CompleteOpts,
   type ProviderClient,
   type ProviderMsg,
+  type ProviderResult,
   type ReviewerToolCall,
 } from '../providers.js';
 
@@ -40,11 +41,13 @@ function toTools(tools: CompleteOpts['tools']): unknown[] {
 }
 
 /** OpenAI-compatible chat/completions with SSE streaming. Tool calls are
- *  accumulated per index: deltas may split ids, names and arguments. */
+ *  accumulated per index: deltas may split ids, names and arguments. The
+ *  reasoning output (deepseek reasoning_content, qwen/kimi/grok/glm
+ *  variants) is captured into `thinking` and streamed as a second delta. */
 export class OpenAIProvider implements ProviderClient {
   readonly name = 'openai' as const;
 
-  async complete(opts: CompleteOpts): Promise<{ text: string; toolCalls: ReviewerToolCall[] }> {
+  async complete(opts: CompleteOpts): Promise<ProviderResult> {
     const url = joinBase(opts.baseUrl || DEFAULT_BASE, '/chat/completions');
     const res = await fetch(url, {
       method: 'POST',
@@ -66,6 +69,7 @@ export class OpenAIProvider implements ProviderClient {
     }
 
     let text = '';
+    let thinking = '';
     const calls = new Map<number, { id: string; name: string; args: string }>();
     const ensure = (i: number): { id: string; name: string; args: string } => {
       const cur = calls.get(i) ?? { id: '', name: '', args: '' };
@@ -74,13 +78,32 @@ export class OpenAIProvider implements ProviderClient {
     };
 
     for await (const payload of ssePayloads(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
-      const choice = (payload as { choices?: Array<{ delta?: { content?: string; tool_calls?: unknown[] } }> })
-        .choices?.[0];
+      const choice = (payload as {
+        choices?: Array<{
+          delta?: { content?: string; reasoning_content?: string; reasoning?: string; thinking?: string; thinking_content?: string; tool_calls?: unknown[] };
+          message?: { reasoning_content?: string };
+        }>;
+      }).choices?.[0];
+      // some providers send the reasoning only on the final chunk, inside
+      // choice.message with no delta at all — check before the delta guard
+      const msgReason = choice?.message?.reasoning_content;
+      if (typeof msgReason === 'string' && msgReason.length > 0 && !thinking.includes(msgReason)) {
+        thinking += msgReason;
+        opts.onDelta('', msgReason);
+      }
       const delta = choice?.delta;
       if (!delta) continue;
       if (typeof delta.content === 'string' && delta.content.length > 0) {
         text += delta.content;
         opts.onDelta(delta.content);
+      }
+      // reasoning output: tolerant across providers (deepseek/qwen/kimi/glm
+      // use reasoning_content; grok and others vary).
+      const reason =
+        delta.reasoning_content ?? delta.reasoning ?? delta.thinking ?? delta.thinking_content;
+      if (typeof reason === 'string' && reason.length > 0) {
+        thinking += reason;
+        opts.onDelta('', reason);
       }
       for (const tc of delta.tool_calls ?? []) {
         const raw = tc as { index?: number; id?: string; function?: { name?: string; arguments?: string } };
@@ -94,7 +117,7 @@ export class OpenAIProvider implements ProviderClient {
     const toolCalls: ReviewerToolCall[] = [...calls.values()]
       .filter((c) => c.name.length > 0)
       .map((c) => ({ id: c.id || `tc-${c.name}`, name: c.name, args: parseArgs(c.args) }));
-    return { text, toolCalls };
+    return { text, toolCalls, thinking };
   }
 }
 

@@ -8,7 +8,7 @@ import type { ReviewerState } from '../src/shared/ipc.js';
 import { TileRecorder } from '../electron/tile-recorder.js';
 import type { ProviderClient, ProviderMsg } from '../electron/reviewer/providers.js';
 
-type ScriptEntry = { text: string; toolCalls: ProviderMsg['toolCalls'] } | { hang: boolean };
+type ScriptEntry = { text: string; toolCalls: ProviderMsg['toolCalls']; thinking?: string } | { hang: boolean };
 
 class FakeProvider implements ProviderClient {
   readonly name = 'openai' as const;
@@ -21,7 +21,7 @@ class FakeProvider implements ProviderClient {
           opts.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
         });
       }
-      return Promise.resolve({ text: entry.text, toolCalls: entry.toolCalls ?? [] });
+      return Promise.resolve({ text: entry.text, toolCalls: entry.toolCalls ?? [], thinking: entry.thinking ?? '' });
     });
   }
 }
@@ -69,7 +69,7 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
     conversationFile: extra.dir ? join(extra.dir, 'conversation.jsonl') : uniqueConversationFile(),
     emit: {
       status: (s) => events.push(`status:${s}`),
-      stream: (d) => events.push(`stream:${d}`),
+      stream: (ev) => events.push(`stream:${ev.delta}${ev.thinking ? '|think:' + ev.thinking : ''}`),
       toolCall: (ev) => events.push(`tool:${ev.name}:${ev.state}`),
       message: () => events.push('msg'),
       goal: (ev) => events.push(`goal:${ev.goal?.state ?? 'none'}`),
@@ -754,5 +754,120 @@ describe('ReviewerHost', () => {
     });
     await host.start();
     expect(models).toContain('claude-sonnet-4-5');
+  });
+
+  it('streams thinking deltas and persists the assistant thinking', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fraktole-reviewer-'));
+    const recorder = new TileRecorder();
+    const streams: Array<{ delta: string; thinking?: string }> = [];
+    const provider = new FakeProvider([
+      { text: 'the answer', toolCalls: [], thinking: 'deep reasoning here' },
+    ]);
+    const host = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
+      sessionId: 's1',
+      sessionDir: dir,
+      cwd: '/tmp/proj',
+      recorder,
+      toolContext: ctxFor(recorder),
+      createProvider: () => provider,
+      conversationFile: join(dir, 'conversation.jsonl'),
+      emit: {
+        status: () => undefined,
+        stream: (ev) => streams.push(ev),
+        toolCall: () => undefined,
+        message: () => undefined,
+        goal: () => undefined,
+        question: () => undefined,
+      },
+    });
+    await host.start();
+    await host.prompt('think hard');
+    await settle(100);
+    // the assistant entry carries the thinking
+    const assistant = host.conversation.find((e) => e.role === 'assistant');
+    expect(assistant?.thinking).toBe('deep reasoning here');
+    // the persisted JSONL round-trips it
+    const raw = await readFile(join(dir, 'conversation.jsonl'), 'utf8');
+    expect(raw).toContain('deep reasoning here');
+    const reloaded = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
+      sessionId: 's1',
+      sessionDir: dir,
+      cwd: '/tmp/proj',
+      recorder: new TileRecorder(),
+      toolContext: ctxFor(recorder),
+      createProvider: () => new FakeProvider([{ text: 'x', toolCalls: [] }]),
+      conversationFile: join(dir, 'conversation.jsonl'),
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+    });
+    await reloaded.start();
+    expect(reloaded.conversation.find((e) => e.role === 'assistant')?.thinking).toBe('deep reasoning here');
+  });
+
+  it('the test-tab tools route through the context', async () => {
+    const recorder = new TileRecorder();
+    const opened: string[] = [];
+    const ctx = ctxFor(recorder, {
+      openTestPage: vi.fn(async (url: string) => {
+        opened.push(url);
+        return `opened ${url} in the Test tab`;
+      }) as never,
+      readTestPage: vi.fn(async () => '{"url":"http://localhost:3000","title":"App","loading":false,"consoleErrors":2}') as never,
+      screenshotTestPage: vi.fn(async () => 'saved /tmp/shot.png (1200 bytes)') as never,
+    });
+    const provider = new FakeProvider([
+      {
+        text: '',
+        toolCalls: [
+          { id: 'c1', name: 'open_test_page', args: { url: 'http://localhost:5173' } },
+          { id: 'c2', name: 'read_test_page', args: {} },
+          { id: 'c3', name: 'screenshot_test_page', args: {} },
+        ],
+      },
+      { text: 'tested ok', toolCalls: [] },
+    ]);
+    const host = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
+      sessionId: 's1',
+      sessionDir: '/tmp/sessions/s1',
+      cwd: '/tmp/proj',
+      recorder,
+      toolContext: ctx,
+      createProvider: () => provider,
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+    });
+    await host.start();
+    await host.prompt('test the app');
+    await settle(120);
+    expect(opened).toEqual(['http://localhost:5173']);
+    const contents = host.conversation.map((e) => e.content);
+    expect(contents.some((c) => c.includes('opened http://localhost:5173 in the Test tab'))).toBe(true);
+    expect(contents.some((c) => c.includes('"consoleErrors":2'))).toBe(true);
+    expect(contents.some((c) => c.includes('saved /tmp/shot.png'))).toBe(true);
+  });
+
+  it('open_test_page without a url errors cleanly', async () => {
+    const recorder = new TileRecorder();
+    const ctx = ctxFor(recorder, { openTestPage: vi.fn() as never });
+    const provider = new FakeProvider([
+      { text: '', toolCalls: [{ id: 'c1', name: 'open_test_page', args: {} }] },
+      { text: 'nope', toolCalls: [] },
+    ]);
+    const host = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
+      sessionId: 's1',
+      sessionDir: '/tmp/sessions/s1',
+      cwd: '/tmp/proj',
+      recorder,
+      toolContext: ctx,
+      createProvider: () => provider,
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
+    });
+    await host.start();
+    await host.prompt('open');
+    await settle(100);
+    expect(ctx.openTestPage).not.toHaveBeenCalled();
+    expect(host.conversation.some((e) => e.content.includes('url required'))).toBe(true);
   });
 });

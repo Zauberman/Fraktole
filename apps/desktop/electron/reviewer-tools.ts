@@ -38,6 +38,12 @@ export interface ReviewerToolContext {
   getAgentCommand?(): string;
   /** Set or clear the watchdog goal (user-authorized: always allowed). */
   setGoal?(text: string): Promise<void>;
+  /** Open a URL in the Test tab (the embedded mini browser). */
+  openTestPage?(url: string): Promise<string>;
+  /** Read the Test tab's live state (url/title/loading/console errors). */
+  readTestPage?(): Promise<string>;
+  /** Save a screenshot of the Test tab for the user; returns the path. */
+  screenshotTestPage?(): Promise<string>;
 }
 
 export interface ReviewerTool {
@@ -282,6 +288,39 @@ const TOOLS: ReviewerTool[] = [
       const text = typeof args.text === 'string' ? args.text.trim() : '';
       await ctx.setGoal(text.length > 0 ? text : '');
       return text.length > 0 ? `goal set: ${sanitizeChatText(text)}` : 'goal cleared';
+    },
+  },
+  {
+    name: 'open_test_page',
+    description:
+      'Open a URL in the Test tab — the embedded mini browser for exercising webapp results (an agent\'s dev server, a built artifact, any http/https URL). The Test tab switches into view so the user can watch. Use it when an agent reports a working server or page.',
+    inputSchema: {
+      type: 'object',
+      properties: { url: { type: 'string', description: 'the URL to open (http/https; localhost allowed)' } },
+      required: ['url'],
+    },
+    async run(args, ctx) {
+      const url = typeof args.url === 'string' ? args.url.trim() : '';
+      if (url.length === 0) return 'error: url required';
+      return ctx.openTestPage?.(url) ?? 'error: test tab unavailable';
+    },
+  },
+  {
+    name: 'read_test_page',
+    description:
+      'Read the current state of the Test tab: the page URL, document title, loading flag and the number of console errors since the last navigation. Use it to verify the page actually loaded and spot JavaScript errors.',
+    inputSchema: { type: 'object', properties: {} },
+    async run(_args, ctx) {
+      return ctx.readTestPage?.() ?? 'error: test tab unavailable';
+    },
+  },
+  {
+    name: 'screenshot_test_page',
+    description:
+      'Save a PNG screenshot of the Test tab\'s current page. The image is written under the session\'s reviewer/shots directory for the USER to open — the reviewer itself cannot see images.',
+    inputSchema: { type: 'object', properties: {} },
+    async run(_args, ctx) {
+      return ctx.screenshotTestPage?.() ?? 'error: test tab unavailable';
     },
   },
   {

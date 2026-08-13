@@ -8,6 +8,7 @@ import { SessionNameDialog } from './components/SessionNameDialog.js';
 import { Divider } from './components/Divider.js';
 import { StatusBar } from './components/StatusBar.js';
 import { TopBar, type AppTab } from './components/TopBar.js';
+import { TestTab } from './components/TestTab.js';
 import { ViewMenu } from './components/ViewMenu.js';
 import { ThemeProvider } from './theme-context.js';
 import { applyTheme, DEFAULT_THEME, THEME_IDS, type ThemeId } from './themes.js';
@@ -58,6 +59,8 @@ export function App(): React.JSX.Element {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogDefault, setDialogDefault] = useState('/home/walid');
   const [sessionDialog, setSessionDialog] = useState<{ mode: 'new' } | { mode: 'rename' | 'save-as'; value: string } | null>(null);
+  /** URL pushed by the reviewer's open_test_page; forwarded to the TestTab. */
+  const [pendingTestUrl, setPendingTestUrl] = useState<string | null>(null);
   const defaultCwd = useRef('/home/walid');
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const [bodyWidth, setBodyWidth] = useState(0);
@@ -268,7 +271,7 @@ export function App(): React.JSX.Element {
         }
         if (key === '3') {
           e.preventDefault();
-          setTab('reviewer');
+          setTab('test');
           return;
         }
       }
@@ -354,11 +357,18 @@ export function App(): React.JSX.Element {
         void startSession(action.id);
       }
     });
+    // the reviewer's open_test_page: switch to the Test tab and load
+    const unsubTest = bridge.onTestOpen((sessionId: string, ev: { url: string }) => {
+      if (sessionId !== activeSessionIdRef.current) activate(sessionId);
+      setTab('test');
+      setPendingTestUrl(ev.url);
+    });
     return () => {
       unsubTile();
       unsubTheme();
       unsubSpawn();
       unsubSession();
+      unsubTest();
     };
   }, [openTileDialog, setTheme, sessions, activate, deleteSession, stopSession, startSession]);
 
@@ -427,6 +437,16 @@ export function App(): React.JSX.Element {
                 onClose={editor.closeFile}
                 onUpdate={editor.updateContent}
                 onSave={editor.saveFile}
+              />
+            </div>
+          </div>
+          <div className={`app-main-tab${tab === 'test' ? '' : ' app-main-tab-hidden'}`}>
+            <div className="pane pane-workspace">
+              <TestTab
+                sessionId={activeSessionId ?? ''}
+                pendingUrl={pendingTestUrl}
+                onPendingUrlConsumed={() => setPendingTestUrl(null)}
+                active={tab === 'test'}
               />
             </div>
           </div>

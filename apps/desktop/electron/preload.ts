@@ -15,6 +15,7 @@ import {
   type ReviewerGoalEvent,
   type ReviewerQuestion,
   type ReviewerSpawnRequest,
+  type ReviewerStreamEvent,
   type ReviewerToolCallEvent,
   type SendMessageArgs,
   type SessionFile,
@@ -22,6 +23,7 @@ import {
   type SessionSummary,
   type SessionSnapshot,
   type Settings,
+  type TestPageState,
 } from '../src/shared/ipc.js';
 
 const api = {
@@ -112,9 +114,9 @@ const api = {
     ipcRenderer.on(IPC.reviewerStatus, listener);
     return () => ipcRenderer.removeListener(IPC.reviewerStatus, listener);
   },
-  onReviewerStream: (sessionId: string, cb: (delta: string) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, sid: string, delta: string): void => {
-      if (sid === sessionId) cb(delta);
+  onReviewerStream: (sessionId: string, cb: (ev: ReviewerStreamEvent) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, ev: ReviewerStreamEvent): void => {
+      if (sid === sessionId) cb(ev);
     };
     ipcRenderer.on(IPC.reviewerStream, listener);
     return () => ipcRenderer.removeListener(IPC.reviewerStream, listener);
@@ -169,6 +171,30 @@ const api = {
 
   clipboardWrite: (text: string): Promise<void> => ipcRenderer.invoke(IPC.clipboardWrite, text),
   clipboardRead: (): Promise<string> => ipcRenderer.invoke(IPC.clipboardRead),
+
+  onTestOpen: (cb: (sessionId: string, ev: { url: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, ev: { url: string }): void => cb(sid, ev);
+    ipcRenderer.on(IPC.testOpen, listener);
+    return () => ipcRenderer.removeListener(IPC.testOpen, listener);
+  },
+  onTestStateRequest: (sessionId: string, cb: (ev: { requestId: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, ev: { requestId: string }): void => {
+      if (sid === sessionId) cb(ev);
+    };
+    ipcRenderer.on(IPC.testStateRequest, listener);
+    return () => ipcRenderer.removeListener(IPC.testStateRequest, listener);
+  },
+  testStateResponse: (sessionId: string, requestId: string, state: TestPageState): Promise<void> =>
+    ipcRenderer.invoke(IPC.testState, sessionId, requestId, state),
+  onTestScreenshotRequest: (sessionId: string, cb: (ev: { requestId: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, ev: { requestId: string }): void => {
+      if (sid === sessionId) cb(ev);
+    };
+    ipcRenderer.on(IPC.testScreenshotRequest, listener);
+    return () => ipcRenderer.removeListener(IPC.testScreenshotRequest, listener);
+  },
+  testScreenshotResponse: (sessionId: string, requestId: string, dataUrl: string | null): Promise<void> =>
+    ipcRenderer.invoke(IPC.testScreenshot, sessionId, requestId, dataUrl),
 
   createSnapshot: (sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot> =>
     ipcRenderer.invoke(IPC.snapshotCreate, sessionId, args),

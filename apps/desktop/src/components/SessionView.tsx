@@ -125,26 +125,10 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
     </>
   );
 
-  // the top-bar Reviewer tab: an empty placeholder reserved for the next
-  // feature — the live reviewer lives in the Node tab's right column
-  const reviewerContent = (
-    <section className="pane pane-workspace pane-reviewer">
-      <div className="reviewer-placeholder">
-        <div className="reviewer-placeholder-mark">reviewer</div>
-        <div className="reviewer-placeholder-hint">the reviewer lives in the Node tab's right column</div>
-      </div>
-    </section>
-  );
-
-  const showNode = tab === 'node';
-  const showReviewer = tab === 'reviewer';
-  // the outer view must be fully hidden on the editor tab too: it stays
-  // mounted (keep-alive), but must not occupy flex space next to the editor
-  const viewVisible = active && tab !== 'editor';
+  // the top-bar Test tab is App-level (like the File Editor); the session
+  // view is only visible on the Node tab
+  const viewVisible = active && tab === 'node';
   return (
-    <div className={`session-view${viewVisible ? '' : ' session-view-hidden'}`}>
-      <div className={`session-view-tab${showNode ? '' : ' session-view-hidden'}`}>{nodeContent}</div>
-      <div className={`session-view-tab${showReviewer ? '' : ' session-view-hidden'}`}>{reviewerContent}</div>
-    </div>
+    <div className={`session-view${viewVisible ? '' : ' session-view-hidden'}`}>{nodeContent}</div>
   );
 }

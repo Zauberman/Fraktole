@@ -28,6 +28,7 @@ import {
   type Settings,
   type ReviewerEntry,
   type ReviewerSpawnRequest,
+  type TestPageState,
 } from '../src/shared/ipc.js';
 import { THEME_IDS, type ThemeId } from '../src/themes.js';
 
@@ -56,6 +57,39 @@ let currentTheme: ThemeId = 'midnight';
 let registry: SessionRegistry | null = null;
 /** In-flight reviewer spawns awaiting the renderer's tile mount. */
 const pendingSpawns = new Map<string, { agentId: string; resolve(out: string): void }>();
+/** In-flight test-page reads/screenshots awaiting the renderer. */
+const pendingTestReads = new Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>();
+const pendingTestShots = new Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>();
+let testSeq = 0;
+
+function testRoundTrip(
+  map: Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>,
+  channel: string,
+  sessionId: string,
+): Promise<string> {
+  return new Promise<string>((resolve) => {
+    const requestId = `test-${Date.now()}-${++testSeq}`;
+    const timer = setTimeout(() => {
+      map.delete(requestId);
+      resolve('error: the Test tab did not respond');
+    }, 8_000);
+    map.set(requestId, { resolve, timer });
+    mainWindow?.webContents.send(channel, sessionId, { requestId });
+  });
+}
+
+/** Guest-browser policy: window.open / target=_blank from a tested page
+ *  navigates in-tab (the user chose all-in-tab behavior); guests never get
+ *  the shell's preload or bridge. */
+function wireGuestPolicy(): void {
+  app.on('web-contents-created', (_event, contents) => {
+    if (contents.getType() !== 'webview') return;
+    contents.setWindowOpenHandler(({ url }) => {
+      void contents.loadURL(url).catch(() => undefined);
+      return { action: 'deny' };
+    });
+  });
+}
 
 /** Custom application menu: File → New Tile/Sessions/Quit, View → Theme.
  *  The default Electron menu would expose Reload (orphaning every PTY) and
@@ -150,6 +184,8 @@ function createWindow(): void {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      // the Test tab embeds a sandboxed guest browser
+      webviewTag: true,
     },
   });
   mainWindow = win;
@@ -195,6 +231,7 @@ if (!app.requestSingleInstanceLock()) {
   process.on('SIGUSR2', focusApp);
 
   app.whenReady().then(async () => {
+    wireGuestPolicy();
     migrateUserData();
     const projects = new ProjectsStore(join(app.getPath('userData'), 'projects.json'));
     const settings = new SettingsStore(join(app.getPath('userData'), 'settings.json'));
@@ -296,12 +333,27 @@ if (!app.requestSingleInstanceLock()) {
                 } satisfies ReviewerSpawnRequest);
               });
             },
+            openTestPage: async (url) => {
+              if (!rt) return 'error: no runtime for session';
+              const target = typeof url === 'string' ? url.trim() : '';
+              if (target.length === 0) return 'error: url required';
+              mainWindow?.webContents.send(IPC.testOpen, rt.session.id, { url: target });
+              return `opened ${target} in the Test tab`;
+            },
+            readTestPage: () => {
+              if (!rt) return Promise.resolve('error: no runtime for session');
+              return testRoundTrip(pendingTestReads, IPC.testStateRequest, rt.session.id);
+            },
+            screenshotTestPage: () => {
+              if (!rt) return Promise.resolve('error: no runtime for session');
+              return testRoundTrip(pendingTestShots, IPC.testScreenshotRequest, rt.session.id);
+            },
           },
           tools,
           emit: {
             status: (status, error, model) =>
               mainWindow?.webContents.send(IPC.reviewerStatus, session.id, { status, error, model }),
-            stream: (delta) => mainWindow?.webContents.send(IPC.reviewerStream, session.id, delta),
+            stream: (ev) => mainWindow?.webContents.send(IPC.reviewerStream, session.id, ev),
             toolCall: (ev: ReviewerToolCallEvent) =>
               mainWindow?.webContents.send(IPC.reviewerToolCall, session.id, ev),
             message: (entry) => mainWindow?.webContents.send(IPC.reviewerMessage, session.id, entry),
@@ -569,6 +621,51 @@ if (!app.requestSingleInstanceLock()) {
           return;
         }
         pending.resolve(`spawned agent ${payload.agentId} (tile ${payload.tileId})`);
+      },
+    );
+    ipcMain.handle(
+      IPC.testState,
+      async (_e, sessionId: string, requestId: string, state: TestPageState): Promise<void> => {
+        const pending = pendingTestReads.get(requestId);
+        if (!pending) return;
+        pendingTestReads.delete(requestId);
+        clearTimeout(pending.timer);
+        pending.resolve(
+          JSON.stringify({ url: state.url, title: state.title, loading: state.loading, consoleErrors: state.consoleErrors }),
+        );
+      },
+    );
+    ipcMain.handle(
+      IPC.testScreenshot,
+      async (_e, sessionId: string, requestId: string, dataUrl: string | null): Promise<void> => {
+        const pending = pendingTestShots.get(requestId);
+        if (!pending) return;
+        pendingTestShots.delete(requestId);
+        clearTimeout(pending.timer);
+        if (typeof dataUrl !== 'string' || dataUrl.length === 0) {
+          pending.resolve('error: the test tab is not visible — open it first (open_test_page)');
+          return;
+        }
+        const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+        const buf = Buffer.from(base64, 'base64');
+        if (buf.length > 8 * 1024 * 1024) {
+          pending.resolve('error: screenshot too large');
+          return;
+        }
+        const rt = registry?.get(sessionId) ?? null;
+        if (!rt) {
+          pending.resolve('error: no runtime for session');
+          return;
+        }
+        const shotsDir = join(rt.sessionDir(), 'reviewer', 'shots');
+        await mkdir(shotsDir, { recursive: true });
+        const file = join(shotsDir, `shot-${Date.now()}.png`);
+        try {
+          await writeFile(file, buf);
+          pending.resolve(`saved ${file} (${buf.length} bytes)`);
+        } catch (err) {
+          pending.resolve(`error: ${(err as Error).message}`);
+        }
       },
     );
     ipcMain.handle(IPC.reviewerStop, async (_e, sessionId: string): Promise<void> => {

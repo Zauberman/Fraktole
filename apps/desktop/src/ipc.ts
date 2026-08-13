@@ -15,6 +15,8 @@ import type {
   ReviewerQuestion,
   ReviewerSpawnRequest,
   ReviewerStatus,
+  ReviewerStreamEvent,
+  TestPageState,
   ReviewerToolCallEvent,
   SendMessageArgs,
   SessionFile,
@@ -41,6 +43,8 @@ export type {
   ReviewerQuestion,
   ReviewerSpawnRequest,
   ReviewerStatus,
+  ReviewerStreamEvent,
+  TestPageState,
   ReviewerToolCallEvent,
   SendMessageArgs,
   SessionFile,
@@ -87,7 +91,7 @@ export interface FraktoleBridge {
   compactReviewer(sessionId: string): Promise<void>;
   reviewerTranscript(sessionId: string): Promise<ReviewerEntry[]>;
   onReviewerStatus(sessionId: string, cb: (s: { status: string; error?: string; model?: string }) => void): () => void;
-  onReviewerStream(sessionId: string, cb: (delta: string) => void): () => void;
+  onReviewerStream(sessionId: string, cb: (ev: ReviewerStreamEvent) => void): () => void;
   onReviewerToolCall(sessionId: string, cb: (ev: ReviewerToolCallEvent) => void): () => void;
   onReviewerMessage(sessionId: string, cb: (entry: ReviewerEntry) => void): () => void;
   setReviewerGoal(sessionId: string, text: string | null): Promise<void>;
@@ -104,6 +108,11 @@ export interface FraktoleBridge {
   ): Promise<void>;
   clipboardWrite(text: string): Promise<void>;
   clipboardRead(): Promise<string>;
+  onTestOpen(cb: (sessionId: string, ev: { url: string }) => void): () => void;
+  onTestStateRequest(sessionId: string, cb: (ev: { requestId: string }) => void): () => void;
+  testStateResponse(sessionId: string, requestId: string, state: TestPageState): Promise<void>;
+  onTestScreenshotRequest(sessionId: string, cb: (ev: { requestId: string }) => void): () => void;
+  testScreenshotResponse(sessionId: string, requestId: string, dataUrl: string | null): Promise<void>;
   createSnapshot(sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot>;
   getSnapshot(sessionId: string, id: string): Promise<SessionSnapshot | null>;
   getScrollback(sessionId: string, agentId: string): Promise<string[] | null>;

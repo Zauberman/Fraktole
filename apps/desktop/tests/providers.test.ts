@@ -91,6 +91,74 @@ describe('OpenAIProvider', () => {
     stubFetch(new Response('nope', { status: 401 }), 401);
     await expect(new OpenAIProvider().complete(baseOpts())).rejects.toThrow('openai API error 401');
   });
+
+  it('captures reasoning_content deltas and streams them as thinking', async () => {
+    stubFetch(
+      sseStream([
+        '{"choices":[{"delta":{"reasoning_content":"let me think "}}]}',
+        '{"choices":[{"delta":{"reasoning_content":"about the tiles"}}]}',
+        '{"choices":[{"delta":{"content":"the answer"}}]}',
+        '[DONE]',
+      ]),
+    );
+    const events: Array<[string, string | undefined]> = [];
+    const res = await new OpenAIProvider().complete({
+      ...baseOpts(),
+      onDelta: (d, t) => events.push([d, t]),
+    });
+    expect(res.thinking).toBe('let me think about the tiles');
+    expect(res.text).toBe('the answer');
+    expect(events).toEqual([
+      ['', 'let me think '],
+      ['', 'about the tiles'],
+      ['the answer', undefined],
+    ]);
+  });
+
+  it('accepts the other reasoning field names (reasoning/thinking/thinking_content)', async () => {
+    stubFetch(
+      sseStream([
+        '{"choices":[{"delta":{"thinking":"pondering "}}]}',
+        '{"choices":[{"delta":{"reasoning":"more "}}]}',
+        '{"choices":[{"delta":{"thinking_content":"even more"}}]}',
+        '{"choices":[{"delta":{"content":"done"}}]}',
+        '[DONE]',
+      ]),
+    );
+    const res = await new OpenAIProvider().complete(baseOpts());
+    expect(res.thinking).toBe('pondering more even more');
+  });
+
+  it('captures reasoning sent on the final chunk (choice.message.reasoning_content)', async () => {
+    stubFetch(
+      sseStream([
+        '{"choices":[{"delta":{"content":"x"}}]}',
+        '{"choices":[{"delta":{},"message":{"reasoning_content":"final reasoning"}}]}',
+        '{"choices":[{"delta":{},"message":{"reasoning_content":"final reasoning"}}]}',
+        '[DONE]',
+      ]),
+    );
+    const res = await new OpenAIProvider().complete(baseOpts());
+    expect(res.thinking).toBe('final reasoning'); // deduped
+  });
+
+  it('captures reasoning on a final chunk with no delta at all', async () => {
+    stubFetch(
+      sseStream([
+        '{"choices":[{"delta":{"content":"a"}}]}',
+        '{"choices":[{"message":{"reasoning_content":"qwen-style final reasoning"}}]}',
+        '[DONE]',
+      ]),
+    );
+    const events: Array<[string, string | undefined]> = [];
+    const res = await new OpenAIProvider().complete({
+      ...baseOpts(),
+      onDelta: (d, t) => events.push([d, t]),
+    });
+    expect(res.thinking).toBe('qwen-style final reasoning');
+    expect(res.text).toBe('a');
+    expect(events).toContainEqual(['', 'qwen-style final reasoning']);
+  });
 });
 
 describe('AnthropicProvider', () => {
@@ -127,6 +195,39 @@ describe('AnthropicProvider', () => {
     expect(res.text).toBe('');
     expect(res.toolCalls).toEqual([{ id: 'tu1', name: 'read_tile', args: { agentId: 'a1', tail: 3 } }]);
   });
+
+  it('captures extended-thinking blocks as thinking', async () => {
+    stubFetch(
+      sseStream([
+        '{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"first thought "}}',
+        '{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"second thought"}}',
+        '{"type":"content_block_stop","index":0}',
+        '{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}',
+        '{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}',
+        '{"type":"content_block_stop","index":1}',
+        '{"type":"message_stop"}',
+      ]),
+    );
+    const events: Array<[string, string | undefined]> = [];
+    const res = await new AnthropicProvider().complete({
+      ...baseOpts(),
+      onDelta: (d, t) => events.push([d, t]),
+    });
+    expect(res.thinking).toBe('first thought second thought');
+    expect(res.text).toBe('answer');
+    expect(events).toEqual([
+      ['', 'first thought '],
+      ['', 'second thought'],
+      ['answer', undefined],
+    ]);
+  });
+
+  it('requests extended thinking on every call', async () => {
+    stubFetch(sseStream(['{"type":"message_stop"}']));
+    await new AnthropicProvider().complete(baseOpts());
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { thinking?: unknown };
+    expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
+  });
 });
 
 describe('OllamaProvider', () => {
@@ -147,6 +248,28 @@ describe('OllamaProvider', () => {
     const res = await new OllamaProvider().complete(baseOpts());
     expect(res.toolCalls).toEqual([
       { id: 'tc-send_message-0', name: 'send_message', args: { to: 'agent-1', kind: 'task', body: 'go' } },
+    ]);
+  });
+
+  it('captures message.thinking as thinking', async () => {
+    stubFetch(
+      ndjsonStream([
+        '{"message":{"role":"assistant","thinking":"mulling "}}',
+        '{"message":{"role":"assistant","thinking":"it over"},"done":false}',
+        '{"message":{"role":"assistant","content":"final"},"done":true}',
+      ]),
+    );
+    const events: Array<[string, string | undefined]> = [];
+    const res = await new OllamaProvider().complete({
+      ...baseOpts(),
+      onDelta: (d, t) => events.push([d, t]),
+    });
+    expect(res.thinking).toBe('mulling it over');
+    expect(res.text).toBe('final');
+    expect(events).toEqual([
+      ['', 'mulling '],
+      ['', 'it over'],
+      ['final', undefined],
     ]);
   });
 });

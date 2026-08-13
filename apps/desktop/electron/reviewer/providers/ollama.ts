@@ -4,6 +4,7 @@ import {
   type CompleteOpts,
   type ProviderClient,
   type ProviderMsg,
+  type ProviderResult,
   type ReviewerToolCall,
 } from '../providers.js';
 
@@ -38,11 +39,12 @@ function toTools(tools: CompleteOpts['tools']): unknown[] {
 }
 
 /** Ollama /api/chat with NDJSON streaming. Tool calls arrive in a single
- *  non-streaming chunk carrying a `function.arguments` JSON string. */
+ *  non-streaming chunk carrying a `function.arguments` JSON string. Reasoning
+ *  models stream `message.thinking` — captured into `thinking`. */
 export class OllamaProvider implements ProviderClient {
   readonly name = 'ollama' as const;
 
-  async complete(opts: CompleteOpts): Promise<{ text: string; toolCalls: ReviewerToolCall[] }> {
+  async complete(opts: CompleteOpts): Promise<ProviderResult> {
     const url = joinBase(opts.baseUrl || DEFAULT_BASE, '/api/chat');
     const res = await fetch(url, {
       method: 'POST',
@@ -60,14 +62,19 @@ export class OllamaProvider implements ProviderClient {
     }
 
     let text = '';
+    let thinking = '';
     const toolCalls: ReviewerToolCall[] = [];
 
     for await (const payload of ndjsonPayloads(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
-      const msg = (payload as { message?: { content?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> } }).message;
+      const msg = (payload as { message?: { content?: string; thinking?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> } }).message;
       if (!msg) continue;
       if (typeof msg.content === 'string' && msg.content.length > 0) {
         text += msg.content;
         opts.onDelta(msg.content);
+      }
+      if (typeof msg.thinking === 'string' && msg.thinking.length > 0) {
+        thinking += msg.thinking;
+        opts.onDelta('', msg.thinking);
       }
       for (const tc of msg.tool_calls ?? []) {
         const name = tc.function?.name;
@@ -80,7 +87,7 @@ export class OllamaProvider implements ProviderClient {
       }
     }
 
-    return { text, toolCalls };
+    return { text, toolCalls, thinking };
   }
 }
 

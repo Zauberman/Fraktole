@@ -54,6 +54,11 @@ export const IPC = {
   menuSession: 'menu:session',
   clipboardWrite: 'clipboard:write',
   clipboardRead: 'clipboard:read',
+  testOpen: 'test:open',
+  testStateRequest: 'test:state-request',
+  testState: 'test:state',
+  testScreenshotRequest: 'test:screenshot-request',
+  testScreenshot: 'test:screenshot',
 } as const;
 
 export interface MenuSessionAction {
@@ -124,6 +129,15 @@ export interface Settings {
 /** The harness reviewer's lifecycle status. */
 export type ReviewerStatus = 'offline' | 'running' | 'idle' | 'stopped' | 'error' | 'unconfigured';
 
+/** Live state of the Test tab's guest page, for read_test_page. */
+export interface TestPageState {
+  url: string;
+  title: string;
+  loading: boolean;
+  /** count of console errors since the last navigation */
+  consoleErrors: number;
+}
+
 /** The watchdog goal the user arms with /goal. Only the user sets it; the
  *  harness flips it to 'met' when the model declares GOAL-MET. */
 export interface ReviewerGoal {
@@ -185,7 +199,15 @@ export interface ReviewerEntry {
   content: string;
   toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown> }>;
   toolCallId?: string;
+  /** assistant only: the model's reasoning output (hidden by default). */
+  thinking?: string;
   at: number;
+}
+
+/** reviewer:stream payload — content deltas and/or thinking deltas. */
+export interface ReviewerStreamEvent {
+  delta: string;
+  thinking?: string;
 }
 
 export interface ReviewerToolCallEvent {

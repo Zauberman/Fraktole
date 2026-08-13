@@ -24,6 +24,11 @@ export interface ProviderMsg {
   toolCalls?: ReviewerToolCall[];
   /** tool only: which call this result answers */
   toolCallId?: string;
+  /** assistant only: the model's reasoning output, captured from the
+   *  provider's thinking field (deepseek reasoning_content, ollama
+   *  thinking, anthropic thinking blocks, ...). Persisted with the
+   *  message; never re-sent to the model. */
+  thinking?: string;
 }
 
 export interface CompleteOpts {
@@ -34,13 +39,21 @@ export interface CompleteOpts {
   messages: ProviderMsg[];
   tools: ReviewerTool[];
   signal: AbortSignal;
-  /** Streamed text deltas, delivered as they arrive. */
-  onDelta: (text: string) => void;
+  /** Streamed deltas, delivered as they arrive: content text and/or a
+   *  thinking delta (the provider's reasoning output). */
+  onDelta: (text: string, thinking?: string) => void;
+}
+
+export interface ProviderResult {
+  text: string;
+  toolCalls: ReviewerToolCall[];
+  /** Full reasoning output of the turn ('' when the provider sent none). */
+  thinking: string;
 }
 
 export interface ProviderClient {
   readonly name: ProviderName;
-  complete(opts: CompleteOpts): Promise<{ text: string; toolCalls: ReviewerToolCall[] }>;
+  complete(opts: CompleteOpts): Promise<ProviderResult>;
 }
 
 import { AnthropicProvider } from './providers/anthropic.js';

@@ -4,11 +4,15 @@ import {
   type CompleteOpts,
   type ProviderClient,
   type ProviderMsg,
+  type ProviderResult,
   type ReviewerToolCall,
 } from '../providers.js';
 
 const DEFAULT_BASE = 'https://api.anthropic.com';
 const ANTHROPIC_VERSION = '2023-06-01';
+/** Extended thinking budget; reasoning is always enabled so the thinking
+ *  output is capturable. */
+const THINKING_BUDGET_TOKENS = 2048;
 
 function toMessages(messages: ProviderMsg[]): { system: string; messages: unknown[] } {
   const system = messages
@@ -42,11 +46,12 @@ function toMessages(messages: ProviderMsg[]): { system: string; messages: unknow
 }
 
 /** Anthropic Messages API with SSE event streaming. Tool calls arrive as
- *  content blocks (start → input_json_delta → stop). */
+ *  content blocks (start → input_json_delta → stop); extended thinking is
+ *  enabled and its `thinking` blocks are captured into `thinking`. */
 export class AnthropicProvider implements ProviderClient {
   readonly name = 'anthropic' as const;
 
-  async complete(opts: CompleteOpts): Promise<{ text: string; toolCalls: ReviewerToolCall[] }> {
+  async complete(opts: CompleteOpts): Promise<ProviderResult> {
     const { system, messages } = toMessages(opts.messages);
     const url = joinBase(opts.baseUrl || DEFAULT_BASE, '/v1/messages');
     const res = await fetch(url, {
@@ -68,6 +73,7 @@ export class AnthropicProvider implements ProviderClient {
           input_schema: t.inputSchema,
         })),
         stream: true,
+        thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET_TOKENS },
       }),
     });
     if (!res.ok || !res.body) {
@@ -75,11 +81,16 @@ export class AnthropicProvider implements ProviderClient {
     }
 
     let text = '';
+    let thinking = '';
     const calls = new Map<string, ReviewerToolCall>();
     let openBlock: { call: ReviewerToolCall; raw: string } | null = null;
 
     for await (const payload of ssePayloads(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
-      const ev = payload as { type?: string; content_block?: { type?: string; id?: string; name?: string }; delta?: { type?: string; text?: string; partial_json?: string } };
+      const ev = payload as {
+        type?: string;
+        content_block?: { type?: string; id?: string; name?: string; thinking?: string };
+        delta?: { type?: string; text?: string; thinking?: string; partial_json?: string };
+      };
       switch (ev.type) {
         case 'content_block_start':
           if (ev.content_block?.type === 'tool_use') {
@@ -88,12 +99,18 @@ export class AnthropicProvider implements ProviderClient {
               raw: '',
             };
             calls.set(openBlock.call.id, openBlock.call);
+          } else if (ev.content_block?.type === 'thinking' && ev.content_block.thinking) {
+            thinking += ev.content_block.thinking;
+            opts.onDelta('', ev.content_block.thinking);
           }
           break;
         case 'content_block_delta':
           if (ev.delta?.type === 'text_delta' && ev.delta.text) {
             text += ev.delta.text;
             opts.onDelta(ev.delta.text);
+          } else if (ev.delta?.type === 'thinking_delta' && ev.delta.thinking) {
+            thinking += ev.delta.thinking;
+            opts.onDelta('', ev.delta.thinking);
           } else if (ev.delta?.type === 'input_json_delta' && ev.delta.partial_json && openBlock) {
             openBlock.raw += ev.delta.partial_json;
           }
@@ -108,7 +125,7 @@ export class AnthropicProvider implements ProviderClient {
       }
     }
 
-    return { text, toolCalls: [...calls.values()] };
+    return { text, toolCalls: [...calls.values()], thinking };
   }
 }
 
