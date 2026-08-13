@@ -265,6 +265,7 @@ if (!app.requestSingleInstanceLock()) {
             toolCall: (ev: ReviewerToolCallEvent) =>
               mainWindow?.webContents.send(IPC.reviewerToolCall, session.id, ev),
             message: (entry) => mainWindow?.webContents.send(IPC.reviewerMessage, session.id, entry),
+            goal: (ev) => mainWindow?.webContents.send(IPC.reviewerGoal, session.id, ev),
           },
           logger: (line) => console.log(line),
         });
@@ -499,6 +500,10 @@ if (!app.requestSingleInstanceLock()) {
       const rt = registry?.get(sessionId) ?? null;
       if (!rt || text.trim().length === 0) return;
       await rt.reviewer.prompt(text);
+    });
+    ipcMain.handle(IPC.reviewerSetGoal, async (_e, sessionId: string, text: string | null): Promise<void> => {
+      const rt = registry?.get(sessionId) ?? null;
+      await rt?.reviewer.setGoal(typeof text === 'string' && text.trim().length > 0 ? text.trim() : null);
     });
     ipcMain.handle(IPC.reviewerStop, async (_e, sessionId: string): Promise<void> => {
       const rt = registry?.get(sessionId) ?? null;

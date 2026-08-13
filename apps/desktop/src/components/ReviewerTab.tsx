@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../ipc.js';
+import type { ReviewerEntry, ReviewerGoal, ReviewerStatus, ReviewerToolCallEvent } from '../ipc.js';
 import { bridge, type Settings } from '../ipc.js';
 import {
   DEFAULT_MODELS,
@@ -54,6 +54,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const [statusError, setStatusError] = useState<string | undefined>(undefined);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [goal, setGoal] = useState<ReviewerGoal | null>(null);
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -133,6 +134,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           return [...its, { seq: nextSeq(), at: entry.at, kind: 'message', role: entry.role, content: entry.content, finalized: true }];
         });
       }),
+      bridge.onReviewerGoal(sessionId, (ev) => setGoal(ev.goal)),
     ];
     return () => {
       for (const unsub of unsubs) unsub();
@@ -158,6 +160,11 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     setInput('');
     if (text === '/compact') {
       void bridge.compactReviewer(sessionId);
+      return;
+    }
+    if (text.startsWith('/goal')) {
+      const rest = text.slice(5).trim();
+      void bridge.setReviewerGoal(sessionId, rest.length > 0 ? rest : null);
       return;
     }
     void bridge.promptReviewer(sessionId, text);
@@ -288,7 +295,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           <div className="reviewer-empty">
             <div className="reviewer-empty-mark">reviewer</div>
             <div className="reviewer-empty-hint">prompt the reviewer — it observes every agent tile</div>
-            <div className="reviewer-empty-sub">/compact collapses old turns · config sets the model key</div>
+            <div className="reviewer-empty-sub">/goal &lt;text&gt; arms the watchdog loop · config sets the model key</div>
           </div>
         )}
         {items.map((it) =>
@@ -365,6 +372,16 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         )}
       </div>
 
+      {goal && (
+        <div className="reviewer-goal-banner">
+          <span className={`reviewer-goal-state reviewer-goal-state-${goal.state}`}>{goal.state}</span>
+          <span className="reviewer-goal-text">{sanitizeChatText(goal.text)}</span>
+          <button type="button" className="orch-btn" title="clear the goal" onClick={() => void bridge.setReviewerGoal(sessionId, null)}>
+            clear
+          </button>
+        </div>
+      )}
+
       <footer className="reviewer-input">
         <div className="reviewer-composer">
           <input
@@ -373,14 +390,14 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             onKeyDown={(e) => {
               if (e.key === 'Enter') submit();
             }}
-            placeholder={status === 'running' ? 'prompt the reviewer…' : 'reviewer not running'}
+            placeholder={status === 'running' ? 'prompt the reviewer…  (/goal <text> arms the watchdog)' : 'reviewer not running'}
             disabled={status !== 'running'}
           />
           <button type="button" className="orch-btn orch-btn-primary" onClick={submit} disabled={status !== 'running'}>
             send
           </button>
         </div>
-        <div className="reviewer-hint-line">/compact collapses old turns — never sent to the model</div>
+        <div className="reviewer-hint-line">/compact collapses old turns · /goal &lt;text&gt; arms the watchdog loop — never sent to the model</div>
       </footer>
     </div>
   );

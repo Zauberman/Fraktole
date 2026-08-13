@@ -34,6 +34,7 @@ function fakes() {
     compact: vi.fn(),
     prompt: vi.fn(async () => undefined),
     cancel: vi.fn(),
+    setGoal: vi.fn(async () => undefined),
     onAgentMessage: vi.fn(),
     conversation: [],
   };

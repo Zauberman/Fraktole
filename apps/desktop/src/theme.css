@@ -611,6 +611,59 @@ body {
   padding-top: var(--s3);
 }
 
+.reviewer-goal-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  margin: 0 var(--s4) var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-raised);
+  animation: reviewer-in 180ms var(--ease-out);
+}
+
+.reviewer-goal-state {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  padding: 1px var(--s2);
+  border: 1px solid;
+  border-radius: var(--r-pill);
+}
+
+.reviewer-goal-state-active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+
+.reviewer-goal-state-met {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: var(--ok-tint);
+}
+
+.reviewer-goal-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+  user-select: text;
+}
+
+.reviewer-goal-banner .orch-btn {
+  flex-shrink: 0;
+  padding: 1px var(--s2);
+  font-size: var(--text-2xs);
+}
+
 .reviewer-composer {
   display: flex;
   align-items: center;

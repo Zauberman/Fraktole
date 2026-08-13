@@ -10,6 +10,8 @@ import type {
   PtySpawnArgs,
   PtySpawnResult,
   ReviewerEntry,
+  ReviewerGoal,
+  ReviewerGoalEvent,
   ReviewerStatus,
   ReviewerToolCallEvent,
   SendMessageArgs,
@@ -32,6 +34,8 @@ export type {
   PtySpawnArgs,
   PtySpawnResult,
   ReviewerEntry,
+  ReviewerGoal,
+  ReviewerGoalEvent,
   ReviewerStatus,
   ReviewerToolCallEvent,
   SendMessageArgs,
@@ -82,6 +86,8 @@ export interface FraktoleBridge {
   onReviewerStream(sessionId: string, cb: (delta: string) => void): () => void;
   onReviewerToolCall(sessionId: string, cb: (ev: ReviewerToolCallEvent) => void): () => void;
   onReviewerMessage(sessionId: string, cb: (entry: ReviewerEntry) => void): () => void;
+  setReviewerGoal(sessionId: string, text: string | null): Promise<void>;
+  onReviewerGoal(sessionId: string, cb: (ev: ReviewerGoalEvent) => void): () => void;
   clipboardWrite(text: string): Promise<void>;
   clipboardRead(): Promise<string>;
   createSnapshot(sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot>;

@@ -1,9 +1,18 @@
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { FraktoleMessage, ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../src/shared/ipc.js';
+import type {
+  FraktoleMessage,
+  ReviewerEntry,
+  ReviewerGoalEvent,
+  ReviewerState,
+  ReviewerStatus,
+  ReviewerTask,
+  ReviewerToolCallEvent,
+} from '../src/shared/ipc.js';
 import { resolveProvider, type ProviderResolution } from '../src/shared/reviewer-detect.js';
 import { sanitizeChatText } from '../src/shared/sanitize.js';
 import { ReviewerTools, type ReviewerToolContext } from './reviewer-tools.js';
+import { emptyState, isGoalMet, loadState, persistState } from './reviewer-state.js';
 import { createProvider, type ProviderClient, type ProviderMsg } from './reviewer/providers.js';
 import type { TileRecorder } from './tile-recorder.js';
 
@@ -27,6 +36,7 @@ export interface ReviewerEmitter {
   stream(delta: string): void;
   toolCall(ev: ReviewerToolCallEvent): void;
   message(entry: ReviewerEntry): void;
+  goal(ev: ReviewerGoalEvent): void;
 }
 
 export interface ReviewerHostOpts {
@@ -37,16 +47,23 @@ export interface ReviewerHostOpts {
   recorder: TileRecorder;
   toolContext: ReviewerToolContext;
   emit: ReviewerEmitter;
+  /** Watchdog poll interval; injectable for tests. */
+  pollIntervalMs?: number;
   /** injectable seams for tests */
   createProvider?: (name: string) => ProviderClient;
   tools?: ReviewerTools;
   conversationFile?: string;
+  stateFile?: string;
   logger?(line: string): void;
 }
 
 const MAX_TOOL_ITERATIONS = 25;
 const COMPACT_THRESHOLD = 60_000;
 const TOOL_RESULT_CHARS = 20_000;
+const POLL_INTERVAL_MS_DEFAULT = 30_000;
+/** With an active goal, force a wake every N silent polls (5 min at 30s) so
+ *  a stalled loop can never die quietly. */
+const GOAL_RECHECK_POLLS = 10;
 
 export function buildSystemPrompt(sessionId: string, cwd: string): string {
   return [
@@ -59,6 +76,12 @@ export function buildSystemPrompt(sessionId: string, cwd: string): string {
     'Never use emojis or decorative unicode in any message, body or reply — ASCII only.',
     'Context compacts automatically near the limit; keep replies tight.',
     'End each engagement with a concise verdict: what each agent did, and what you recommend.',
+    'When a goal is armed (you receive the [goal: ...] block), you are the loop master:',
+    'keep read_state current, record every assignment in the ledger with update_task',
+    '(pending/active/done/failed), dispatch work via send_message to idle agents,',
+    'verify results with read_tile, and iterate — re-dispatch, re-check — until the goal is met.',
+    'When you judge the goal fully met, start your final message with "GOAL-MET:" followed by your verdict.',
+    'Never set, change or clear the goal yourself — only the user can, via /goal.',
   ].join('\n');
 }
 
@@ -80,11 +103,26 @@ export class ReviewerHost {
   private apiKey = '';
   private readonly tools: ReviewerTools;
   private readonly conversationFile: string;
+  private readonly stateFile: string;
+  /** Durable goal + task ledger (survives compaction and restarts). */
+  private state: ReviewerState = emptyState();
+  private watchTimer: NodeJS.Timeout | null = null;
+  /** Per-tile line counts from the last poll (the cheap activity signal). */
+  private lastLines = new Map<string, number>();
+  private pollsSinceWake = 0;
+  /** Tool context merged with the ledger callbacks (state lives here). */
+  private readonly toolContext: ReviewerToolContext;
 
   constructor(private readonly opts: ReviewerHostOpts) {
     this.provider = (opts.createProvider ?? createProvider)('anthropic');
     this.tools = opts.tools ?? new ReviewerTools();
     this.conversationFile = opts.conversationFile ?? join(opts.sessionDir, 'reviewer', 'conversation.jsonl');
+    this.stateFile = opts.stateFile ?? join(opts.sessionDir, 'reviewer', 'state.json');
+    this.toolContext = {
+      ...opts.toolContext,
+      getState: () => this.state,
+      updateTask: (task) => this.updateTask(task),
+    };
   }
 
   get conversation(): ReviewerEntry[] {
@@ -113,37 +151,48 @@ export class ReviewerHost {
     if (this.messages.length === 0) {
       this.messages.push({ role: 'system', content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd) });
     }
+    this.state = await loadState(this.stateFile);
+    this.pollsSinceWake = 0;
+    this.startWatch();
     this.setStatus('running');
     this.drainQueue();
     return true;
   }
 
-  /** Aborts the current run and forgets the conversation. */
+  /** Aborts the current run and forgets the conversation (and the goal and
+   *  task ledger — a true reset of the reviewer). */
   async restart(): Promise<boolean> {
     this.cancel();
+    this.stopWatch();
     this.messages = [];
     this.queue = [];
+    this.state = emptyState();
     await this.truncateConversation();
+    await persistState(this.stateFile, this.state, this.opts.logger);
+    this.opts.emit.goal({ goal: null });
     return this.start();
   }
 
   /** Explicit off switch (session stopped). */
   stop(): void {
     this.cancel();
+    this.stopWatch();
     this.queue = [];
     this.setStatus('stopped');
   }
 
-  /** Idle shutdown: aborts the run, keeps the conversation for later. */
+  /** Idle shutdown: aborts the run, stops the watchdog, keeps the
+   *  conversation and ledger for later. */
   idleOut(): void {
     this.cancel();
+    this.stopWatch();
     this.setStatus('idle');
   }
 
   /** Queues a user prompt (from the Reviewer tab). */
   async prompt(text: string): Promise<void> {
     if (this.status !== 'running') return;
-    this.queue.push({ role: 'user', content: text });
+    this.queue.push({ role: 'user', content: this.withStateBlock(text) });
     this.drainQueue();
   }
 
@@ -153,9 +202,81 @@ export class ReviewerHost {
     if (this.status !== 'running') return;
     this.queue.push({
       role: 'user',
-      content: `[${msg.from} → ${msg.to} (${msg.kind})]: ${sanitizeChatText(msg.body)}`,
+      content: this.withStateBlock(`[${msg.from} → ${msg.to} (${msg.kind})]: ${sanitizeChatText(msg.body)}`),
     });
     this.drainQueue();
+  }
+
+  /** Arms (text) or disarms (null) the watchdog goal. Only the user can call
+   *  this (the /goal command); the model never sets its own goal. */
+  async setGoal(text: string | null): Promise<void> {
+    if (this.status !== 'running') return;
+    const prev = this.state.goal;
+    const trimmed = typeof text === 'string' ? text.trim() : '';
+    const goal = trimmed.length > 0 ? { text: trimmed, setAt: Date.now(), state: 'active' as const } : null;
+    this.state.goal = goal;
+    this.pollsSinceWake = 0;
+    this.lastLines = new Map([...this.opts.recorder.list()].map(([id, s]) => [id, s.lines]));
+    await persistState(this.stateFile, this.state, this.opts.logger);
+    this.opts.emit.goal({ goal });
+    if (goal && (!prev || prev.state !== 'active')) {
+      this.queue.push({ role: 'user', content: this.withStateBlock(`[goal armed] ${goal.text}`) });
+      this.drainQueue();
+    }
+  }
+
+  /** Watchdog tick: cheap activity check (line counts only — no model call
+   *  unless something wakes the loop). Silent without an active goal. */
+  pollNow(): void {
+    if (this.status !== 'running') return;
+    const lines = new Map<string, number>();
+    for (const [tileId, summary] of this.opts.recorder.list()) lines.set(tileId, summary.lines);
+    const goal = this.state.goal;
+    const quiet = !goal || goal.state === 'met' || this.running || this.queue.length > 0;
+    if (quiet) {
+      this.lastLines = lines;
+      return;
+    }
+    const delta = [...lines].some(([id, n]) => (this.lastLines.get(id) ?? 0) !== n);
+    this.pollsSinceWake += 1;
+    if (delta || this.pollsSinceWake >= GOAL_RECHECK_POLLS) {
+      this.pollsSinceWake = 0;
+      this.queue.push({ role: 'user', content: this.withStateBlock('[watchdog] re-check progress') });
+      this.drainQueue();
+    }
+    this.lastLines = lines;
+  }
+
+  /** Ledger upsert: the tools route here; persistence never throws. */
+  private async updateTask(task: ReviewerTask): Promise<void> {
+    const idx = this.state.tasks.findIndex((t) => t.id === task.id);
+    if (idx >= 0) {
+      this.state.tasks[idx] = task;
+    } else {
+      this.state.tasks.push(task);
+    }
+    await persistState(this.stateFile, this.state, this.opts.logger);
+  }
+
+  /** While a goal is armed, every trigger carries a compact state block so
+   *  auto-compaction can never erase what the loop is working on. */
+  private withStateBlock(content: string): string {
+    const goal = this.state.goal;
+    if (!goal) return content;
+    const pending = this.state.tasks.filter((t) => t.status === 'pending').length;
+    const done = this.state.tasks.filter((t) => t.status === 'done').length;
+    return `[goal: ${goal.text} (${goal.state})] [tasks: ${pending} pending, ${done} done] ${content}`;
+  }
+
+  private startWatch(): void {
+    this.stopWatch();
+    this.watchTimer = setInterval(() => this.pollNow(), this.opts.pollIntervalMs ?? POLL_INTERVAL_MS_DEFAULT);
+    this.watchTimer.unref();
+  }
+
+  private stopWatch(): void {
+    if (this.watchTimer) clearInterval(this.watchTimer);
+    this.watchTimer = null;
   }
 
   /** Manual compaction pass (the /compact command): drops old tool rows
@@ -211,12 +332,18 @@ export class ReviewerHost {
           const entry = toEntry(this.messages[this.messages.length - 1]!);
           this.opts.emit.message(entry);
 
+          if (isGoalMet(response.text) && this.state.goal?.state === 'active') {
+            this.state.goal.state = 'met';
+            await persistState(this.stateFile, this.state, this.opts.logger);
+            this.opts.emit.goal({ goal: this.state.goal });
+          }
+
           if (response.toolCalls.length === 0) break;
           let failed = false;
           for (const call of response.toolCalls) {
             const started = Date.now();
             this.opts.emit.toolCall({ callId: call.id, name: call.name, args: call.args, state: 'start', at: Date.now() });
-            const result = await this.tools.run(call.name, call.args, this.opts.toolContext);
+            const result = await this.tools.run(call.name, call.args, this.toolContext);
             const durationMs = Date.now() - started;
             if (result.startsWith('error:')) {
               failed = true;

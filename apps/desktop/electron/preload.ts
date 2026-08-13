@@ -12,6 +12,7 @@ import {
   type PtySpawnArgs,
   type PtySpawnResult,
   type ReviewerEntry,
+  type ReviewerGoalEvent,
   type ReviewerToolCallEvent,
   type SendMessageArgs,
   type SessionFile,
@@ -129,6 +130,16 @@ const api = {
     };
     ipcRenderer.on(IPC.reviewerMessage, listener);
     return () => ipcRenderer.removeListener(IPC.reviewerMessage, listener);
+  },
+
+  setReviewerGoal: (sessionId: string, text: string | null): Promise<void> =>
+    ipcRenderer.invoke(IPC.reviewerSetGoal, sessionId, text),
+  onReviewerGoal: (sessionId: string, cb: (ev: ReviewerGoalEvent) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, ev: ReviewerGoalEvent): void => {
+      if (sid === sessionId) cb(ev);
+    };
+    ipcRenderer.on(IPC.reviewerGoal, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerGoal, listener);
   },
 
   clipboardWrite: (text: string): Promise<void> => ipcRenderer.invoke(IPC.clipboardWrite, text),

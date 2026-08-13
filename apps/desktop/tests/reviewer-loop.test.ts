@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ReviewerHost, type ReviewerConfig } from '../electron/reviewer.js';
 import type { ReviewerToolContext } from '../electron/reviewer-tools.js';
+import type { ReviewerState } from '../src/shared/ipc.js';
 import { TileRecorder } from '../electron/tile-recorder.js';
 import type { ProviderClient, ProviderMsg } from '../electron/reviewer/providers.js';
 
@@ -47,13 +48,15 @@ function ctxFor(recorder: TileRecorder, opts: Partial<ReviewerToolContext> = {})
   };
 }
 
+let hostSeq = 0;
 function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string }> = {}) {
+  const dir = extra.dir ?? join(tmpdir(), `fraktole-reviewer-host-${process.pid}-${++hostSeq}`);
   const provider = new FakeProvider(script);
   const events: string[] = [];
   const host = new ReviewerHost({
     getConfig: async (): Promise<ReviewerConfig> => extra.config ?? { provider: 'ollama', model: 'm' },
     sessionId: 's1',
-    sessionDir: extra.dir ?? '/tmp/sessions/s1',
+    sessionDir: dir,
     cwd: '/tmp/proj',
     recorder,
     toolContext: ctxFor(recorder),
@@ -64,6 +67,7 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
       stream: (d) => events.push(`stream:${d}`),
       toolCall: (ev) => events.push(`tool:${ev.name}:${ev.state}`),
       message: () => events.push('msg'),
+      goal: (ev) => events.push(`goal:${ev.goal?.state ?? 'none'}`),
     },
   });
   return { host, provider, events };
@@ -188,7 +192,7 @@ describe('ReviewerHost', () => {
       toolContext: ctx,
       createProvider: () => provider,
       conversationFile: join(dir, 'conversation.jsonl'),
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined },
     });
     await host.start();
     await host.prompt('delegate');
@@ -211,7 +215,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctxFor(recorder),
       createProvider: () => provider,
-      emit: { status: (s) => events.push(`status:${s}`), stream: () => undefined, toolCall: () => undefined, message: () => undefined },
+      emit: { status: (s) => events.push(`status:${s}`), stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined },
     });
     await host.start();
     await host.prompt('x');
@@ -307,5 +311,147 @@ describe('ReviewerHost', () => {
     expect(host.conversation.length).toBeLessThan(51); // compaction dropped exchanges
     expect(host.conversation[0]!.role).toBe('system');
     expect(host.conversation.some((e) => e.content.includes('context compacted'))).toBe(true);
+  });
+
+  it('setGoal persists the ledger; read_state and update_task work through the real tools', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fraktole-reviewer-'));
+    const recorder = new TileRecorder();
+    const { host, events } = makeHost(
+      [
+        {
+          text: '',
+          toolCalls: [
+            { id: 'c1', name: 'read_state', args: {} },
+            { id: 'c2', name: 'update_task', args: { title: 'build the widget', agentId: 'agent-1', status: 'active' } },
+            { id: 'c3', name: 'update_task', args: { title: 'verify the build', status: 'done' } },
+          ],
+        },
+        { text: 'ledger ok', toolCalls: [] },
+      ],
+      recorder,
+      { dir },
+    );
+    await host.start();
+    await host.setGoal('finish the release');
+    await settle(120);
+    expect(events).toContain('goal:active');
+    const raw = await readFile(join(dir, 'reviewer', 'state.json'), 'utf8');
+    expect(raw).toContain('finish the release');
+    const contents = host.conversation.map((e) => e.content);
+    expect(contents.some((c) => c.includes('"goal"') && c.includes('finish the release'))).toBe(true); // read_state result
+    expect(host.conversation.some((e) => e.toolCalls?.some((c) => JSON.stringify(c.args).includes('build the widget')))).toBe(true); // update_task args
+    const state = JSON.parse(raw) as ReviewerState;
+    expect(state.goal?.state).toBe('active');
+    expect(state.tasks).toHaveLength(2);
+    expect(state.tasks.some((t) => t.title === 'build the widget' && t.agentId === 'agent-1' && t.status === 'active')).toBe(true);
+    expect(state.tasks.some((t) => t.title === 'verify the build' && t.status === 'done' && t.id.startsWith('t-'))).toBe(true);
+  });
+
+  it('the watchdog poll is silent without a goal', async () => {
+    const recorder = recorderWith('boot\nlog');
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder);
+    await host.start();
+    host.pollNow();
+    host.pollNow();
+    await settle(80);
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
+  it('with a goal, the watchdog wakes on tile activity but stays quiet without it', async () => {
+    const recorder = new TileRecorder();
+    recorder.record('tile-1', 'boot');
+    const script: ScriptEntry[] = [
+      { text: '', toolCalls: [{ id: 'c1', name: 'read_tile', args: { agentId: 'agent-1', tail: 10 } }] },
+      { text: 'checked', toolCalls: [] },
+      { text: 'woke on activity', toolCalls: [] },
+      { text: 'woke on backstop', toolCalls: [] },
+    ];
+    const { host, provider } = makeHost(script, recorder);
+    await host.start();
+    await host.setGoal('watch the build');
+    await settle(100);
+    expect(provider.complete).toHaveBeenCalledTimes(2); // the [goal armed] tool loop
+    expect(host.conversation.some((e) => e.content.includes('[goal: watch the build (active)]'))).toBe(true);
+
+    recorder.record('tile-1', 'boot\nnew output');
+    host.pollNow();
+    await settle(100);
+    expect(provider.complete).toHaveBeenCalledTimes(3); // activity delta woke the model
+    expect(host.conversation.some((e) => e.content.includes('[watchdog] re-check progress'))).toBe(true);
+
+    const beforeIdle = provider.complete.mock.calls.length;
+    for (let i = 0; i < 5; i++) host.pollNow();
+    await settle(80);
+    expect(provider.complete).toHaveBeenCalledTimes(beforeIdle); // no delta, no wake
+
+    for (let i = 0; i < 10; i++) host.pollNow(); // the 10th silent poll hits the backstop
+    await settle(100);
+    expect(provider.complete).toHaveBeenCalledTimes(beforeIdle + 1);
+  });
+
+  it('a GOAL-MET declaration marks the goal met and silences the watchdog', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fraktole-reviewer-'));
+    const recorder = new TileRecorder();
+    const { host, provider, events } = makeHost([{ text: 'GOAL-MET: the widget is built, all green', toolCalls: [] }], recorder, { dir });
+    await host.start();
+    await host.setGoal('build the widget');
+    await settle(100);
+    expect(events).toContain('goal:met');
+    const state = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')) as ReviewerState;
+    expect(state.goal?.state).toBe('met');
+    const calls = provider.complete.mock.calls.length;
+    recorder.record('tile-1', 'more output');
+    host.pollNow();
+    await settle(60);
+    expect(provider.complete).toHaveBeenCalledTimes(calls); // met goal: poll stays silent
+    expect(host.conversation.some((e) => e.content.includes('[watchdog]'))).toBe(false);
+  });
+
+  it('re-arming a met goal wakes the loop again', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost(
+      [{ text: 'GOAL-MET: first goal done', toolCalls: [] }, { text: 'second goal engaged', toolCalls: [] }],
+      recorder,
+    );
+    await host.start();
+    await host.setGoal('first goal');
+    await settle(100);
+    await host.setGoal('second goal');
+    await settle(100);
+    expect(provider.complete).toHaveBeenCalledTimes(2);
+    expect(host.conversation.some((e) => e.content.includes('second goal engaged'))).toBe(true);
+  });
+
+  it('restart clears the goal and the task ledger', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fraktole-reviewer-'));
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ text: 'GOAL-MET: done', toolCalls: [] }, { text: 'x', toolCalls: [] }], recorder, { dir });
+    await host.start();
+    await host.setGoal('clear me');
+    await settle(100);
+    await host.restart();
+    await settle(60);
+    const state = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')) as ReviewerState;
+    expect(state.goal).toBeNull();
+    expect(state.tasks).toEqual([]);
+  });
+
+  it('every trigger carries the goal block, even after auto-compaction', async () => {
+    const recorder = recorderWith('x'.repeat(3000));
+    const script: ScriptEntry[] = [];
+    for (let i = 0; i < 24; i++) {
+      script.push({ text: '', toolCalls: [{ id: `c${i}`, name: 'read_tile', args: { agentId: 'agent-1', tail: 2000 } }] });
+    }
+    script.push({ text: 'done', toolCalls: [] });
+    script.push({ text: 'final answer', toolCalls: [] });
+    const { host } = makeHost(script, recorder);
+    await host.start();
+    await host.setGoal('big dig');
+    await settle(500);
+    expect(host.conversation.some((e) => e.content.includes('context compacted'))).toBe(true);
+    await host.prompt('one more');
+    await settle(120);
+    const lastUser = [...host.conversation].reverse().find((e) => e.role === 'user');
+    expect(lastUser?.content.startsWith('[goal: big dig (active)]')).toBe(true);
   });
 });

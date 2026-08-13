@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { FraktoleMessage } from '../src/shared/ipc.js';
+import type { FraktoleMessage, ReviewerState, ReviewerTask } from '../src/shared/ipc.js';
 import { ORCHESTRATOR_ID, messageId } from './mailbox.js';
 import type { TileRecorder } from './tile-recorder.js';
 
@@ -18,6 +18,10 @@ export interface ReviewerToolContext {
   tileOfAgent(agentId: string): string | null;
   agentOfTile(tileId: string): string | null;
   cwdOfAgent(agentId: string): string | null;
+  /** The durable goal/task ledger; the host owns persistence and always
+   *  injects these two callbacks when it builds the merged context. */
+  getState?(): ReviewerState;
+  updateTask?(task: ReviewerTask): Promise<void>;
 }
 
 export interface ReviewerTool {
@@ -135,6 +139,46 @@ const TOOLS: ReviewerTool[] = [
     },
   },
   {
+    name: 'read_state',
+    description: 'Return the current goal and task ledger (the durable watchdog state).',
+    inputSchema: { type: 'object', properties: {} },
+    async run(_args, ctx) {
+      return JSON.stringify(ctx.getState?.() ?? ({ goal: null, tasks: [] } as ReviewerState), null, 2);
+    },
+  },
+  {
+    name: 'update_task',
+    description:
+      'Upsert a row in the task ledger: give id to update an existing task, or omit it to create one (a fresh id is assigned). status is one of pending, active, done, failed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        agentId: { type: 'string' },
+        title: { type: 'string' },
+        status: { type: 'string', enum: ['pending', 'active', 'done', 'failed'] },
+      },
+      required: ['title'],
+    },
+    async run(args, ctx) {
+      const title = typeof args.title === 'string' ? args.title.trim() : '';
+      if (title.length === 0) return 'error: title required';
+      const status =
+        args.status === 'pending' || args.status === 'active' || args.status === 'done' || args.status === 'failed'
+          ? args.status
+          : 'pending';
+      const task: ReviewerTask = {
+        id: typeof args.id === 'string' && args.id.length > 0 ? args.id : newTaskId(),
+        agentId: typeof args.agentId === 'string' && args.agentId.length > 0 ? args.agentId : null,
+        title,
+        status,
+        updatedAt: Date.now(),
+      };
+      await ctx.updateTask?.(task);
+      return `task ${task.id} ${task.status === 'pending' ? 'recorded' : `→ ${task.status}`}`;
+    },
+  },
+  {
     name: 'run_bash',
     description: 'Run a shell command in the session project (or an agent\'s working dir). Output is capped at 64 KiB.',
     inputSchema: {
@@ -203,6 +247,14 @@ function resolveTile(args: Record<string, unknown>, ctx: ReviewerToolContext): s
   if (typeof args.tileId === 'string' && args.tileId.length > 0) return args.tileId;
   if (typeof args.agentId === 'string' && args.agentId.length > 0) return ctx.tileOfAgent(args.agentId);
   return null;
+}
+
+/** Ledger task ids must be unique per session; a per-process counter keeps
+ *  them distinct even when two upserts land in the same ms. */
+let taskSeq = 0;
+function newTaskId(): string {
+  taskSeq += 1;
+  return `t-${Date.now()}-${taskSeq}`;
 }
 
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {

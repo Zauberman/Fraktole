@@ -38,6 +38,8 @@ export const IPC = {
   reviewerStop: 'reviewer:stop',
   reviewerRestart: 'reviewer:restart',
   reviewerCompact: 'reviewer:compact',
+  reviewerSetGoal: 'reviewer:set-goal',
+  reviewerGoal: 'reviewer:goal',
   reviewerTranscript: 'reviewer:transcript',
   reviewerStatus: 'reviewer:status',
   reviewerStream: 'reviewer:stream',
@@ -109,6 +111,35 @@ export interface Settings {
 
 /** The harness reviewer's lifecycle status. */
 export type ReviewerStatus = 'offline' | 'running' | 'idle' | 'stopped' | 'error' | 'unconfigured';
+
+/** The watchdog goal the user arms with /goal. Only the user sets it; the
+ *  harness flips it to 'met' when the model declares GOAL-MET. */
+export interface ReviewerGoal {
+  text: string;
+  setAt: number;
+  state: 'active' | 'met';
+}
+
+/** One row of the durable task ledger (state.json). */
+export interface ReviewerTask {
+  id: string;
+  agentId: string | null;
+  title: string;
+  status: 'pending' | 'active' | 'done' | 'failed';
+  updatedAt: number;
+}
+
+/** Durable watchdog state: the goal + the task ledger. Persisted as
+ *  sessionDir/reviewer/state.json — survives compaction and restarts. */
+export interface ReviewerState {
+  goal: ReviewerGoal | null;
+  tasks: ReviewerTask[];
+}
+
+/** reviewer:goal event payload. */
+export interface ReviewerGoalEvent {
+  goal: ReviewerGoal | null;
+}
 
 export interface ReviewerEntry {
   role: 'user' | 'assistant' | 'tool' | 'system';
