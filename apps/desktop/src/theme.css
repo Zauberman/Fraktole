@@ -949,6 +949,10 @@ button:active:not(:disabled) {
   color: var(--text-faint);
 }
 
+.reviewer-hint-error {
+  color: var(--err);
+}
+
 .reviewer-config {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

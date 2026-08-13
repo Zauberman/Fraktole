@@ -68,8 +68,17 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '', agentCommand: '', reasoningEffort: '' });
   const [liveModels, setLiveModels] = useState<string[] | null>(null);
+  /** Transient inline note when a prompt could not be accepted — the text
+   *  stays in the box, never silently dropped. */
+  const [composeError, setComposeError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(0);
+
+  useEffect(() => {
+    if (!composeError) return;
+    const t = window.setTimeout(() => setComposeError(null), 5000);
+    return () => window.clearTimeout(t);
+  }, [composeError]);
 
   const nextSeq = (): number => {
     seqRef.current += 1;
@@ -199,22 +208,33 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const submit = (): void => {
     const text = input.trim();
     if (text.length === 0) return;
-    setInput('');
     if (text === '/compact') {
+      setInput('');
       void bridge.compactReviewer(sessionId);
       return;
     }
     if (text.startsWith('/goal')) {
       const rest = text.slice(5).trim();
+      setInput('');
       void bridge.setReviewerGoal(sessionId, rest.length > 0 ? rest : null);
       return;
     }
     if (text.startsWith('/kill')) {
       const rest = text.slice(5).trim();
+      setInput('');
       if (rest.length > 0) void bridge.killReviewerAgent(sessionId, rest);
       return;
     }
-    void bridge.promptReviewer(sessionId, text);
+    // a prompt is only consumed when the harness accepted it — otherwise
+    // the text stays in the box and the user sees why
+    void bridge.promptReviewer(sessionId, text).then((accepted) => {
+      if (accepted) setInput('');
+      else setComposeError('reviewer is stopped or unconfigured — open config');
+    });
+  };
+
+  const revive = (): void => {
+    void bridge.ensureReviewer(sessionId);
   };
 
   const retry = (): void => {
@@ -309,7 +329,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               stop
             </button>
           ) : (
-            <button type="button" className="btn btn-sm btn-primary" onClick={() => void retry()}>
+            <button type="button" className="btn btn-sm btn-primary" onClick={revive}>
               start
             </button>
           )}
@@ -561,14 +581,24 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             onKeyDown={(e) => {
               if (e.key === 'Enter') submit();
             }}
-            placeholder={status === 'running' ? 'prompt the reviewer…  (/goal <text> arms the watchdog)' : 'reviewer not running'}
-            disabled={status !== 'running'}
+            placeholder={
+              status === 'running'
+                ? 'prompt the reviewer…  (/goal <text> arms the watchdog)'
+                : status === 'unconfigured'
+                  ? 'paste an api key in config — save & restart'
+                  : status === 'stopped'
+                    ? 'reviewer stopped — start revives it'
+                    : 'reviewer reconnecting — send to revive it'
+            }
+            disabled={status === 'stopped'}
           />
-          <button type="button" className="btn btn-sm btn-primary" onClick={submit} disabled={status !== 'running'}>
+          <button type="button" className="btn btn-sm btn-primary" onClick={submit} disabled={status === 'stopped'}>
             send
           </button>
         </div>
-        <div className="reviewer-hint-line">/compact collapses old turns · /goal &lt;text&gt; arms the watchdog loop — never sent to the model</div>
+        <div className={`reviewer-hint-line${composeError ? ' reviewer-hint-error' : ''}`}>
+          {composeError ?? '/compact collapses old turns · /goal <text> arms the watchdog loop — never sent to the model'}
+        </div>
       </footer>
     </div>
   );

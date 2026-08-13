@@ -21,7 +21,9 @@ export interface RuntimeReviewer {
   idleOut(): void;
   restart(): Promise<boolean>;
   compact(): void;
-  prompt(text: string): Promise<void>;
+  /** Accepts the prompt (reviving the harness if it was down); false when
+   *  explicitly stopped or unconfigured. */
+  prompt(text: string): Promise<boolean>;
   cancel(): void;
   setGoal(text: string | null): Promise<void>;
   answerQuestion(askId: string, answer: string): void;

@@ -100,7 +100,7 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.messageEvent, listener);
   },
   ensureReviewer: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.reviewerEnsure, sessionId),
-  promptReviewer: (sessionId: string, text: string): Promise<void> =>
+  promptReviewer: (sessionId: string, text: string): Promise<boolean> =>
     ipcRenderer.invoke(IPC.reviewerPrompt, sessionId, text),
   stopReviewer: (sessionId: string): Promise<void> => ipcRenderer.invoke(IPC.reviewerStop, sessionId),
   restartReviewer: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.reviewerRestart, sessionId),

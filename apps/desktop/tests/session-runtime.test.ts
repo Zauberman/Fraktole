@@ -32,7 +32,7 @@ function fakes() {
     idleOut: vi.fn(),
     restart: vi.fn(async () => true),
     compact: vi.fn(),
-    prompt: vi.fn(async () => undefined),
+    prompt: vi.fn(async () => true),
     cancel: vi.fn(),
     setGoal: vi.fn(async () => undefined),
     answerQuestion: vi.fn(),
@@ -99,6 +99,16 @@ describe('SessionRuntime lifecycle', () => {
     const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, reviewer, router, judgeCwd: () => '/home' });
     await expect(rt.ensureReviewer()).resolves.toBe(true);
     expect(reviewer.start).not.toHaveBeenCalled();
+  });
+
+  it('ensureReviewer revives an idle or errored reviewer (persistent connection)', async () => {
+    for (const down of ['idle', 'error'] as const) {
+      const { host, reviewer, router } = fakes();
+      reviewer.status = down;
+      const rt = new SessionRuntime({ session: session('s1'), sessionRoot: '/tmp/sessions', host, reviewer, router, judgeCwd: () => '/home' });
+      await expect(rt.ensureReviewer()).resolves.toBe(true);
+      expect(reviewer.start).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('ensureReviewer revives a stopped session before starting', async () => {

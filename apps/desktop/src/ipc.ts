@@ -86,7 +86,7 @@ export interface FraktoleBridge {
   listMessages(sessionId: string): Promise<FraktoleMessage[]>;
   onMessageEvent(sessionId: string, cb: (msg: FraktoleMessage) => void): () => void;
   ensureReviewer(sessionId: string): Promise<boolean>;
-  promptReviewer(sessionId: string, text: string): Promise<void>;
+  promptReviewer(sessionId: string, text: string): Promise<boolean>;
   stopReviewer(sessionId: string): Promise<void>;
   restartReviewer(sessionId: string): Promise<boolean>;
   compactReviewer(sessionId: string): Promise<void>;

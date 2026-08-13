@@ -17,16 +17,19 @@ function toMessages(messages: ProviderMsg[]): unknown[] {
         return { role: 'system', content: m.content };
       case 'user':
         return { role: 'user', content: m.content };
-      case 'assistant':
-        return {
-          role: 'assistant',
-          content: m.content,
-          tool_calls: m.toolCalls?.map((c) => ({
+      case 'assistant': {
+        const out: Record<string, unknown> = { role: 'assistant', content: m.content };
+        // "tool_calls": [] is schema-invalid on OpenAI — omit it entirely
+        // when there are no calls (also heals older persisted conversations)
+        if (m.toolCalls && m.toolCalls.length > 0) {
+          out.tool_calls = m.toolCalls.map((c) => ({
             id: c.id,
             type: 'function',
             function: { name: c.name, arguments: JSON.stringify(c.args) },
-          })),
-        };
+          }));
+        }
+        return out;
+      }
       case 'tool':
         return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };
     }

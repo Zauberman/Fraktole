@@ -32,6 +32,9 @@ function toMessages(messages: ProviderMsg[]): { system: string; messages: unknow
         for (const c of m.toolCalls ?? []) {
           content.push({ type: 'tool_use', id: c.id, name: c.name, input: c.args });
         }
+        // an assistant block must carry at least one content block (a
+        // reasoning-only reply with no text would otherwise be rejected)
+        if (content.length === 0) content.push({ type: 'text', text: '(no text)' });
         out.push({ role: 'assistant', content });
         break;
       }

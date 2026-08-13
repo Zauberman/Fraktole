@@ -8,7 +8,10 @@ import type { ReviewerState } from '../src/shared/ipc.js';
 import { TileRecorder } from '../electron/tile-recorder.js';
 import type { ProviderClient, ProviderMsg } from '../electron/reviewer/providers.js';
 
-type ScriptEntry = { text: string; toolCalls: ProviderMsg['toolCalls']; thinking?: string } | { hang: boolean };
+type ScriptEntry =
+  | { text: string; toolCalls: ProviderMsg['toolCalls']; thinking?: string }
+  | { hang: boolean }
+  | { fail: boolean };
 
 class FakeProvider implements ProviderClient {
   readonly name = 'openai' as const;
@@ -20,6 +23,9 @@ class FakeProvider implements ProviderClient {
         return new Promise((_resolve, reject) => {
           opts.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
         });
+      }
+      if (entry && 'fail' in entry) {
+        return Promise.reject(new Error('provider boom'));
       }
       return Promise.resolve({ text: entry.text, toolCalls: entry.toolCalls ?? [], thinking: entry.thinking ?? '' });
     });
@@ -53,7 +59,7 @@ function ctxFor(recorder: TileRecorder, opts: Partial<ReviewerToolContext> = {})
 }
 
 let hostSeq = 0;
-function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string }> = {}) {
+function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number }> = {}) {
   const dir = extra.dir ?? join(tmpdir(), `fraktole-reviewer-host-${process.pid}-${++hostSeq}`);
   const provider = new FakeProvider(script);
   const events: string[] = [];
@@ -66,6 +72,7 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
     recorder,
     toolContext: ctxFor(recorder),
     createProvider: () => provider,
+    retryDelayMs: extra.retryDelayMs ?? 1,
     conversationFile: extra.dir ? join(extra.dir, 'conversation.jsonl') : uniqueConversationFile(),
     emit: {
       status: (s) => events.push(`status:${s}`),
@@ -214,7 +221,7 @@ describe('ReviewerHost', () => {
   it('marks error status when the provider fails', async () => {
     const recorder = new TileRecorder();
     const provider = new FakeProvider([{ text: '', toolCalls: [] }]);
-    provider.complete.mockRejectedValueOnce(new Error('boom'));
+    provider.complete.mockRejectedValueOnce(new Error('boom')).mockRejectedValueOnce(new Error('boom again'));
     const events: string[] = [];
     const host = new ReviewerHost({
       getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
@@ -224,6 +231,7 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctxFor(recorder),
       createProvider: () => provider,
+      retryDelayMs: 1,
       emit: { status: (s) => events.push(`status:${s}`), stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined },
     });
     await host.start();
@@ -980,5 +988,92 @@ describe('ReviewerHost', () => {
     await settle(60);
     const call2 = custom.complete.mock.calls[0]![0] as { reasoningEffort?: string };
     expect(call2.reasoningEffort).toBeUndefined();
+  });
+
+  it('stores a text-only assistant reply without an empty toolCalls key', async () => {
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ text: 'plain answer', toolCalls: [] }], recorder);
+    await host.start();
+    await host.prompt('q');
+    await settle(60);
+    const assistant = host.conversation.find((e) => e.role === 'assistant');
+    expect(assistant?.content).toBe('plain answer');
+    expect(assistant?.toolCalls).toBeUndefined();
+  });
+
+  it('prompt revives an idle reviewer and keeps the conversation', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'first', toolCalls: [] }, { text: 'second', toolCalls: [] }], recorder);
+    await host.start();
+    await host.prompt('one');
+    await settle(60);
+    host.idleOut();
+    expect(host.status).toBe('idle');
+    const accepted = await host.prompt('two');
+    expect(accepted).toBe(true);
+    await settle(60);
+    expect(host.status).toBe('running');
+    const texts = host.conversation.filter((e) => e.role === 'user').map((e) => e.content);
+    expect(texts).toContain('two');
+    expect(provider.complete.mock.calls.length).toBe(2);
+  });
+
+  it('prompt revives after a provider error, retaining context', async () => {
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ fail: true }, { fail: true }, { text: 'survive', toolCalls: [] }], recorder, { retryDelayMs: 1 });
+    await host.start();
+    await host.prompt('boom');
+    await settle(80);
+    expect(host.status).toBe('error');
+    const accepted = await host.prompt('revive me');
+    expect(accepted).toBe(true);
+    await settle(60);
+    expect(host.status).toBe('running');
+    const users = host.conversation.filter((e) => e.role === 'user').map((e) => e.content);
+    expect(users).toContain('revive me');
+    expect(users).toContain('boom');
+  });
+
+  it('prompt refuses when the reviewer is explicitly stopped', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder);
+    await host.start();
+    host.stop();
+    await expect(host.prompt('nope')).resolves.toBe(false);
+    expect(provider.complete.mock.calls.length).toBe(0);
+  });
+
+  it('run retries a failed provider call once, then errors', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider, events } = makeHost([{ fail: true }, { fail: true }], recorder, { retryDelayMs: 1 });
+    await host.start();
+    await host.prompt('q');
+    await settle(80);
+    expect(provider.complete.mock.calls.length).toBe(2);
+    expect(host.status).toBe('error');
+    expect(events).toContain('status:error');
+  });
+
+  it('run recovers when the retry succeeds', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider, events } = makeHost([{ fail: true }, { text: 'recovered', toolCalls: [] }], recorder, { retryDelayMs: 1 });
+    await host.start();
+    await host.prompt('q');
+    await settle(80);
+    expect(provider.complete.mock.calls.length).toBe(2);
+    expect(host.status).toBe('running');
+    expect(events).not.toContain('status:error');
+    expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'recovered')).toBe(true);
+  });
+
+  it('setGoal revives an idle reviewer instead of vanishing', async () => {
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder);
+    await host.start();
+    host.idleOut();
+    await host.setGoal('watch this');
+    await settle(60);
+    expect(host.status).toBe('running');
+    expect(host.conversation.some((e) => e.content.includes('watch this'))).toBe(true);
   });
 });

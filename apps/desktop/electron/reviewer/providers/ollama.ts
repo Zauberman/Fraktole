@@ -17,14 +17,16 @@ function toMessages(messages: ProviderMsg[]): unknown[] {
         return { role: 'system', content: m.content };
       case 'user':
         return { role: 'user', content: m.content };
-      case 'assistant':
-        return {
-          role: 'assistant',
-          content: m.content,
-          tool_calls: m.toolCalls?.map((c) => ({
+      case 'assistant': {
+        const out: Record<string, unknown> = { role: 'assistant', content: m.content };
+        // never send an empty tool_calls array (same contract as openai)
+        if (m.toolCalls && m.toolCalls.length > 0) {
+          out.tool_calls = m.toolCalls.map((c) => ({
             function: { name: c.name, arguments: JSON.stringify(c.args) },
-          })),
-        };
+          }));
+        }
+        return out;
+      }
       case 'tool':
         return { role: 'tool', content: m.content };
     }

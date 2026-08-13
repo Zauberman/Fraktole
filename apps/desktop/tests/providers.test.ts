@@ -171,6 +171,37 @@ describe('OpenAIProvider', () => {
     const body2 = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { reasoning_effort?: string };
     expect(body2.reasoning_effort).toBeUndefined();
   });
+
+  it('never sends an empty tool_calls array for a text-only assistant message', async () => {
+    stubFetch(sseStream(['{"choices":[{"delta":{"content":"ok"}}]}', '[DONE]']));
+    await new OpenAIProvider().complete({
+      ...baseOpts(),
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'assistant', content: 'plain text reply', toolCalls: [] },
+        { role: 'user', content: 'next' },
+      ],
+    });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { messages: Array<{ tool_calls?: unknown }> };
+    expect('tool_calls' in body.messages[1]!).toBe(false);
+  });
+
+  it('still maps real tool calls in the request', async () => {
+    stubFetch(sseStream(['{"choices":[{"delta":{"content":"ok"}}]}', '[DONE]']));
+    await new OpenAIProvider().complete({
+      ...baseOpts(),
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'assistant', content: '', toolCalls: [{ id: 'c1', name: 'read_tile', args: { agentId: 'a1' } }] },
+      ],
+    });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as {
+      messages: Array<{ tool_calls?: Array<{ id: string; function: { name: string } }> }>;
+    };
+    expect(body.messages[1]!.tool_calls).toEqual([
+      { id: 'c1', type: 'function', function: { name: 'read_tile', arguments: '{"agentId":"a1"}' } },
+    ]);
+  });
 });
 
 describe('AnthropicProvider', () => {
@@ -240,6 +271,24 @@ describe('AnthropicProvider', () => {
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { thinking?: unknown };
     expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 4096 });
   });
+
+  it('never sends an empty content array for a reasoning-only assistant message', async () => {
+    stubFetch(sseStream(['{"type":"message_stop"}']));
+    await new AnthropicProvider().complete({
+      ...baseOpts(),
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'assistant', content: '', toolCalls: [] },
+        { role: 'user', content: 'next' },
+      ],
+    });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as {
+      messages: Array<{ content: Array<{ type: string; text?: string }> }>;
+    };
+    const blocks = body.messages[1]!.content;
+    expect(blocks.length).toBeGreaterThan(0);
+    expect(blocks[0]!.type).toBe('text');
+  });
 });
 
 describe('OllamaProvider', () => {
@@ -261,6 +310,20 @@ describe('OllamaProvider', () => {
     expect(res.toolCalls).toEqual([
       { id: 'tc-send_message-0', name: 'send_message', args: { to: 'agent-1', kind: 'task', body: 'go' } },
     ]);
+  });
+
+  it('never sends an empty tool_calls array (same contract as openai)', async () => {
+    stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"ok"},"done":true}']));
+    await new OllamaProvider().complete({
+      ...baseOpts(),
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'assistant', content: 'plain text reply', toolCalls: [] },
+        { role: 'user', content: 'next' },
+      ],
+    });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { messages: Array<{ tool_calls?: unknown }> };
+    expect('tool_calls' in body.messages[1]!).toBe(false);
   });
 
   it('captures message.thinking as thinking', async () => {

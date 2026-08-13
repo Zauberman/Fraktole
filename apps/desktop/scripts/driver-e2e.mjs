@@ -23,6 +23,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- mock provider (openai-compatible), ephemeral port ----------
 let callCount = 0;
+let successCount = 0;
+let failNext = 0;
+let mockViolations = 0;
 let MOCK_BASE = '';
 let lastReqBody = null;
 const mock = http.createServer((req, res) => {
@@ -39,6 +42,20 @@ const mock = http.createServer((req, res) => {
     res.end('<!doctype html><html><head><title>TEST PAGE</title></head><body><h1>test</h1><script>console.error("boom");</script></body></html>');
     return;
   }
+  if (req.method === 'POST' && path === '/control') {
+    let body = '';
+    req.on('data', (d) => (body += d));
+    req.on('end', () => {
+      try {
+        failNext = JSON.parse(body).failNext ?? 0;
+      } catch {
+        failNext = 0;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ failNext }));
+    });
+    return;
+  }
   if (req.method === 'POST' && isCompletions) {
     callCount += 1;
     let body = '';
@@ -46,15 +63,37 @@ const mock = http.createServer((req, res) => {
     req.on('end', () => {
       lastReqBody = body;
       let jobId = 'j-1';
+      let violation = '';
       try {
         const j = JSON.parse(body);
         const last = j.messages?.[j.messages.length - 1];
         console.log(`  mock hit #${callCount}: last msg role=${last?.role} toolCalls=${last?.toolCalls ? last.toolCalls.length : 0}`);
+        // the contract guard: OpenAI rejects "tool_calls": [] — a request
+        // carrying one is a regression of the exact bug being fixed
+        for (const m of j.messages ?? []) {
+          if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length === 0) {
+            violation = `assistant message carries an empty tool_calls array`;
+            break;
+          }
+        }
         const toolMsgs = (j.messages ?? []).filter((m) => m.role === 'tool');
         const started = toolMsgs.map((m) => String(m.content ?? '')).join('\n').match(/started (j-\d+-\d+)/);
         if (started) jobId = started[1];
       } catch {
         console.log(`  mock hit #${callCount}: unparsable body`);
+      }
+      if (violation) {
+        mockViolations += 1;
+        console.log(`  MOCK VIOLATION: ${violation}`);
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: `Invalid messages.tool_calls: empty array (${violation})`, type: 'invalid_request_error' } }));
+        return;
+      }
+      if (failNext > 0) {
+        failNext -= 1;
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'mock 500: transient provider failure' } }));
+        return;
       }
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const chunk = (delta, finish) =>
@@ -93,7 +132,8 @@ const mock = http.createServer((req, res) => {
         19: tool('call-19', 'read_test_page', {}),
         20: text('verified'),
       };
-      const chunks = script[callCount] ?? text('ok');
+      successCount += 1;
+      const chunks = script[successCount] ?? text('ok');
       res.write(chunks);
       res.end();
     });
@@ -489,6 +529,43 @@ const main = async () => {
   const models = await evalJs(`window.fraktole.listReviewerModels({ adapter: 'openai', apiKey: 'sk-mock-42', baseUrl: '${MOCK_BASE}' })`);
   if (!Array.isArray(models) || !models.includes('mock-model')) fail(`model list fetch failed: ${JSON.stringify(models)}`);
   else ok(`live model list: ${models.join(', ')}`);
+
+  // ---- persistent connection: a transient provider failure must not kill
+  // the harness — status errors, and the next prompt revives it, keeping
+  // the whole conversation
+  await fetch(`${MOCK_BASE}/control`, { method: 'POST', body: JSON.stringify({ failNext: 2 }) });
+  await prompt('will fail');
+  const down = await waitFor(
+    `document.querySelector('.pane-reviewer-column .orch-judge-status')?.textContent === 'error'`,
+    30000,
+    'reviewer error state',
+  );
+  if (!down) fail('reviewer did not surface the provider failure as error');
+  else ok('provider failure surfaced as status: error');
+
+  await prompt('survive me');
+  const revived = await waitFor(
+    `document.querySelector('.pane-reviewer-column .orch-judge-status')?.textContent === 'running'`,
+    30000,
+    'reviewer revived',
+  );
+  if (!revived) fail('reviewer did not revive on send');
+  else ok('send revives the reviewer (persistent connection)');
+
+  const landed = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('survive me'))`,
+    15000,
+    'revived prompt landed',
+  );
+  if (!landed) fail('the revived prompt did not land in the transcript');
+  else ok('revived prompt landed in the transcript');
+
+  const contextKept = await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('DRIVER-42'))`);
+  if (!contextKept) fail('conversation wiped after revive');
+  else ok('conversation retained after revive');
+
+  if (mockViolations > 0) fail(`${mockViolations} request(s) carried an empty tool_calls array`);
+  else ok('no request ever carried an empty tool_calls array');
 
   console.log(`\nmock provider calls: ${callCount}`);
   console.log(failures === 0 ? 'DRIVER-E2E OK' : `DRIVER-E2E FAILED (${failures})`);

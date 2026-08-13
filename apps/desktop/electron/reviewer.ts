@@ -16,7 +16,7 @@ import { sanitizeChatText } from '../src/shared/sanitize.js';
 import { ORCHESTRATOR_ID } from './mailbox.js';
 import { ReviewerTools, type ReviewerToolContext } from './reviewer-tools.js';
 import { emptyState, isGoalMet, loadState, persistState } from './reviewer-state.js';
-import { createProvider, type ProviderClient, type ProviderMsg } from './reviewer/providers.js';
+import { createProvider, type ProviderClient, type ProviderMsg, type ProviderResult } from './reviewer/providers.js';
 import type { TileRecorder } from './tile-recorder.js';
 
 export type { ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../src/shared/ipc.js';
@@ -65,6 +65,11 @@ export interface ReviewerHostOpts {
   emit: ReviewerEmitter;
   /** Watchdog poll interval; injectable for tests. */
   pollIntervalMs?: number;
+  /** Retry policy for transient provider failures: one retry after 2s by
+   *  default — a network blip must not kill the harness. Injectable for
+   *  tests. */
+  maxRetries?: number;
+  retryDelayMs?: number;
   /** injectable seams for tests */
   createProvider?: (name: string) => ProviderClient;
   tools?: ReviewerTools;
@@ -77,6 +82,8 @@ const MAX_TOOL_ITERATIONS = 25;
 const COMPACT_THRESHOLD = 60_000;
 const TOOL_RESULT_CHARS = 20_000;
 const POLL_INTERVAL_MS_DEFAULT = 30_000;
+const MAX_COMPLETE_RETRIES = 1;
+const COMPLETE_RETRY_DELAY_MS = 2_000;
 /** With an active goal, force a wake every N silent polls (5 min at 30s) so
  *  a stalled loop can never die quietly. */
 const GOAL_RECHECK_POLLS = 10;
@@ -135,6 +142,9 @@ export class ReviewerHost {
   /** Per-tile line counts from the last poll (the cheap activity signal). */
   private lastLines = new Map<string, number>();
   private pollsSinceWake = 0;
+  /** One in-flight start() shared by concurrent callers (tab visits, rapid
+   *  prompts) so the conversation can never be double-loaded. */
+  private startPromise: Promise<boolean> | null = null;
   /** The in-flight ask_user question; the tool promise resolves on the
    *  user's answer (or rejects on restart/stop). At most one — the loop is
    *  exclusive. */
@@ -184,8 +194,17 @@ export class ReviewerHost {
 
   /** Resolves provider/endpoint/model from the pasted API key (env fallback
    *  via apiKeyEnv), loads the conversation and marks the harness ready.
-   *  False when a non-ollama provider has no key. */
-  async start(): Promise<boolean> {
+   *  False when a non-ollama provider has no key. Reentrant: concurrent
+   *  callers share one in-flight start. */
+  start(): Promise<boolean> {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.doStart().finally(() => {
+      this.startPromise = null;
+    });
+    return this.startPromise;
+  }
+
+  private async doStart(): Promise<boolean> {
     const cfg = await this.opts.getConfig();
     const key = cfg.apiKey?.trim() ?? (cfg.apiKeyEnv ? (process.env[cfg.apiKeyEnv] ?? '') : '');
     const res = resolveProvider(key, {
@@ -226,6 +245,11 @@ export class ReviewerHost {
     await this.truncateConversation();
     await persistState(this.stateFile, this.state, this.opts.logger);
     this.opts.emit.goal({ goal: null });
+    if (this.startPromise) {
+      const inflight = this.startPromise;
+      this.startPromise = null;
+      await inflight.catch(() => undefined);
+    }
     return this.start();
   }
 
@@ -247,11 +271,24 @@ export class ReviewerHost {
     this.setStatus('idle');
   }
 
-  /** Queues a user prompt (from the Reviewer tab). */
-  async prompt(text: string): Promise<void> {
-    if (this.status !== 'running') return;
+  /** Revive path for user interactions: start() unless the user explicitly
+   *  stopped the reviewer (the start button owns that case). Never lets a
+   *  prompt or a goal silently vanish because the harness was down. */
+  private async ensureStarted(): Promise<boolean> {
+    if (this.status === 'running') return true;
+    if (this.status === 'stopped') return false;
+    return this.start();
+  }
+
+  /** Queues a user prompt (from the Reviewer tab). Revives the harness
+   *  first when it is down (idle/error/offline/unconfigured) so the prompt
+   *  is never silently dropped; returns false only when the reviewer is
+   *  explicitly stopped or has no API key. */
+  async prompt(text: string): Promise<boolean> {
+    if (!(await this.ensureStarted())) return false;
     this.queue.push({ role: 'user', content: this.withStateBlock(text) });
     this.drainQueue();
+    return true;
   }
 
   /** Queues an agent result message as a turn. The body is sanitized at
@@ -266,9 +303,10 @@ export class ReviewerHost {
   }
 
   /** Arms (text) or disarms (null) the watchdog goal. Only the user can call
-   *  this (the /goal command); the model never sets its own goal. */
+   *  this (the /goal command); the model never sets its own goal. Revives
+   *  the harness when down, like prompt(). */
   async setGoal(text: string | null): Promise<void> {
-    if (this.status !== 'running') return;
+    if (!(await this.ensureStarted())) return;
     const prev = this.state.goal;
     const trimmed = typeof text === 'string' ? text.trim() : '';
     const goal = trimmed.length > 0 ? { text: trimmed, setAt: Date.now(), state: 'active' as const } : null;
@@ -417,6 +455,20 @@ export class ReviewerHost {
     this.watchTimer = null;
   }
 
+  /** One transparent retry on provider errors (a network blip must not kill
+   *  the harness). Aborts are never retried. */
+  private async callWithRetry(signal: AbortSignal, call: () => Promise<ProviderResult>): Promise<ProviderResult> {
+    const max = this.opts.maxRetries ?? MAX_COMPLETE_RETRIES;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await call();
+      } catch (err) {
+        if (signal.aborted || attempt >= max) throw err;
+        await new Promise((r) => setTimeout(r, this.opts.retryDelayMs ?? COMPLETE_RETRY_DELAY_MS));
+      }
+    }
+  }
+
   /** Manual compaction pass (the /compact command): drops old tool rows
    *  regardless of the size budget and tells the model context was trimmed. */
   compact(): void {
@@ -456,26 +508,31 @@ export class ReviewerHost {
         this.opts.emit.message(toEntry(turn));
 
         for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-          const response = await this.provider.complete({
-            model: res.model,
-            apiKey: this.apiKey,
-            baseUrl: res.baseUrl,
-            messages: this.messages,
-            tools: this.tools.definitions(),
-            signal: aborter.signal,
-            reasoningEffort: this.reasoningEffort ?? defaultReasoningEffort(res),
-            onDelta: (delta, thinking) =>
-              this.opts.emit.stream({
-                delta,
-                thinking: thinking && thinking.length > 0 ? thinking : undefined,
-              }),
-          });
-          this.messages.push({
+          const response = await this.callWithRetry(aborter.signal, () =>
+            this.provider.complete({
+              model: res.model,
+              apiKey: this.apiKey,
+              baseUrl: res.baseUrl,
+              messages: this.messages,
+              tools: this.tools.definitions(),
+              signal: aborter.signal,
+              reasoningEffort: this.reasoningEffort ?? defaultReasoningEffort(res),
+              onDelta: (delta, thinking) =>
+                this.opts.emit.stream({
+                  delta,
+                  thinking: thinking && thinking.length > 0 ? thinking : undefined,
+                }),
+            }),
+          );
+          // never persist an empty toolCalls array: providers reject
+          // "tool_calls": [] on the next request (OpenAI 400s on it)
+          const assistant: ProviderMsg = {
             role: 'assistant',
             content: response.text,
-            toolCalls: response.toolCalls,
             thinking: response.thinking.length > 0 ? response.thinking : undefined,
-          });
+          };
+          if (response.toolCalls.length > 0) assistant.toolCalls = response.toolCalls;
+          this.messages.push(assistant);
           await this.persist();
           const entry = toEntry(this.messages[this.messages.length - 1]!);
           this.opts.emit.message(entry);

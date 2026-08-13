@@ -632,10 +632,10 @@ if (!app.requestSingleInstanceLock()) {
       if (!rt) return false;
       return rt.ensureReviewer();
     });
-    ipcMain.handle(IPC.reviewerPrompt, async (_e, sessionId: string, text: string): Promise<void> => {
+    ipcMain.handle(IPC.reviewerPrompt, async (_e, sessionId: string, text: string): Promise<boolean> => {
       const rt = registry?.get(sessionId) ?? null;
-      if (!rt || text.trim().length === 0) return;
-      await rt.reviewer.prompt(text);
+      if (!rt || text.trim().length === 0) return false;
+      return rt.reviewer.prompt(text);
     });
     ipcMain.handle(IPC.reviewerSetGoal, async (_e, sessionId: string, text: string | null): Promise<void> => {
       const rt = registry?.get(sessionId) ?? null;
