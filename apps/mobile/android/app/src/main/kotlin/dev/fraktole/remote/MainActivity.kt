@@ -1,4 +1,4 @@
-package dev.fraktole.remote.fraktole_remote
+package dev.fraktole.remote
 
 import io.flutter.embedding.android.FlutterActivity
 
