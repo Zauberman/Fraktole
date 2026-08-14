@@ -41,6 +41,10 @@ pnpm install
 pnpm installer          # builds release/fraktole-install-<version>.sh
 bash release/fraktole-install-<version>.sh   # installs to ~/.local
 fraktole-desktop        # launch
+
+# or build a portable AppImage:
+pnpm appimage           # builds release/Fraktole-<version>-x86_64.AppImage
+chmod +x release/Fraktole-<version>-x86_64.AppImage && ./release/Fraktole-<version>-x86_64.AppImage
 ```
 
 ## Development

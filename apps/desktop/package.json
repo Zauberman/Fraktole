@@ -19,6 +19,7 @@
     "postinstall": "electron-rebuild -f -w node-pty",
     "icon": "node scripts/icon.mjs",
     "installer": "bash scripts/make-installer.sh",
+    "appimage": "pnpm build && pnpm exec electron-builder --linux AppImage",
     "fonts": "node scripts/fetch-fonts.mjs"
   },
   "dependencies": {

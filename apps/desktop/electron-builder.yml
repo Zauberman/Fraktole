@@ -10,8 +10,11 @@ files:
 linux:
   target:
     - dir
+    - AppImage
   icon: build/icon.png
   category: Development
   maintainer: Fraktole
+  artifactName: ${productName}-${version}-${arch}.${ext}
+appImage:
   artifactName: ${productName}-${version}-${arch}.${ext}
 npmRebuild: true
