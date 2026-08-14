@@ -107,17 +107,13 @@ class _TileDetailScreenState extends State<TileDetailScreen> {
         ),
         actions: [
           _StatusChip(alive: _alive, subscribed: _subscribed),
-          IconButton(
-            tooltip: _autoScroll ? 'Auto-scroll on' : 'Auto-scroll off',
-            icon: Icon(
-              _autoScroll ? Icons.vertical_align_bottom : Icons.vertical_align_center,
-            ),
+          TextButton(
             onPressed: () => setState(() => _autoScroll = !_autoScroll),
+            child: Text(_autoScroll ? 'Auto-scroll on' : 'Auto-scroll off'),
           ),
-          IconButton(
-            tooltip: 'Clear',
-            icon: const Icon(Icons.delete_sweep_rounded),
+          TextButton(
             onPressed: () => setState(() => _buffer.clear()),
+            child: const Text('Clear'),
           ),
         ],
       ),

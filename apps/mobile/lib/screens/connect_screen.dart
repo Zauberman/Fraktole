@@ -76,16 +76,11 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Icon(
-                      Icons.terminal_rounded,
-                      size: 56,
-                      color: theme.colorScheme.primary,
-                    ),
-                    const SizedBox(height: 12),
                     Text(
                       'Fraktole Remote',
                       textAlign: TextAlign.center,
-                      style: theme.textTheme.headlineMedium,
+                      style: theme.textTheme.headlineMedium
+                          ?.copyWith(fontWeight: FontWeight.w700, letterSpacing: 0.3),
                     ),
                     const SizedBox(height: 4),
                     Text(
@@ -110,7 +105,6 @@ class _ConnectScreenState extends State<ConnectScreen> {
                       decoration: const InputDecoration(
                         labelText: 'Desktop address',
                         hintText: '192.168.1.20:8833',
-                        prefixIcon: Icon(Icons.computer_rounded),
                         border: OutlineInputBorder(),
                       ),
                       validator: (value) {
@@ -130,7 +124,6 @@ class _ConnectScreenState extends State<ConnectScreen> {
                       decoration: const InputDecoration(
                         labelText: 'Pairing code',
                         hintText: 'ABCD-EFGH',
-                        prefixIcon: Icon(Icons.key_rounded),
                         border: OutlineInputBorder(),
                       ),
                       validator: (value) {
@@ -148,21 +141,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
                       decoration: const InputDecoration(
                         labelText: 'Device name (optional)',
                         hintText: 'Pixel 8',
-                        prefixIcon: Icon(Icons.phone_android_rounded),
                         border: OutlineInputBorder(),
                       ),
                     ),
                     const SizedBox(height: 24),
-                    FilledButton.icon(
+                    FilledButton(
                       onPressed: _pairing ? null : _connect,
-                      icon: _pairing
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.link_rounded),
-                      label: Padding(
+                      child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 14),
                         child: Text(_pairing ? 'Pairing…' : 'Connect'),
                       ),
@@ -185,11 +170,9 @@ class _SavedDeviceCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final stored = controller.stored!;
     return Card(
       child: ListTile(
-        leading: Icon(Icons.link_rounded, color: theme.colorScheme.primary),
         title: Text('Paired with ${stored.host}:${stored.port}'),
         subtitle: Text(stored.deviceName),
         trailing: FilledButton.tonal(
@@ -218,8 +201,6 @@ class _ErrorBanner extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(Icons.error_outline, color: theme.colorScheme.onErrorContainer),
-          const SizedBox(width: 10),
           Expanded(
             child: Text(
               text,
