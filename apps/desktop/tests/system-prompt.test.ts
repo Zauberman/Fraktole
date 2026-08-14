@@ -16,6 +16,15 @@ describe('system prompt', () => {
     expect(prompt).toContain('search_files (stubs, TODOs, wrong symbols)');
   });
 
+  it('delegates substantive work by default but keeps the hands-on option', () => {
+    expect(prompt).toContain('GENERAL');
+    expect(prompt).toContain('DELEGATE substantive work');
+    expect(prompt).toContain('do not outsource everything');
+    expect(prompt).toContain('use your own hands when it is genuinely faster or clearer');
+    // the old anti-delegation line is gone
+    expect(prompt).not.toContain('Never send a message to an agent unless the task warrants it');
+  });
+
   it('judges results and sub-results against the goal', () => {
     expect(prompt).toContain('Judge every important result');
     expect(prompt).toContain('sub-results');

@@ -167,7 +167,8 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'send_message',
-    description: 'Send a task or note to an agent. Tasks get results back through the mailboxes and wake you; notes are informational. Always state precise, verifiable acceptance criteria in the body. Prefer this over doing work yourself when an agent owns the area.',
+    description:
+      'Send a task or note to an agent. Tasks get results back through the mailboxes and wake you; notes are informational. This is the PRIMARY way substantive work gets done — dispatch implementation to agents instead of doing it yourself; always state precise, verifiable acceptance criteria in the body. Prefer it over doing the work yourself when an agent owns the area.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -280,7 +281,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'spawn_agent',
     description:
-      "Spawn a NEW agent tile (a shell in cwd with the launch command written into it). Fire a known kind directly (the ledger remembers the user's choice) or omit kind to let the user pick. Capped at 8 agents. To run a harness inside an EXISTING tile instead, use launch_agent.",
+      "Spawn a NEW agent tile (a shell in cwd with the launch command written into it). Fire agents for implementation work whenever the workforce is idle or too small. Fire a known kind directly (the ledger remembers the user's choice) or omit kind to let the user pick. Capped at 8 agents. To run a harness inside an EXISTING tile instead, use launch_agent.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -359,7 +360,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'run_bash',
     description:
-      "Run a quick shell command in the session project (or an agent's cwd). Output capped at 64 KiB. timeout is 1-300s (default 30). For anything longer or long-running servers, use run_background + job_status instead.",
+      "Run a shell command in the session project (or an agent's cwd). Output capped at 64 KiB. timeout is 1-300s (default 30). Use it to verify agent work (tests, builds), grasp context, or make a quick fix yourself — but delegate substantive implementation to agents. For anything longer or long-running servers, use run_background + job_status instead.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -380,7 +381,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'list_dir',
     description:
-      'List a directory: directories first (trailing slash), then files with sizes. depth 1-3 (default 1), hidden entries skipped unless asked, node_modules/.git/dist-like dirs skipped. Browse the project before judging agent work.',
+      'List a directory: directories first (trailing slash), then files with sizes. depth 1-3 (default 1), hidden entries skipped unless asked, node_modules/.git/dist-like dirs skipped. Use freely to understand and verify the codebase yourself before judging agent work.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -400,7 +401,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'search_files',
     description:
-      'Search the project for lines matching a regex (e.g. stubs, TODOs, wrong symbols) — returns path:line: text, capped. Use it to verify an agent actually implemented something and did not leave placeholders.',
+      'Search the project for lines matching a regex (e.g. stubs, TODOs, wrong symbols) — returns path:line: text, capped. Use freely to understand and verify the codebase yourself: confirm an agent actually implemented something and did not leave placeholders.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -424,7 +425,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'run_background',
     description:
-      'Start a long-running process in the background (dev servers, builds, test suites) and get a job id. Poll with job_status, stop with job_stop. Output ring 32 KiB, 4 jobs max, jobs die with the session. Prefer this over run_bash for anything slow.',
+      'Start a long-running process in the background (dev servers, builds, test suites) and get a job id. Poll with job_status, stop with job_stop. Output ring 32 KiB, 4 jobs max, jobs die with the session. For long verifications you supervise; prefer delegating long work to agents. Prefer this over run_bash for anything slow.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -575,7 +576,7 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'read_file',
-    description: 'Read a file from the project (or an absolute path), up to 4 MiB. For browsing use list_dir; for finding code use search_files.',
+    description: 'Read a file from the project (or an absolute path), up to 4 MiB. Use freely to grasp the codebase yourself. For browsing use list_dir; for finding code use search_files.',
     inputSchema: {
       type: 'object',
       properties: {
