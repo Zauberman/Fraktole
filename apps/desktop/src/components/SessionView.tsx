@@ -55,12 +55,18 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
     }
   }, [active, tab, sessionId]);
 
-  // expose this session's state for the global keydown handler + app mirrors
+  // expose this session's state for the global keydown handler + app
+  // mirrors. Registered once per session id: `ws` is a new object every
+  // render, so re-running the effect per render would delete and re-insert
+  // the registry entry on every state change. The registered object stays
+  // valid — all mutable data is read through its refs.
   const registerRef = useRef(registerState);
   registerRef.current = registerState;
+  const wsRef = useRef(ws);
+  wsRef.current = ws;
   useEffect(() => {
-    return registerRef.current(sessionId, ws);
-  }, [sessionId, ws]);
+    return registerRef.current(sessionId, wsRef.current);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!active) return;

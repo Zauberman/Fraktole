@@ -131,25 +131,24 @@ const mock = http.createServer((req, res) => {
         // since a failed tool no longer ends the turn, prompt 1 consumes
         // entries 1-2; this filler keeps the remaining prompts aligned
         3: text('summarized ok'),
-        4: tool('call-4', 'open_test_page', { url: `${MOCK_BASE}/page` }),
-        5: text('page opened'),
-        6: tool('call-6', 'read_test_page', {}),
-        7: text('test complete'),
-        8: tool('call-8', 'list_dir', { path: '/home/walid/Fraktole/apps/desktop', depth: 1 }),
-        9: text('listed'),
-        10: tool('call-10', 'search_files', { pattern: 'DRIVER-42', path: '/home/walid/Fraktole/apps/desktop/scripts' }),
-        11: text('searched'),
-         10: tool('call-10', 'search_files', { pattern: 'DRIVER-42', path: '/home/walid/Fraktole/apps/desktop/scripts' }),
-         11: text('searched'),
-         12: tool('call-12', 'launch_agent', { agentId: 'ghost-agent', command: 'opencode' }),
-         13: tool('call-13', 'reload_test_page', {}),
-         14: text('reloaded'),
-         15: tool('call-15', 'read_test_page', {}),
-         16: text('verified'),
-         17: text('revived ok'),
-         18: tool('call-18', 'send_keystroke', { agentId: 'agent-1', keys: ['shift-tab'] }),
-         19: tool('call-19', 'type_into_tile', { agentId: 'agent-1', text: 'yes', pressEnter: true }),
-         20: text('done driving'),
+        4: tool('call-4', 'set_goal', { subGoals: [{ text: 'sub a', done: false }, { text: 'sub b', done: true }] }),
+        5: tool('call-5', 'open_test_page', { url: `${MOCK_BASE}/page` }),
+        6: text('page opened'),
+        7: tool('call-7', 'read_test_page', {}),
+        8: text('test complete'),
+        9: tool('call-9', 'list_dir', { path: '/home/walid/Fraktole/apps/desktop', depth: 1 }),
+        10: text('listed'),
+        11: tool('call-11', 'search_files', { pattern: 'DRIVER-42', path: '/home/walid/Fraktole/apps/desktop/scripts' }),
+        12: text('searched'),
+        13: tool('call-13', 'launch_agent', { agentId: 'ghost-agent', command: 'opencode' }),
+        14: tool('call-14', 'reload_test_page', {}),
+        15: text('reloaded'),
+        16: tool('call-16', 'read_test_page', {}),
+        17: text('verified'),
+        18: text('revived ok'),
+        19: tool('call-19', 'send_keystroke', { agentId: 'agent-1', keys: ['shift-tab'] }),
+        20: tool('call-20', 'type_into_tile', { agentId: 'agent-1', text: 'yes', pressEnter: true }),
+        21: text('done driving'),
       };
       successCount += 1;
       const chunks = script[successCount] ?? text('ok');
@@ -351,6 +350,23 @@ const main = async () => {
   if (!final) fail('final answer missing');
   else ok('model answered (DRIVER-42 in transcript)');
 
+  // the transcript stays pinned to the bottom while content streams, and a
+  // deliberate scroll-up is never yanked back
+  const atBottom = await waitFor(
+    `(() => { const el = document.querySelector('.pane-reviewer-column .reviewer-transcript'); if (!el) return false; return el.scrollHeight - el.scrollTop - el.clientHeight < 40; })()`,
+    15000,
+    'pinned to bottom',
+  );
+  if (!atBottom) fail('transcript not pinned after streaming');
+  else ok('transcript pinned to the newest content');
+  await evalJs(`(() => { const el = document.querySelector('.pane-reviewer-column .reviewer-transcript'); el.scrollTop = 0; return true; })()`);
+  await sleep(600);
+  const notYanked = await evalJs(`(() => { const el = document.querySelector('.pane-reviewer-column .reviewer-transcript'); return el.scrollTop < 50; })()`);
+  if (!notYanked) fail('scroll-up was yanked back to the bottom');
+  else ok('manual scroll-up is respected (no yank)');
+  await evalJs(`(() => { const el = document.querySelector('.pane-reviewer-column .reviewer-transcript'); el.scrollTop = el.scrollHeight; return true; })()`);
+  await sleep(300);
+
   // live usage counters in the hint line (input / cache / output)
   const usageLine = await waitFor(
     `document.querySelector('.pane-reviewer-column .reviewer-usage-line')?.textContent ?? ''`,
@@ -368,6 +384,15 @@ const main = async () => {
   const banner = await waitFor(`document.querySelector('.pane-reviewer-column .reviewer-goal-banner') !== null`, 15000, 'goal banner');
   if (!banner) fail('goal banner missing');
   else ok(`goal banner: ${await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-goal-state')?.textContent ?? ''`)}`);
+
+  // the model's subdivision of the goal shows in the banner (scripted
+  // set_goal with subGoals during the goal-armed turn)
+  const subGoals = await waitFor(`document.querySelector('.pane-reviewer-column .reviewer-subgoal')?.textContent ?? ''`, 20000, 'sub-goal list');
+  if (!subGoals.includes('sub a')) fail(`sub-goal list missing items: ${subGoals}`);
+  else ok(`sub-goals shown in the banner: ${subGoals.trim()}`);
+  const subDone = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-subgoal-done') !== null`);
+  if (!subDone) fail('no completed sub-goal marker');
+  else ok('completed sub-goal is marked done');
 
   const opened = await waitFor(
     `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('opened http://127.0.0.1:') && e.textContent.includes('in the Test tab'))`,
@@ -516,6 +541,54 @@ const main = async () => {
   await sleep(300);
   if (await evalJs(`document.querySelector('.pane-reviewer-column .dialog') !== null`)) fail('config dialog did not close on backdrop');
   else ok('config dialog closes on backdrop');
+
+  // auto compose: REAL pointer clicks (the path a user uses — the backdrop
+  // must never swallow the button's own mousedown)
+  const clickAt = async (x, y) => {
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+  };
+  const composeCoords = await evalJs(`(() => {
+    const b = [...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((x) => x.textContent.trim().startsWith('auto compose'));
+    if (!b) return null;
+    const r = b.getBoundingClientRect();
+    return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+  })()`);
+  // a picker assertion that proves VISIBILITY (the menu must be on-screen,
+  // not merely present in the DOM — the off-viewport containing-block bug)
+  const menuInView = `(() => { const m = document.querySelector('.pane-reviewer-column .autonomy-menu'); if (!m) return false; const r = m.getBoundingClientRect(); return r.y >= 0 && r.x >= 0 && r.y + r.height <= innerHeight && r.x + r.width <= innerWidth; })()`;
+  const menuAbsent = `document.querySelector('.pane-reviewer-column .autonomy-menu') === null`;
+
+  if (!composeCoords) {
+    fail('auto compose button not found');
+  } else {
+    const c = JSON.parse(composeCoords);
+    await clickAt(c.x, c.y);
+    const picker = await waitFor(menuInView, 10000, 'auto compose picker');
+    if (!picker) fail('auto compose picker did not open on a real click');
+    else ok('auto compose picker opens on a real click');
+    const items = await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .autonomy-item')].map((b) => b.textContent.trim())`);
+    if (!['off', 'cyber', 'frontend', 'bugs'].every((i) => items.includes(i))) fail(`picker items wrong: ${items.join(',')}`);
+    else ok(`auto compose variants listed: ${items.join(', ')}`);
+    // a second real click on the button must CLOSE the picker (the backdrop
+    // must not eat the button's mousedown)
+    await clickAt(c.x, c.y);
+    const closed = await waitFor(menuAbsent, 10000, 'picker closed');
+    if (!closed) fail('auto compose picker did not close on a real click (backdrop race)');
+    else ok('auto compose picker closes on a real click');
+    // reopen and pick cyber — the fork refusal surfaces cleanly (driver
+    // session cwd = home, no project)
+    await clickAt(c.x, c.y);
+    await waitFor(menuInView, 10000, 'picker reopened');
+    await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .autonomy-item')].find((b) => b.textContent.trim() === 'cyber')?.click(); true`);
+    const refusal = await waitFor(
+      `document.querySelector('.pane-reviewer-column .reviewer-hint-error')?.textContent ?? ''`,
+      15000,
+      'fork refusal',
+    );
+    if (!refusal.includes('no project to fork')) fail(`no clean fork refusal: ${refusal}`);
+    else ok(`fork refusal surfaced cleanly: ${refusal}`);
+  }
 
   const rowColors = await evalJs(`(() => {
     const mk = (sel, child) => { const el = document.querySelector(sel); return el ? getComputedStyle(child ? el.querySelector(child) : el).color : ''; };

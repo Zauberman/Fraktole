@@ -15,6 +15,7 @@ import type {
   ReviewerQuestion,
   ReviewerSpawnRequest,
   ReviewerStatus,
+  SubGoal,
   ReviewerStreamEvent,
   ReviewerUsageEvent,
   RemoteStatus,
@@ -45,6 +46,7 @@ export type {
   ReviewerQuestion,
   ReviewerSpawnRequest,
   ReviewerStatus,
+  SubGoal,
   ReviewerStreamEvent,
   ReviewerUsageEvent,
   RemoteStatus,
@@ -95,13 +97,15 @@ export interface FraktoleBridge {
   restartReviewer(sessionId: string): Promise<boolean>;
   compactReviewer(sessionId: string): Promise<void>;
   reviewerTranscript(sessionId: string): Promise<ReviewerEntry[]>;
-  onReviewerStatus(sessionId: string, cb: (s: { status: string; error?: string; model?: string }) => void): () => void;
+  onReviewerStatus(sessionId: string, cb: (s: { status: string; error?: string; model?: string; variant?: string | null }) => void): () => void;
   onReviewerStream(sessionId: string, cb: (ev: ReviewerStreamEvent) => void): () => void;
   onReviewerToolCall(sessionId: string, cb: (ev: ReviewerToolCallEvent) => void): () => void;
   onReviewerMessage(sessionId: string, cb: (entry: ReviewerEntry) => void): () => void;
   setReviewerGoal(sessionId: string, text: string | null): Promise<void>;
   onReviewerGoal(sessionId: string, cb: (ev: ReviewerGoalEvent) => void): () => void;
   onReviewerUsage(sessionId: string, cb: (ev: ReviewerUsageEvent) => void): () => void;
+  /** Start (variant) or clear (null) the autonomous-mode run for a session. */
+  setReviewerAutonomy(sessionId: string, variant: string | null): Promise<{ ok: boolean; error?: string }>;
   listReviewerModels(opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]>;
   onReviewerQuestion(sessionId: string, cb: (ev: ReviewerQuestion) => void): () => void;
   answerReviewerQuestion(sessionId: string, askId: string, answer: string): Promise<void>;

@@ -40,6 +40,10 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+  const tabRef = useRef<AppTab>(tab);
+  useEffect(() => {
+    tabRef.current = tab;
+  }, [tab]);
   const [activeInfo, setActiveInfo] = useState<ActiveInfo>({
     tileCount: 0,
     focusedCwd: null,
@@ -206,6 +210,9 @@ export function App(): React.JSX.Element {
 
   const startSession = useCallback(async (sid: string): Promise<void> => {
     await bridge.startSession(sid);
+    // the view's PTYs were killed by the stop; re-activate it so its tiles
+    // rebuild instead of leaving a permanently empty workspace
+    void sessionStates.current.get(sid)?.reactivate();
     await refreshSessions();
   }, [refreshSessions]);
 
@@ -280,6 +287,15 @@ export function App(): React.JSX.Element {
         }
       }
       if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      // the node-tile shortcuts must not hijack typing: they only apply on
+      // the node tab, and never while an input/textarea/editor has focus —
+      // the terminal itself is exempt, its hidden textarea is the tile's
+      // own input
+      if (tabRef.current !== 'node') return;
+      const target = e.target;
+      if (target instanceof HTMLElement && target.closest('.terminal-host') === null) {
+        if (target.closest('input, textarea, select') !== null || target.isContentEditable) return;
+      }
       const ws = sessionStates.current.get(activeSessionIdRef.current ?? '');
       if (!ws) return;
       let handled = true;
@@ -290,13 +306,13 @@ export function App(): React.JSX.Element {
           if (p) void bridge.addProject(p).then(() => refreshProjects()).catch(() => undefined);
         });
       } else if (key === 'w') {
-        if (ws.reviewerFocused) {
+        if (ws.reviewerFocusedRef.current) {
           // the reviewer column is focused — nothing to close
         } else if (ws.focusedIdRef.current) {
           ws.closeTile(ws.focusedIdRef.current);
         }
       } else if (key === 'enter') {
-        if (!ws.reviewerFocused) {
+        if (!ws.reviewerFocusedRef.current) {
           const f = ws.focusedIdRef.current;
           if (f) ws.toggleZoom(f);
         }
@@ -341,7 +357,7 @@ export function App(): React.JSX.Element {
     // panel that used to own them is gone)
     const unsubSession = bridge.onMenuSession((action) => {
       const activeId = activeSessionIdRef.current;
-      const activeName = activeId ? (sessionStates.current.get(activeId)?.session?.name ?? null) : null;
+      const activeName = activeId ? (sessionStates.current.get(activeId)?.sessionRef?.current?.name ?? null) : null;
       if (action.action === 'new') {
         setSessionDialog({ mode: 'new' });
       } else if (action.action === 'rename') {

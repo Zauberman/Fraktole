@@ -23,6 +23,51 @@ function token(name: string): string {
 }
 
 /**
+ * Removes OSC/DCS escape sequences (`ESC ]`, `ESC P`, `ESC _`, `ESC ^`) from
+ * a data chunk, keeping everything else. Used while a theme applies: xterm
+ * emits its palette as OSC sequences through onData, which must never reach
+ * the PTY — but genuine keystrokes typed in that window must still pass.
+ * Returns the stripped output plus any dangling (unterminated) remainder,
+ * which the caller feeds into the next chunk.
+ */
+function stripOsc(data: string): { out: string; rest: string } {
+  const out: string[] = [];
+  let i = 0;
+  while (i < data.length) {
+    if (data.charCodeAt(i) === 0x1b && i + 1 < data.length) {
+      const seq = data.charCodeAt(i + 1);
+      if (seq === 0x5d || seq === 0x50 || seq === 0x5f || seq === 0x5e) {
+        // find the terminator: BEL (0x07) or ST (ESC \)
+        let j = i + 2;
+        let found = false;
+        while (j < data.length) {
+          if (data.charCodeAt(j) === 0x07) {
+            j += 1;
+            found = true;
+            break;
+          }
+          if (data.charCodeAt(j) === 0x1b && j + 1 < data.length && data.charCodeAt(j + 1) === 0x5c) {
+            j += 2;
+            found = true;
+            break;
+          }
+          j += 1;
+        }
+        if (!found) {
+          // unterminated so far — keep it for the next chunk
+          return { out: out.join(''), rest: data.slice(i) };
+        }
+        i = j;
+        continue;
+      }
+    }
+    out.push(data.charAt(i));
+    i += 1;
+  }
+  return { out: out.join(''), rest: '' };
+}
+
+/**
  * xterm lifecycle: fit into its container, mirror size changes to the PTY,
  * forward keys to the main process and stream data back. One PTY per tile,
  * spawned on mount.
@@ -41,6 +86,7 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
   const commandRef = useRef(command);
   commandRef.current = command;
   const applyingThemeRef = useRef(false);
+  const pendingThemeInput = useRef('');
   // right-click context menu (copy/paste), positioned in viewport coords
   const [menu, setMenu] = useState<{ x: number; y: number; hasSel: boolean } | null>(null);
 
@@ -126,18 +172,28 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
         .catch(() => undefined);
     }
 
-    // debug hook: lets the CDP smoke read the live terminal buffer
+    // debug hook: lets the CDP smoke read the live terminal buffer. Keyed by
+    // session+tile: tile ids repeat across sessions, a bare tileId would
+    // collide (one session's capture would read another session's buffer)
+    const termKey = `${sessionId}:${tileId}`;
     const terms = (window as unknown as { __fraktTerms?: Map<string, Xterm> }).__fraktTerms ?? new Map();
     (window as unknown as { __fraktTerms: Map<string, Xterm> }).__fraktTerms = terms;
-    terms.set(tileId, term);
+    terms.set(termKey, term);
 
     const unsubscribeData = bridge.onPtyData(sessionId, tileId, (data) => term.write(data));
 
     // applying options.theme makes xterm emit the palette as OSC sequences
     // through onData — that would inject terminal input into the PTY (harmless
-    // for a shell, fatal for a TUI agent). Suppress forwarding while applying.
+    // for a shell, fatal for a TUI agent). While applying, strip only those
+    // sequences; real keystrokes still pass through.
     const termDisposable = term.onData((data) => {
-      if (!applyingThemeRef.current) bridge.ptyWrite(sessionId, tileId, data);
+      if (!applyingThemeRef.current) {
+        bridge.ptyWrite(sessionId, tileId, data);
+        return;
+      }
+      const { out, rest } = stripOsc(pendingThemeInput.current + data);
+      pendingThemeInput.current = rest;
+      if (out.length > 0) bridge.ptyWrite(sessionId, tileId, out);
     });
     const resizeDisposable = term.onResize(({ cols: c, rows: r }) => bridge.ptyResize(sessionId, tileId, c, r));
 
@@ -176,7 +232,7 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
       resizeDisposable.dispose();
       unsubscribeData();
       bridge.ptyKill(sessionId, tileId);
-      (window as unknown as { __fraktTerms?: Map<string, Xterm> }).__fraktTerms?.delete(tileId);
+      (window as unknown as { __fraktTerms?: Map<string, Xterm> }).__fraktTerms?.delete(`${sessionId}:${tileId}`);
       term.dispose();
       termRef.current = null;
     };
@@ -184,8 +240,8 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
   }, [tileId, cwd]);
 
   // live theme switch: xterm accepts a new palette via options.theme without
-  // remounting the terminal or losing scrollback. Guard the OSC emission:
-  // xterm writes the palette as input sequences, which must not reach the PTY.
+  // remounting the terminal or losing scrollback. While it applies, onData
+  // carries OSC palette emission — stripped by the forwarding guard above.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
@@ -193,6 +249,7 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
     term.options.theme = palette as ITheme;
     const clear = (): void => {
       applyingThemeRef.current = false;
+      pendingThemeInput.current = '';
     };
     const timer = window.setTimeout(clear, 60);
     return () => window.clearTimeout(timer);

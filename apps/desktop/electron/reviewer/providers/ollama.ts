@@ -78,8 +78,13 @@ export class OllamaProvider implements ProviderClient {
     let thinking = '';
     let usage: ProviderUsage | undefined;
     const toolCalls: ReviewerToolCall[] = [];
+    let toolSeq = 0; // monotonic per-turn suffix for generated ids
 
     for await (const payload of ndjsonPayloads(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
+      // ollama reports several failures as HTTP 200 with an error field —
+      // surface them instead of silently replying with an empty turn
+      const errField = (payload as { error?: string }).error;
+      if (errField) throw new Error(`ollama API error: ${errField}`);
       const msg = (payload as {
         message?: { content?: string; thinking?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> };
         done?: boolean;
@@ -107,7 +112,9 @@ export class OllamaProvider implements ProviderClient {
         const name = tc.function?.name;
         if (!name) continue;
         toolCalls.push({
-          id: `tc-${name}-${toolCalls.length}`,
+          // monotonic counter: toolCalls.length resets per message and
+          // would collide across iterations of the same tool
+          id: `tc-${name}-${toolSeq++}`,
           name,
           args: parseArgs(tc.function?.arguments ?? ''),
         });

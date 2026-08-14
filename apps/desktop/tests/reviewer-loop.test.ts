@@ -64,7 +64,7 @@ function ctxFor(recorder: TileRecorder, opts: Partial<ReviewerToolContext> = {})
 }
 
 let hostSeq = 0;
-function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; contextBudgetTokens: number }> = {}) {
+function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; contextBudgetTokens: number; stallTimeoutMs: number }> = {}) {
   const dir = extra.dir ?? join(tmpdir(), `fraktole-reviewer-host-${process.pid}-${++hostSeq}`);
   const provider = new FakeProvider(script);
   const events: string[] = [];
@@ -78,6 +78,7 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
     toolContext: ctxFor(recorder),
     createProvider: () => provider,
     retryDelayMs: extra.retryDelayMs ?? 1,
+    stallTimeoutMs: extra.stallTimeoutMs,
     contextBudgetTokens: extra.contextBudgetTokens,
     conversationFile: extra.dir ? join(extra.dir, 'conversation.jsonl') : uniqueConversationFile(),
     emit: {
@@ -565,12 +566,13 @@ describe('ReviewerHost', () => {
     expect(provider.complete).toHaveBeenCalledTimes(2);
   });
 
-  it('kill_agent without a grant refuses, and the model still replies', async () => {
+  it('kill_agent kills directly without any confirmation', async () => {
     const recorder = new TileRecorder();
     const ctx = ctxFor(recorder);
+    const asks: Array<{ kind: string }> = [];
     const provider = new FakeProvider([
       { text: '', toolCalls: [{ id: 'c1', name: 'kill_agent', args: { agentId: 'agent-1' } }] },
-      { text: 'refused', toolCalls: [] },
+      { text: 'killed', toolCalls: [] },
     ]);
     const host = new ReviewerHost({
       getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
@@ -580,17 +582,17 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctx,
       createProvider: () => provider,
-      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: (ev) => asks.push({ kind: ev.kind }), usage: () => undefined },
     });
     await host.start();
     await host.prompt('kill');
     await settle(80);
-    // the failed tool must NOT end the turn — the model reads the error
-    // result and replies (bounded by MAX_TOOL_ITERATIONS, not by a break)
+    // one tool call, one kill — no ask_user, no grant, no refusal
     expect(provider.complete).toHaveBeenCalledTimes(2);
-    expect(host.conversation.some((e) => e.content.includes('no kill grant for agent-1'))).toBe(true);
-    expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'refused')).toBe(true);
-    expect(ctx.killAgent).not.toHaveBeenCalled();
+    expect(ctx.killAgent).toHaveBeenCalledTimes(1);
+    expect(ctx.killAgent).toHaveBeenCalledWith('tile-1');
+    expect(asks).toEqual([]);
+    expect(host.conversation.some((e) => e.content.includes('killed tile-1'))).toBe(true);
     expect(host.status).toBe('running');
   });
 
@@ -621,13 +623,11 @@ describe('ReviewerHost', () => {
     expect(host.status).toBe('running');
   });
 
-  it('a confirm-kill yes grants exactly one kill', async () => {
+  it('kill_agent refuses the orchestrator and unknown agents', async () => {
     const recorder = new TileRecorder();
     const ctx = ctxFor(recorder);
     const provider = new FakeProvider([
-      { text: '', toolCalls: [{ id: 'c1', name: 'ask_user', args: { question: 'may I kill agent-1?', kind: 'confirm-kill', agentId: 'agent-1' } }] },
-      { text: '', toolCalls: [{ id: 'c2', name: 'kill_agent', args: { agentId: 'agent-1' } }] },
-      { text: '', toolCalls: [{ id: 'c3', name: 'kill_agent', args: { agentId: 'agent-1' } }] },
+      { text: '', toolCalls: [{ id: 'c1', name: 'kill_agent', args: { agentId: 'orchestrator' } }, { id: 'c2', name: 'kill_agent', args: { agentId: 'ghost' } }] },
       { text: 'done', toolCalls: [] },
     ]);
     const host = new ReviewerHost({
@@ -638,28 +638,14 @@ describe('ReviewerHost', () => {
       recorder,
       toolContext: ctx,
       createProvider: () => provider,
-      emit: {
-        status: () => undefined,
-        stream: () => undefined,
-        toolCall: () => undefined,
-        message: () => undefined,
-        goal: () => undefined,
-        question: (ev) => {
-          if (ev.kind === 'confirm-kill') host.answerQuestion(ev.askId, 'yes');
-        },
-        usage: () => undefined,
-      },
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
     });
     await host.start();
-    void host.prompt('kill with permission');
+    void host.prompt('kill guards');
     await settle(120);
-    // the failed second kill does NOT end the turn — the model replies
-    expect(provider.complete).toHaveBeenCalledTimes(4);
-    expect(ctx.killAgent).toHaveBeenCalledTimes(1);
-    expect(ctx.killAgent).toHaveBeenCalledWith('tile-1');
-    expect(host.conversation.some((e) => e.content.includes('killed tile-1'))).toBe(true);
-    expect(host.conversation.some((e) => e.content.includes('no kill grant for agent-1'))).toBe(true);
-    expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'done')).toBe(true);
+    expect(ctx.killAgent).not.toHaveBeenCalled();
+    expect(host.conversation.some((e) => e.content.includes('orchestrator is not an agent tile'))).toBe(true);
+    expect(host.conversation.some((e) => e.content.includes('unknown agent ghost'))).toBe(true);
   });
 
   it('/kill (killAgentNow) kills directly without a grant and refuses the orchestrator', async () => {
@@ -1474,5 +1460,184 @@ describe('ReviewerHost', () => {
     await settle(60);
     const raw = await readFile(join(dir, 'conversation.jsonl'), 'utf8');
     expect(raw).toContain('after repair');
+  });
+
+  it('watchdog revives the harness after an error when a goal is armed', async () => {
+    const recorder = new TileRecorder();
+    // first an armed-goal turn succeeds, then two failures exhaust the retry
+    const { host, provider } = makeHost([{ text: 'armed ok', toolCalls: [] }, { fail: true }, { fail: true }, { text: 'healed', toolCalls: [] }], recorder, { retryDelayMs: 1 });
+    await host.start();
+    await host.setGoal('keep the loop alive');
+    await settle(80);
+    await host.prompt('boom');
+    await settle(80);
+    expect(host.status).toBe('error');
+    const callsBefore = provider.complete.mock.calls.length;
+    // the next watchdog tick revives the harness and wakes the loop — no
+    // user prompt involved
+    host.pollNow();
+    await settle(120);
+    expect(host.status).toBe('running');
+    expect(provider.complete.mock.calls.length).toBeGreaterThan(callsBefore);
+    expect(host.conversation.some((e) => (e.content ?? '').includes('[watchdog] re-check progress'))).toBe(true);
+  });
+
+  it('a stalled provider stream is aborted and retried, then surfaces as error', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider, events } = makeHost([{ hang: true }, { hang: true }], recorder, { retryDelayMs: 1, stallTimeoutMs: 60 });
+    await host.start();
+    await host.prompt('slow stream');
+    await settle(400);
+    // two attempts, both stalled -> a clear error, not a silent hang
+    expect(provider.complete.mock.calls.length).toBe(2);
+    expect(host.status).toBe('error');
+    expect(events.some((e) => e.startsWith('status-error:stream stalled'))).toBe(true);
+  });
+
+  it('a stalled attempt that succeeds on retry keeps the harness running', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider, events } = makeHost([{ hang: true }, { text: 'recovered', toolCalls: [] }], recorder, { retryDelayMs: 1, stallTimeoutMs: 60 });
+    await host.start();
+    await host.prompt('slow stream');
+    await settle(400);
+    expect(provider.complete.mock.calls.length).toBe(2);
+    expect(host.status).toBe('running');
+    expect(events).not.toContain('status:error');
+    expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'recovered')).toBe(true);
+  });
+
+  it('a prompt typed while a turn is running appears immediately and is not duplicated', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'first reply', toolCalls: [] }, { hang: true }], recorder);
+    await host.start();
+    await host.prompt('first');
+    await settle(60);
+    // the second prompt lands while the next turn is hanging mid-stream
+    const p = host.prompt('typed mid-turn');
+    await settle(40);
+    const userRows = host.conversation.filter((e) => e.role === 'user' && e.content.includes('typed mid-turn'));
+    expect(userRows.length).toBe(1); // visible at queue time
+    host.cancel();
+    await p.catch(() => undefined);
+    await settle(60);
+    const after = host.conversation.filter((e) => e.role === 'user' && e.content.includes('typed mid-turn'));
+    expect(after.length).toBe(1); // never duplicated
+    expect(provider.complete.mock.calls.length).toBe(2);
+  });
+
+  it('set_goal subdivides the current goal and GOAL-MET marks every sub-goal done', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-subgoals-${process.pid}-${++hostSeq}`);
+    const { mkdir, readFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const recorder = new TileRecorder();
+    const { host } = makeHost(
+      [
+        { text: 'armed', toolCalls: [] },
+        { text: 'first check reply', toolCalls: [] },
+        { text: 'GOAL-MET: all sub-goals done', toolCalls: [] },
+      ],
+      recorder,
+      { dir },
+    );
+    await host.start();
+    await host.setGoal('build the release');
+    await host.setGoal(null, [
+      { text: 'wire the API', done: false },
+      { text: 'ship the mobile app', done: true },
+    ]);
+    await host.prompt('first check');
+    await settle(60);
+    // the state block reports sub-goal progress
+    expect(host.conversation.some((e) => (e.content ?? '').includes('[sub-goals: 1/2 done]'))).toBe(true);
+    const stateFile = join(dir, 'reviewer', 'state.json');
+    let raw = JSON.parse(await readFile(stateFile, 'utf8')) as ReviewerState;
+    expect(raw.subGoals.length).toBe(2);
+    expect(raw.subGoals[1]!.state).toBe('done');
+    // replacing the goal clears the subdivision
+    await host.setGoal('a different goal');
+    await settle(60);
+    raw = JSON.parse(await readFile(stateFile, 'utf8')) as ReviewerState;
+    expect(raw.subGoals).toEqual([]);
+    // GOAL-MET flips every sub-goal to done
+    await host.setGoal('build the release', [{ text: 'a', done: false }, { text: 'b', done: false }]);
+    await host.prompt('finish it');
+    await settle(100);
+    raw = JSON.parse(await readFile(stateFile, 'utf8')) as ReviewerState;
+    expect(raw.goal?.state).toBe('met');
+    expect(raw.subGoals.every((s) => s.state === 'done')).toBe(true);
+  });
+
+  it('setVariant swaps the system prompt and persists the variant', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-variant-${process.pid}-${++hostSeq}`);
+    const { mkdir, readFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir });
+    await host.start();
+    await host.setVariant('cyber');
+    await settle(30);
+    const systemMsg = host.conversation[0];
+    expect(systemMsg?.role).toBe('system');
+    expect(systemMsg?.content).toContain('AUTONOMOUS MODE: CYBER');
+    const raw = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')) as ReviewerState;
+    expect(raw.variant).toBe('cyber');
+    // clearing restores the base prompt
+    await host.setVariant(null);
+    await settle(30);
+    expect(host.conversation[0]?.content).not.toContain('AUTONOMOUS MODE');
+  });
+
+  it('startAutonomy forks, arms the mission goal and kicks off the loop', async () => {
+    const recorder = new TileRecorder();
+    const forked: string[] = [];
+    const { host, provider } = makeHost(
+      [
+        { text: 'armed ok', toolCalls: [] },
+        { text: 'research round one', toolCalls: [] },
+      ],
+      recorder,
+      { retryDelayMs: 1 },
+    );
+    (host as unknown as { opts: { forkProject?: (v: string) => Promise<{ ok: boolean; path?: string; error?: string }> } }).opts.forkProject = async (v: string) => {
+      forked.push(v);
+      return { ok: true, path: `/tmp/proj/.fraktole-auto/${v}` };
+    };
+    const res = await host.startAutonomy('cyber');
+    expect(res.ok).toBe(true);
+    expect(forked).toEqual(['cyber']);
+    await settle(100);
+    // the mission goal is armed and the kick-off turn is visible immediately
+    expect(host.conversation.some((e) => (e.content ?? '').includes('[autonomous mode] variant=cyber'))).toBe(true);
+    expect(host.conversation.some((e) => (e.content ?? '').includes('fork at /tmp/proj/.fraktole-auto/cyber'))).toBe(true);
+    expect(provider.complete.mock.calls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('startAutonomy surfaces a fork failure cleanly', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder);
+    (host as unknown as { opts: { forkProject?: () => Promise<{ ok: boolean; error: string }> } }).opts.forkProject = async () => ({ ok: false, error: 'no project to fork (cwd is the home directory)' });
+    const res = await host.startAutonomy('bugs');
+    expect(res).toEqual({ ok: false, error: 'no project to fork (cwd is the home directory)' });
+    expect(provider.complete.mock.calls.length).toBe(0);
+  });
+
+  it('autonomous mode auto-resolves ask_user without emitting question cards', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider, events } = makeHost(
+      [
+        { text: '', toolCalls: [{ id: 'c1', name: 'ask_user', args: { question: 'which agent?', kind: 'agent-kind' } }] },
+        { text: '', toolCalls: [{ id: 'c2', name: 'ask_user', args: { question: 'proceed?', kind: 'free' } }] },
+        { text: 'auto', toolCalls: [] },
+      ],
+      recorder,
+    );
+    await host.start();
+    await host.setVariant('frontend');
+    await host.prompt('run autonomously');
+    await settle(120);
+    // both ask_user calls resolved instantly (no cards, no suspension)
+    expect(provider.complete.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(events.some((e) => e.startsWith('question:'))).toBe(false);
+    expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'auto')).toBe(true);
   });
 });

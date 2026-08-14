@@ -1,5 +1,5 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import type { FraktoleMessage, ReviewerQuestion, ReviewerState, ReviewerTask } from '../src/shared/ipc.js';
 import { sanitizeChatText } from '../src/shared/sanitize.js';
 import { emptyState } from './reviewer-state.js';
@@ -35,8 +35,9 @@ export interface ReviewerToolContext {
   agentCount?(): number;
   /** The configured launcher command ('' = none). */
   getAgentCommand?(): string;
-  /** Set or clear the watchdog goal (user-authorized: always allowed). */
-  setGoal?(text: string): Promise<void>;
+  /** Set or clear the watchdog goal (user-authorized: always allowed). The
+   *  model may also subdivide the CURRENT goal into sub-goals. */
+  setGoal?(text: string, subGoals?: Array<{ text: string; done: boolean }>): Promise<void>;
   /** The mailbox message log for the session. */
   listMessages?(): Promise<FraktoleMessage[]>;
   /** Write a command into an existing agent's terminal (launch_agent). */
@@ -74,9 +75,20 @@ const KEY_ESCAPES: Record<string, string> = {
   right: '\x1b[C',
 };
 
+/** Upper bound for the bytes typed into an agent's terminal in one call —
+ *  the model must not be able to flood a live PTY. */
+const TERMINAL_INPUT_CAP = 10_000;
+
+/** ReDoS guard: nested-quantifier patterns (e.g. (a+)+) are the classic
+ *  catastrophic-backtracking signature — reject them outright. */
+const RE_UNSAFE = /\([^()]*[+*?][^()]*\)[+*?]/;
+/** Line length fed to a model-supplied regex (search_files); longer lines
+ *  are truncated for the test only. */
+const SEARCH_LINE_TEST_CAP = 4096;
+
 export function capResult(text: string): string {
   if (text.length <= TOOL_RESULT_CAP) return text;
-  return `${text.slice(0, TOOL_RESULT_CAP)}\n…[truncated]`;
+  return `${text.slice(0, TOOL_RESULT_CAP)}\n...[truncated]`;
 }
 
 const TOOLS: ReviewerTool[] = [
@@ -117,6 +129,7 @@ const TOOLS: ReviewerTool[] = [
       const tileId = resolveTile(args, ctx);
       if (!tileId) return 'error: unknown tile — call list_tiles first';
       if (typeof args.grep === 'string' && args.grep.length > 0) {
+        if (RE_UNSAFE.test(args.grep)) return 'error: bad grep regex: unsafe pattern (nested quantifiers)';
         let re: RegExp;
         try {
           re = new RegExp(args.grep);
@@ -142,9 +155,17 @@ const TOOLS: ReviewerTool[] = [
     async run(args, ctx) {
       const agentId = typeof args.agentId === 'string' ? args.agentId : '';
       if (!agentId) return 'error: agentId required';
+      // never let a model-supplied id escape the session's scrollback dir
+      // (read_file allows absolute paths on purpose — this tool does not)
+      const scrollbackRoot = join(ctx.sessionDir, 'scrollback');
+      const abs = join(scrollbackRoot, `${agentId}.json`);
+      const rel = relative(scrollbackRoot, abs);
+      if (rel.startsWith('..') || isAbsolute(rel)) {
+        return 'error: invalid agentId';
+      }
       let raw: string;
       try {
-        raw = await readFile(join(ctx.sessionDir, 'scrollback', `${agentId}.json`), 'utf8');
+        raw = await readFile(abs, 'utf8');
       } catch {
         return 'error: no scrollback for this agent yet';
       }
@@ -257,7 +278,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'kill_agent',
     description:
-      'Kill an agent tile (terminates its PTY and closes the tile). REQUIRES a single-use user grant: ask the user first with ask_user (kind confirm-kill, agentId) and only call this after they answer yes. The user may also kill directly with /kill. Never target the orchestrator.',
+      'Kill an agent tile (terminates its PTY and closes the tile). Always allowed — no confirmation needed. The user may also kill directly with /kill. Never target the orchestrator.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -303,17 +324,35 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'set_goal',
     description:
-      'Set a new watchdog goal (replaces the current one and re-arms the loop) or clear it by omitting text. You are authorized to set goals when the situation calls for it — formalize what the loop is working toward.',
+      'Set a new watchdog goal (replaces the current one and re-arms the loop), clear it by omitting text, or subdivide the CURRENT goal into sub-goals with subGoals. You are authorized to set goals when the situation calls for it — when a big goal is armed, break it into smaller sub-goals with subGoals and keep the list current as you complete items.',
     inputSchema: {
       type: 'object',
       properties: {
-        text: { type: 'string', description: 'the new goal (omit or empty to clear)' },
+        text: { type: 'string', description: 'the new top-level goal (omit to keep the current one when only sub-goals change; empty clears the goal)' },
+        subGoals: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              text: { type: 'string', description: 'one sub-goal' },
+              done: { type: 'boolean', description: 'true when this sub-goal is completed' },
+            },
+            required: ['text'],
+          },
+          description: 'the full current sub-goal list (replaces it; requires an active goal)',
+        },
       },
     },
     async run(args, ctx) {
       if (!ctx.setGoal) return 'error: set_goal unavailable';
       const text = typeof args.text === 'string' ? args.text.trim() : '';
-      await ctx.setGoal(text.length > 0 ? text : '');
+      const rawSubs = Array.isArray(args.subGoals) ? args.subGoals : [];
+      const subGoals = rawSubs
+        .filter((s): s is { text?: unknown; done?: unknown } => typeof s === 'object' && s !== null)
+        .map((s) => ({ text: typeof s.text === 'string' ? s.text.trim() : '', done: s.done === true }))
+        .filter((s) => s.text.length > 0);
+      await ctx.setGoal(text.length > 0 ? text : '', subGoals.length > 0 ? subGoals : undefined);
+      if (subGoals.length > 0) return `sub-goals set: ${subGoals.map((s) => s.text).join(' | ')}`;
       return text.length > 0 ? `goal set: ${sanitizeChatText(text)}` : 'goal cleared';
     },
   },
@@ -439,6 +478,7 @@ const TOOLS: ReviewerTool[] = [
       const agentId = typeof args.agentId === 'string' ? args.agentId.trim() : '';
       const command = typeof args.command === 'string' ? args.command.trim() : '';
       if (agentId.length === 0 || command.length === 0) return 'error: agentId and command required';
+      if (command.length > TERMINAL_INPUT_CAP) return `error: command too large (${command.length} chars, cap ${TERMINAL_INPUT_CAP})`;
       return ctx.writeToAgent?.(agentId, command) ?? 'error: launch unavailable';
     },
   },
@@ -463,6 +503,7 @@ const TOOLS: ReviewerTool[] = [
       const keys = Array.isArray(args.keys) ? args.keys.filter((k): k is string => typeof k === 'string') : [];
       if (agentId.length === 0 || keys.length === 0) return 'error: agentId and at least one key required';
       const bytes = keys.map((k) => KEY_ESCAPES[k] ?? k).join('');
+      if (bytes.length > TERMINAL_INPUT_CAP) return `error: keystrokes too large (${bytes.length} chars, cap ${TERMINAL_INPUT_CAP})`;
       const result = await ctx.writeToAgent?.(agentId, bytes);
       return result ?? `error: unknown agent ${agentId}`;
     },
@@ -484,6 +525,7 @@ const TOOLS: ReviewerTool[] = [
       const agentId = typeof args.agentId === 'string' ? args.agentId.trim() : '';
       const text = typeof args.text === 'string' ? args.text : '';
       if (agentId.length === 0 || text.length === 0) return 'error: agentId and text required';
+      if (text.length > TERMINAL_INPUT_CAP) return `error: text too large (${text.length} chars, cap ${TERMINAL_INPUT_CAP})`;
       const withEnter = args.pressEnter === true ? '\r' : '';
       const result = await ctx.writeToAgent?.(agentId, `${text}${withEnter}`);
       return result ?? `error: unknown agent ${agentId}`;
@@ -524,11 +566,14 @@ const TOOLS: ReviewerTool[] = [
       for (const path of targets) {
         const abs = path.startsWith('/') ? path : join(ctx.cwd, path);
         try {
-          const content = await readFile(abs, 'utf8');
-          if (content.length > 4 * 1024 * 1024) {
+          // size-check BEFORE reading: a huge file must never be buffered
+          // into the main process just to be rejected
+          const st = await stat(abs);
+          if (st.size > 4 * 1024 * 1024) {
             out.push(`=== ${path} ===\nerror: file larger than 4 MiB`);
             continue;
           }
+          const content = await readFile(abs, 'utf8');
           out.push(targets.length === 1 ? content : `=== ${path} ===\n${content}`);
         } catch (err) {
           out.push(`=== ${path} ===\nerror: ${(err as NodeJS.ErrnoException).message}`);
@@ -606,7 +651,7 @@ async function listDir(abs: string, depth: number, includeHidden: boolean): Prom
     );
     for (const e of entries) {
       if (out.length >= LIST_ENTRY_CAP) {
-        out.push('…[entry cap reached]');
+        out.push('...[entry cap reached]');
         return;
       }
       if (!includeHidden && e.name.startsWith('.')) continue;
@@ -637,6 +682,7 @@ async function searchFiles(
   glob: string | undefined,
   maxMatches: number,
 ): Promise<string> {
+  if (RE_UNSAFE.test(pattern)) return 'error: bad regex: unsafe pattern (nested quantifiers)';
   let re: RegExp;
   try {
     re = new RegExp(pattern);
@@ -670,8 +716,11 @@ async function searchFiles(
           const content = await readFile(full, 'utf8');
           const lines = content.split('\n');
           for (let i = 0; i < lines.length && hits.length < maxMatches; i++) {
-            if (re.test(lines[i]!)) {
-              hits.push(`${relative(abs, full)}:${i + 1}: ${lines[i]!.slice(0, SEARCH_LINE_CAP)}`);
+            const line = lines[i]!;
+            // test a capped slice: a pathological pattern against a huge
+            // single line must not hang the main process
+            if (re.test(line.slice(0, SEARCH_LINE_TEST_CAP))) {
+              hits.push(`${relative(abs, full)}:${i + 1}: ${line.slice(0, SEARCH_LINE_CAP)}`);
             }
           }
         } catch {

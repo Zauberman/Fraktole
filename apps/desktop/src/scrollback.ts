@@ -35,15 +35,20 @@ export function captureTerminalLines(term: TermLinesLike): string[] {
 }
 
 interface TermsMap {
-  __fraktTerms?: Map<TileId, TermLinesLike>;
+  __fraktTerms?: Map<string, TermLinesLike>;
 }
 
-/** Captures every live tile's buffer, keyed by tileId. */
-export function captureAll(agentOf: (tileId: TileId) => string | null): Record<string, string[]> {
+/** Captures every live tile's buffer of one session, keyed by agentId.
+ *  The debug map is keyed by `${sessionId}:${tileId}` — tile ids are only
+ *  unique per session, so a bare tileId would collide across sessions. */
+export function captureAll(sessionId: string, agentOf: (tileId: TileId) => string | null): Record<string, string[]> {
   const terms = (window as unknown as TermsMap).__fraktTerms;
   const out: Record<string, string[]> = {};
   if (!terms) return out;
-  for (const [tileId, term] of terms) {
+  const prefix = `${sessionId}:`;
+  for (const [key, term] of terms) {
+    if (!key.startsWith(prefix)) continue;
+    const tileId = key.slice(prefix.length);
     const agentId = agentOf(tileId);
     if (agentId === null) continue;
     out[agentId] = captureTerminalLines(term);

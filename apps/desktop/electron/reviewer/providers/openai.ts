@@ -11,6 +11,18 @@ import {
 
 const DEFAULT_BASE = 'https://api.openai.com/v1';
 
+/** True only for the genuine OpenAI/DeepSeek hosts — a corporate proxy or
+ *  gateway (even one whose URL merely contains "api.openai.com") must not
+ *  receive provider-specific fields it may reject. */
+function isOfficialHost(base: string): boolean {
+  try {
+    const host = new URL(base).hostname;
+    return host === 'api.openai.com' || host === 'api.deepseek.com';
+  } catch {
+    return false;
+  }
+}
+
 function toMessages(messages: ProviderMsg[]): unknown[] {
   const out = messages.map((m) => {
     switch (m.role) {
@@ -65,8 +77,9 @@ export class OpenAIProvider implements ProviderClient {
     const url = joinBase(opts.baseUrl || DEFAULT_BASE, '/chat/completions');
     const base = opts.baseUrl || DEFAULT_BASE;
     // usage is only returned on the final stream chunk when asked for — and
-    // only official endpoints accept the field (custom proxies can 400)
-    const official = base.includes('api.openai.com') || base.includes('api.deepseek.com');
+    // only official endpoints accept the field (custom proxies can 400), so
+    // it is gated on the exact hostname
+    const official = isOfficialHost(base);
     const res = await fetch(url, {
       method: 'POST',
       signal: opts.signal,
@@ -99,6 +112,10 @@ export class OpenAIProvider implements ProviderClient {
     };
 
     for await (const payload of ssePayloads(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
+      // some gateways report failures as HTTP 200 with an error payload —
+      // surface it instead of silently replying with an empty turn
+      const errField = (payload as { error?: { message?: string } }).error;
+      if (errField) throw new Error(`openai stream error: ${errField.message ?? 'unknown'}`);
       const choice = (payload as {
         choices?: Array<{
           delta?: { content?: string; reasoning_content?: string; reasoning?: string; thinking?: string; thinking_content?: string; tool_calls?: unknown[] };
@@ -150,13 +167,22 @@ export class OpenAIProvider implements ProviderClient {
         const cur = ensure(raw.index ?? 0);
         if (raw.id) cur.id = raw.id;
         if (raw.function?.name) cur.name = raw.function.name;
-        if (raw.function?.arguments) cur.args += raw.function.arguments;
+        if (raw.function?.arguments) {
+          // tolerate providers that re-send the full arguments per delta:
+          // if the accumulated text does not parse but the new fragment
+          // alone does, the fragment IS the complete payload — replace
+          const frag = raw.function.arguments;
+          const combined = cur.args + frag;
+          cur.args = isJson(combined) ? combined : isJson(frag) ? frag : combined;
+        }
       }
     }
 
     const toolCalls: ReviewerToolCall[] = [...calls.values()]
       .filter((c) => c.name.length > 0)
-      .map((c) => ({ id: c.id || `tc-${c.name}`, name: c.name, args: parseArgs(c.args) }));
+      // index-disambiguated fallback ids: two same-name calls without
+      // provider ids must never share a tool_call_id
+      .map((c, i) => ({ id: c.id || `tc-${c.name}-${i}`, name: c.name, args: parseArgs(c.args) }));
     return { text, toolCalls, thinking, usage };
   }
 }
@@ -167,5 +193,14 @@ function parseArgs(raw: string): Record<string, unknown> {
     return JSON.parse(raw) as Record<string, unknown>;
   } catch {
     return { _raw: raw };
+  }
+}
+
+function isJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
   }
 }

@@ -102,17 +102,21 @@ function removeFromSplitChild(node: TileNode, id: TileId): TileNode | null {
   return remove(node, id);
 }
 
-/** Exchanges the ids of two leaves; structure and ratios untouched. */
+/** Exchanges the ids of two leaves; structure and ratios untouched. Never
+ *  mutates the input tree — leaves are rebuilt, so the previous React state
+ *  object stays intact. */
 export function swap(root: TileNode, a: TileId, b: TileId): TileNode {
   if (a === b) return root;
-  const clone: TileNode = root.kind === 'leaf' ? { ...root } : { ...root, a: root.a, b: root.b };
-  const aLeaf = findLeaf(clone, a);
-  const bLeaf = findLeaf(clone, b);
-  if (!aLeaf || !bLeaf) return root;
-  const idA = aLeaf.id;
-  aLeaf.id = bLeaf.id;
-  bLeaf.id = idA;
-  return clone;
+  if (!findLeaf(root, a) || !findLeaf(root, b)) return root;
+  const swapped = (n: TileNode): TileNode => {
+    if (n.kind === 'leaf') {
+      if (n.id === a) return { ...n, id: b };
+      if (n.id === b) return { ...n, id: a };
+      return n;
+    }
+    return { ...n, a: swapped(n.a), b: swapped(n.b) };
+  };
+  return swapped(root);
 }
 
 /** DFS-order adjacency for keyboard focus moves; wraps around the list. */

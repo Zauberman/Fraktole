@@ -26,6 +26,10 @@ export interface RuntimeReviewer {
   prompt(text: string): Promise<boolean>;
   cancel(): void;
   setGoal(text: string | null): Promise<void>;
+  /** Swap the autonomous-mode variant (null clears it) + rebuild the prompt. */
+  setVariant(variant: 'cyber' | 'frontend' | 'bugs' | null): Promise<void>;
+  /** Start an autonomous run: fork, arm the mission goal, kick off. */
+  startAutonomy(variant: 'cyber' | 'frontend' | 'bugs'): Promise<{ ok: boolean; error?: string }>;
   answerQuestion(askId: string, answer: string): void;
   killAgentNow(agentId: string): Promise<string>;
   onAgentMessage(msg: FraktoleMessage): void;
@@ -120,7 +124,12 @@ export class SessionRuntime {
   activate(): void {
     this.lastActiveAt = Date.now();
     this.clearIdleTimer();
-    if (this.state === 'stopped') this.state = 'running';
+    if (this.state === 'stopped') {
+      // reviving a stopped session must also restart the mailbox router,
+      // otherwise agent replies would never be scanned again
+      this.state = 'running';
+      this.opts.router.start(this.sessionRef.id);
+    }
   }
 
   /** Called when another session becomes active. */

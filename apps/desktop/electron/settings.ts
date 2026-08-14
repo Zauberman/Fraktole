@@ -11,6 +11,10 @@ import type { Settings } from '../src/shared/ipc.js';
 export class SettingsStore {
   constructor(private readonly file: string) {}
 
+  /** Serializes read-modify-write sets so concurrent callers cannot clobber
+   *  each other's patches. */
+  private setQueue: Promise<unknown> = Promise.resolve();
+
   async get(): Promise<Settings> {
     try {
       const raw = await readFile(this.file, 'utf8');
@@ -42,12 +46,16 @@ export class SettingsStore {
   }
 
   async set(patch: Partial<Settings>): Promise<Settings> {
-    const current = await this.get();
-    const next: Settings = { ...current, ...patch, reviewer: { ...current.reviewer, ...patch.reviewer } };
-    await mkdir(dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    await writeFile(tmp, JSON.stringify(next, null, 2), 'utf8');
-    await rename(tmp, this.file);
-    return next;
+    const run = this.setQueue.then(async () => {
+      const current = await this.get();
+      const next: Settings = { ...current, ...patch, reviewer: { ...current.reviewer, ...patch.reviewer } };
+      await mkdir(dirname(this.file), { recursive: true });
+      const tmp = `${this.file}.tmp`;
+      await writeFile(tmp, JSON.stringify(next, null, 2), 'utf8');
+      await rename(tmp, this.file);
+      return next;
+    });
+    this.setQueue = run.catch(() => undefined);
+    return run;
   }
 }

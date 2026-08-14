@@ -51,6 +51,7 @@ export const IPC = {
   reviewerStatus: 'reviewer:status',
   reviewerStream: 'reviewer:stream',
   reviewerUsage: 'reviewer:usage',
+  reviewerAutonomy: 'reviewer:autonomy',
   reviewerToolCall: 'reviewer:tool-call',
   reviewerMessage: 'reviewer:message',
   menuSession: 'menu:session',
@@ -160,6 +161,15 @@ export interface ReviewerGoal {
   state: 'active' | 'met';
 }
 
+/** One sub-goal of the armed watchdog goal, set by the model via set_goal.
+ *  The model keeps the list current as it completes items; the harness
+ *  marks every sub-goal done when GOAL-MET is declared. */
+export interface SubGoal {
+  id: string;
+  text: string;
+  state: 'pending' | 'done';
+}
+
 /** One row of the durable task ledger (state.json). */
 export interface ReviewerTask {
   id: string;
@@ -176,14 +186,19 @@ export interface ReviewerUsage {
   outputTokens: number;
 }
 
-/** Durable watchdog state: the goal + the task ledger. Persisted as
- *  sessionDir/reviewer/state.json — survives compaction and restarts. */
+/** Durable watchdog state: the goal + its sub-goals + the task ledger.
+ *  Persisted as sessionDir/reviewer/state.json — survives compaction and
+ *  restarts. */
 export interface ReviewerState {
   goal: ReviewerGoal | null;
+  /** The model's subdivision of the armed goal (empty until set). */
+  subGoals: SubGoal[];
   tasks: ReviewerTask[];
   /** The last agent launcher the user picked for a reviewer spawn — the
    *  model may reuse it without asking again. */
   lastAgentKind: string | null;
+  /** The active autonomous-mode variant (null = normal mode). */
+  variant: 'cyber' | 'frontend' | 'bugs' | null;
   /** Cumulative model token usage (input / cache-hit / output). */
   usage: ReviewerUsage;
 }
@@ -199,6 +214,7 @@ export interface ReviewerUsageEvent {
 /** reviewer:goal event payload. */
 export interface ReviewerGoalEvent {
   goal: ReviewerGoal | null;
+  subGoals: SubGoal[];
 }
 
 /** A pending ask_user question. The loop suspends until the user answers
@@ -264,6 +280,9 @@ export type SerNode =
 export interface SessionAgentMeta {
   agentId: string;
   cwd: string;
+  /** Launcher kind, persisted so a restored tile keeps its kind across
+   *  restarts ('agent' = launcher command, 'shell' = plain shell). */
+  kind?: 'agent' | 'shell';
 }
 
 export interface SessionFile {

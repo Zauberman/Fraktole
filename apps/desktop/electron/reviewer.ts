@@ -1,8 +1,9 @@
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type {
   FraktoleMessage,
   ReviewerEntry,
+  ReviewerGoal,
   ReviewerGoalEvent,
   ReviewerQuestion,
   ReviewerState,
@@ -16,6 +17,8 @@ import { resolveProvider, type ProviderResolution } from '../src/shared/reviewer
 import { sanitizeChatText } from '../src/shared/sanitize.js';
 import { ORCHESTRATOR_ID } from './mailbox.js';
 import { ReviewerTools, type ReviewerToolContext } from './reviewer-tools.js';
+import { AUTONOMY_MISSIONS, AUTONOMY_PLUGINS, type AutonomyVariant } from './reviewer-plugins.js';
+import type { ForkResult } from './fork.js';
 import { emptyState, isGoalMet, loadState, persistState } from './reviewer-state.js';
 import { createProvider, type ProviderClient, type ProviderMsg, type ProviderResult } from './reviewer/providers.js';
 import type { TileRecorder } from './tile-recorder.js';
@@ -41,14 +44,19 @@ export interface ReviewerConfig {
 
 /** Smart default: 'high' on official DeepSeek/OpenAI endpoints (they accept
  *  reasoning_effort), omitted for custom baseUrls where unknown params can
- *  400. */
+ *  400. The hostname match is exact — a proxy whose URL merely contains
+ *  "api.openai.com" must not receive it. */
 export function defaultReasoningEffort(res: ProviderResolution): 'high' | undefined {
-  const u = res.baseUrl.toLowerCase();
-  return u.includes('api.deepseek.com') || u.includes('api.openai.com') ? 'high' : undefined;
+  try {
+    const host = new URL(res.baseUrl).hostname;
+    return host === 'api.deepseek.com' || host === 'api.openai.com' ? 'high' : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export interface ReviewerEmitter {
-  status(status: ReviewerStatus, error?: string, model?: string): void;
+  status(status: ReviewerStatus, error?: string, model?: string, variant?: AutonomyVariant | null): void;
   stream(ev: ReviewerStreamEvent): void;
   toolCall(ev: ReviewerToolCallEvent): void;
   message(entry: ReviewerEntry): void;
@@ -73,8 +81,13 @@ export interface ReviewerHostOpts {
    *  tests. */
   maxRetries?: number;
   retryDelayMs?: number;
+  /** Stream-silence threshold: no provider output for this long aborts and
+   *  retries the call (default 120s). */
+  stallTimeoutMs?: number;
   /** Override the per-model context budget (tokens) used by compaction. */
   contextBudgetTokens?: number;
+  /** Fork the project for an autonomous run; wired by main. */
+  forkProject?: (variant: AutonomyVariant) => Promise<ForkResult>;
   /** injectable seams for tests */
   createProvider?: (name: string) => ProviderClient;
   tools?: ReviewerTools;
@@ -85,9 +98,14 @@ export interface ReviewerHostOpts {
 
 const MAX_TOOL_ITERATIONS = 25;
 const TOOL_RESULT_CHARS = 20_000;
-const POLL_INTERVAL_MS_DEFAULT = 30_000;
+/** Watchdog poll cadence: cheap line-count checks every 15s. */
+const POLL_INTERVAL_MS_DEFAULT = 15_000;
 const MAX_COMPLETE_RETRIES = 1;
 const COMPLETE_RETRY_DELAY_MS = 2_000;
+/** A provider stream that produces NO output (deltas or thinking) for this
+ *  long is considered stalled — the call is aborted and retried, then the
+ *  harness surfaces it and the watchdog heals the loop. */
+const STALL_TIMEOUT_MS = 120_000;
 
 /** Per-model context budgets (tokens) — compaction keeps the conversation
  *  within 80% of the budget. Unknown openai-compatible models default to
@@ -107,17 +125,18 @@ function contextBudgetTokens(model: string, override?: number): number {
   }
   return 128_000;
 }
-/** With an active goal, force a wake every N silent polls (5 min at 30s) so
+/** With an active goal, force a wake every N silent polls (~90s at 15s) so
  *  a stalled loop can never die quietly. */
-const GOAL_RECHECK_POLLS = 10;
+const GOAL_RECHECK_POLLS = 6;
 
-export function buildSystemPrompt(sessionId: string, cwd: string): string {
-  return [
+export function buildSystemPrompt(sessionId: string, cwd: string, variant?: AutonomyVariant | null): string {
+  const lines = [
     `You are the Fraktole reviewer orchestrator for session ${sessionId}. You lead a workforce of agent terminals and you are accountable for the quality of what it ships. Project root: ${cwd}.`,
     '',
     'OPERATING PROTOCOL',
     '- You are a GENERAL commanding a workforce of agent terminals. DELEGATE substantive work by default: building, editing, refactoring go to agents via send_message — spawn_agent first when the workforce is thin.',
-    '- Preferred workforce: 4 agent tiles — 3 build agents for implementation, 1 fixes agent for small fixes and corrections. Spawn up to this shape; dispatch each task to the agent whose role fits it.',
+    '- Preferred base workforce (add build agents when needed): 3 agent tiles — 2 build agents for implementation and running fixes, 1 plan (read only) agent for extensive review, and research: the read only agent should also usually be used to validate changes made on the code base (you can use tab key to toggle an opencode harness in plan mode for example).The plan agent is your close conselor. Spawn up to this shape; dispatch each task to the agent whose role fits it.',
+    '- When a goal is armed, break it into sub-goals with set_goal (subGoals: [...]) and work through them in parallel (preferred is you monitor one build agent for each subgoal ); keep the list current as you complete items.',
     '- You are read-only on the project: use read_file, list_dir, search_files to grasp context and verify — never edit or write files yourself; small fixes go to the fixes agent.',
     '- Start by calling list_tiles so you know what is running; an idle agent is wasted capacity.',
     '- Read the tail of a tile before judging it; read_scrollback for the persisted history.',
@@ -125,18 +144,22 @@ export function buildSystemPrompt(sessionId: string, cwd: string): string {
     '- Dispatch with precise, verifiable acceptance criteria; the agent\'s result wakes you — then verify, judge, re-dispatch.',
     '',
     'VERIFYING & JUDGING RESULTS',
-    '- Never take an agent\'s word for a result. Verify important results: read_tile (tail), search_files (stubs, TODOs, wrong symbols), read_test_page (console errors, loading); for tests and builds, have the responsible agent run them and report.',
-    '- Judge every important result — and its sub-results (builds, tests, pages) — against the goal before accepting it.',
+    '- Verify important results: read_tile (tail), search_files (stubs, TODOs, wrong symbols), read_test_page (console errors, loading); for tests and builds, have the responsible agent run them and report.',
+    '- Judge every important result — and its sub-results (builds, tests, pages) — against the goal before accepting it.For example, if user said great frontend, you need to be very STRICT to iterate into great fronted : Be strict with the workforce.',
     '- Reject incomplete, wrong or sloppy work: re-dispatch with a specific, actionable correction, not a vague "do better".',
     '- Do not micro-check trivia; spend your scrutiny where correctness matters.',
-    '- When a goal is armed (the [goal: ...] block), you are the loop master: dispatch, verify, re-dispatch until the goal is genuinely met, then reply with "GOAL-MET:" and your verdict.',
-    '- For destructive or uncertain steps (killing an agent, unknown spawn choices), ask the user first with ask_user.',
+    '- When a goal is armed (the [goal: ...] block), you are the loop master: dispatch, verify, re-dispatch until the goal is genuinely met (every sub-goal done), then reply with "GOAL-MET:" and your verdict.',
+    '- For uncertain steps (unknown spawn choices), ask the user first with ask_user. kill_agent is always allowed directly.',
     '',
     'REPORTING',
     '- End every engagement with a verdict: what each agent did, what you verified, what you recommend.',
     '- Keep replies tight. ASCII only — never emojis or decorative unicode in any message, body or reply.',
-    '- Never set, change or clear the goal yourself — only the user can, via /goal.',
-  ].join('\n');
+    '',
+  ];
+  if (variant && variant in AUTONOMY_PLUGINS) {
+    lines.push('', AUTONOMY_PLUGINS[variant as AutonomyVariant]!);
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -178,8 +201,9 @@ export class ReviewerHost {
   /** Total tokens across the whole conversation from the last usage event
    *  (used to derive per-turn marginals when the provider reports usage). */
   private lastUsageTotal = 0;
-  /** Marginal tokens of the turn whose usage event just arrived (consumed
-   *  by recordTurnCost at the turn boundary). */
+  /** Marginal tokens of the current turn, accumulated across every
+   *  complete() call of that turn (consumed by recordTurnCost at the turn
+   *  boundary). */
   private pendingUsageDelta: number | null = null;
   /** A /compact issued mid-turn: applied at the next turn boundary instead
    *  of splicing the conversation while the model is streaming. */
@@ -199,8 +223,8 @@ export class ReviewerHost {
     reject(e: Error): void;
   } | null = null;
   private askSeq = 0;
-  /** Single-use kill grants per agent, earned from confirm-kill "yes". */
-  private killGrants = new Set<string>();
+  /** The active autonomous-mode variant (null = normal mode). */
+  private variant: AutonomyVariant | null = null;
   /** Tool context merged with the ledger callbacks (state lives here). */
   private readonly toolContext: ReviewerToolContext;
 
@@ -218,7 +242,7 @@ export class ReviewerHost {
       getAgentCommand: () => this.agentCommand,
       agentCount: () => this.agentCount(),
       spawnAgent: (kind, cwd) => this.spawnAgent(kind, cwd),
-      setGoal: (text) => this.setGoal(text.length > 0 ? text : null),
+      setGoal: (text, subGoals) => this.setGoal(text.length > 0 ? text : null, subGoals),
       openTestPage: (url) => this.opts.toolContext.openTestPage?.(url) ?? Promise.resolve('error: test tab unavailable'),
       readTestPage: () => this.opts.toolContext.readTestPage?.() ?? Promise.resolve('error: test tab unavailable'),
       screenshotTestPage: () => this.opts.toolContext.screenshotTestPage?.() ?? Promise.resolve('error: test tab unavailable'),
@@ -229,7 +253,11 @@ export class ReviewerHost {
   }
 
   get conversation(): ReviewerEntry[] {
-    return this.messages.map(toEntry);
+    // queued user prompts are shown the moment they are typed (they emit at
+    // queue time) — a transcript reload must see them too, so they are part
+    // of the conversation view until processed
+    const queued = this.queue.filter((m) => m.announced === true);
+    return [...this.messages, ...queued].map(toEntry);
   }
 
   /** Resolves provider/endpoint/model from the pasted API key (env fallback
@@ -246,7 +274,8 @@ export class ReviewerHost {
 
   private async doStart(): Promise<boolean> {
     const cfg = await this.opts.getConfig();
-    const key = cfg.apiKey?.trim() ?? (cfg.apiKeyEnv ? (process.env[cfg.apiKeyEnv] ?? '') : '');
+    // `||` (not `??`): an empty pasted key must fall back to the env var too
+    const key = (cfg.apiKey?.trim() || (cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] ?? '' : '')).trim();
     const res = resolveProvider(key, {
       baseUrl: cfg.baseUrl,
       providerHint: cfg.provider,
@@ -261,11 +290,19 @@ export class ReviewerHost {
     this.agentCommand = cfg.agentCommand?.trim() ?? '';
     this.reasoningEffort = cfg.reasoningEffort;
     this.provider = (this.opts.createProvider ?? createProvider)(res.adapter);
-    await this.load();
-    if (this.messages.length === 0) {
-      this.messages.push({ role: 'system', content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd) });
-    }
     this.state = await loadState(this.stateFile);
+    this.variant = this.state.variant;
+    await this.load();
+    // The system prompt is memory-only (never persisted), so a reloaded
+    // conversation must get it back explicitly — otherwise the model runs
+    // without its operating protocol after every relaunch.
+    const system: ProviderMsg = { role: 'system', content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd, this.variant) };
+    if (this.messages[0]?.role === 'system') {
+      this.messages[0] = system;
+    } else {
+      this.messages.unshift(system);
+      this.persistedCount += 1; // every persisted line shifts by one
+    }
     this.pollsSinceWake = 0;
     this.startWatch();
     this.setStatus('running');
@@ -284,7 +321,7 @@ export class ReviewerHost {
     this.state = emptyState();
     await this.truncateConversation();
     await persistState(this.stateFile, this.state, this.opts.logger);
-    this.opts.emit.goal({ goal: null });
+    this.opts.emit.goal({ goal: null, subGoals: [] });
     if (this.startPromise) {
       const inflight = this.startPromise;
       this.startPromise = null;
@@ -323,18 +360,24 @@ export class ReviewerHost {
   /** Queues a user prompt (from the Reviewer tab). Revives the harness
    *  first when it is down (idle/error/offline/unconfigured) so the prompt
    *  is never silently dropped; returns false only when the reviewer is
-   *  explicitly stopped or has no API key. */
+   *  explicitly stopped or has no API key. The prompt appears in the
+   *  transcript immediately (announced), even while a turn is running —
+   *  the queue processes it the moment the current turn ends. */
   async prompt(text: string): Promise<boolean> {
     if (!(await this.ensureStarted())) return false;
-    this.queue.push({ role: 'user', content: this.withStateBlock(text) });
+    const msg: ProviderMsg = { role: 'user', content: this.withStateBlock(text), announced: true };
+    this.queue.push(msg);
+    this.opts.emit.message(toEntry(msg));
     this.drainQueue();
     return true;
   }
 
   /** Queues an agent result message as a turn. The body is sanitized at
-   *  ingestion so the model never sees (or echoes) emoji. */
-  onAgentMessage(msg: FraktoleMessage): void {
-    if (this.status !== 'running') return;
+   *  ingestion so the model never sees (or echoes) emoji. Revives the
+   *  harness when it is down (like prompt()) so a result is never dropped —
+   *  a transient provider error must not lose a completed task's verdict. */
+  async onAgentMessage(msg: FraktoleMessage): Promise<void> {
+    if (!(await this.ensureStarted())) return;
     this.queue.push({
       role: 'user',
       content: this.withStateBlock(`[${msg.from} → ${msg.to} (${msg.kind})]: ${sanitizeChatText(msg.body)}`),
@@ -342,33 +385,104 @@ export class ReviewerHost {
     this.drainQueue();
   }
 
-  /** Arms (text) or disarms (null) the watchdog goal. Only the user can call
-   *  this (the /goal command); the model never sets its own goal. Revives
-   *  the harness when down, like prompt(). */
-  async setGoal(text: string | null): Promise<void> {
+  /** Arms (text) or disarms (null) the watchdog goal — or subdivides the
+   *  CURRENT goal into sub-goals (subGoals, from the model's set_goal). A
+   *  new goal text replaces the subdivision; clearing the goal clears it
+   *  too. Revives the harness when down, like prompt(). */
+  async setGoal(text: string | null, subGoals?: Array<{ text: string; done: boolean }>): Promise<void> {
     if (!(await this.ensureStarted())) return;
     const prev = this.state.goal;
     const trimmed = typeof text === 'string' ? text.trim() : '';
-    const goal = trimmed.length > 0 ? { text: trimmed, setAt: Date.now(), state: 'active' as const } : null;
+    const hasSubs = subGoals !== undefined && subGoals.length > 0;
+    let goal: ReviewerGoal | null = null;
+    if (trimmed.length > 0) {
+      goal = { text: trimmed, setAt: Date.now(), state: 'active' as const };
+    } else if (hasSubs) {
+      goal = prev; // subdivide the current goal
+    }
+    if (hasSubs && !goal) return; // no goal to subdivide
     this.state.goal = goal;
+    if (hasSubs) {
+      const base = Date.now();
+      this.state.subGoals = subGoals!
+        .map((s, i) => ({
+          id: `sg-${base.toString(36)}-${i}`,
+          text: s.text.trim().slice(0, 200),
+          state: (s.done ? 'done' : 'pending') as 'pending' | 'done',
+        }))
+        .filter((s) => s.text.length > 0);
+    } else if (goal === null || (prev !== null && prev.text !== goal.text)) {
+      this.state.subGoals = []; // goal cleared or replaced — the subdivision is stale
+    }
     this.pollsSinceWake = 0;
     this.lastLines = new Map([...this.opts.recorder.list()].map(([id, s]) => [id, s.lines]));
     await persistState(this.stateFile, this.state, this.opts.logger);
-    this.opts.emit.goal({ goal });
+    this.opts.emit.goal({ goal, subGoals: this.state.subGoals });
     if (goal && (!prev || prev.state !== 'active')) {
       this.queue.push({ role: 'user', content: this.withStateBlock(`[goal armed] ${goal.text}`) });
       this.drainQueue();
     }
   }
 
+  /** Swaps the active autonomous-mode variant (or clears it) and rebuilds
+   *  the system prompt in place — the conversation keeps flowing under the
+   *  new protocol. */
+  async setVariant(variant: AutonomyVariant | null): Promise<void> {
+    this.variant = variant;
+    this.state.variant = variant;
+    await persistState(this.stateFile, this.state, this.opts.logger);
+    const systemIdx = this.messages.findIndex((m) => m.role === 'system');
+    if (systemIdx >= 0) {
+      this.messages[systemIdx] = {
+        role: 'system',
+        content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd, variant),
+      };
+    }
+    this.setStatus(this.status);
+  }
+
+  /** Starts an autonomous run for a variant: forks the project, arms the
+   *  mission goal and kicks the loop off with an announced turn. */
+  async startAutonomy(variant: AutonomyVariant): Promise<{ ok: boolean; error?: string }> {
+    if (!(await this.ensureStarted())) return { ok: false, error: 'reviewer not running' };
+    const fork = await (this.opts.forkProject?.(variant) ?? Promise.resolve({ ok: false as const, error: 'fork unavailable' }));
+    if (!fork.ok) return { ok: false, error: fork.error };
+    await this.setVariant(variant);
+    await this.setGoal(AUTONOMY_MISSIONS[variant]);
+    const kick: ProviderMsg = {
+      role: 'user',
+      announced: true,
+      content: `[autonomous mode] variant=${variant} — fork at ${fork.path}. ${AUTONOMY_MISSIONS[variant]} Begin the loop: spawn the read-only plan agent inside the fork and start researching.`,
+    };
+    this.queue.push(kick);
+    this.opts.emit.message(toEntry(kick));
+    this.drainQueue();
+    return { ok: true };
+  }
+
   /** Watchdog tick: cheap activity check (line counts only — no model call
-   *  unless something wakes the loop). Silent without an active goal. */
+   *  unless something wakes the loop). Silent without an active goal. When
+   *  a goal is armed and the harness has fallen over (error/offline), it
+   *  revives itself and wakes — the loop heals without a user prompt. */
   pollNow(): void {
-    if (this.status !== 'running') return;
+    const goal = this.state.goal;
+    const armed = goal !== null && goal.state === 'active';
+    if (this.status !== 'running') {
+      if (armed && this.status !== 'stopped') {
+        // revive the harness, then wake immediately — a dead loop needs a
+        // kick, not another line-count delta check
+        void this.ensureStarted().then((ok) => {
+          if (!ok) return;
+          this.pollsSinceWake = 0;
+          this.queue.push({ role: 'user', content: this.withStateBlock('[watchdog] re-check progress') });
+          this.drainQueue();
+        });
+      }
+      return;
+    }
     const lines = new Map<string, number>();
     for (const [tileId, summary] of this.opts.recorder.list()) lines.set(tileId, summary.lines);
-    const goal = this.state.goal;
-    const quiet = !goal || goal.state === 'met' || this.running || this.queue.length > 0;
+    const quiet = !armed || this.running || this.queue.length > 0;
     if (quiet) {
       this.lastLines = lines;
       return;
@@ -396,8 +510,17 @@ export class ReviewerHost {
 
   /** Suspends the current tool run until the user answers the question
    *  card (answerQuestion) — or rejects on restart/stop. The loop is
-   *  exclusive, so only one question can ever be pending. */
+   *  exclusive, so only one question can ever be pending. In autonomous
+   *  mode the question never reaches the user: launcher picks default to
+   *  the remembered launcher and everything else auto-resolves, so the run
+   *  stays hands-off. */
   private askUser(question: string, kind: ReviewerQuestion['kind'], agentId?: string): Promise<string> {
+    if (this.variant !== null) {
+      if (kind === 'agent-kind') {
+        return Promise.resolve(this.state.lastAgentKind || this.agentCommand || 'opencode');
+      }
+      return Promise.resolve('proceed');
+    }
     return new Promise<string>((resolve, reject) => {
       if (this.pendingAsk) {
         reject(new Error('another question is already pending'));
@@ -416,15 +539,11 @@ export class ReviewerHost {
     });
   }
 
-  /** Resolves the pending question with the user's answer (from the UI). A
-   *  "yes" to a confirm-kill question grants one kill of that agent. */
+  /** Resolves the pending question with the user's answer (from the UI). */
   answerQuestion(askId: string, answer: string): void {
     const pending = this.pendingAsk;
     if (!pending || pending.askId !== askId) return;
     this.pendingAsk = null;
-    if (pending.kind === 'confirm-kill' && pending.agentId && /^yes\b/i.test(answer.trim())) {
-      this.killGrants.add(pending.agentId);
-    }
     pending.resolve(answer);
   }
 
@@ -435,23 +554,20 @@ export class ReviewerHost {
     pending.reject(new Error('question cancelled'));
   }
 
-  /** User-commanded kill (/kill <id>): no grant needed — the user is the
-   *  authority. Never touches the orchestrator. */
+  /** User-commanded kill (/kill <id>) and the model's kill_agent share one
+   *  direct path — kills never require user confirmation. Never touches
+   *  the orchestrator. */
   async killAgentNow(agentId: string): Promise<string> {
-    return this.killById(agentId, false);
+    return this.killById(agentId);
   }
 
-  /** Model kill path: single-use grant per agent (from confirm-kill "yes").
-   *  Without a grant the tool is told to ask the user first. */
+  /** Model kill path: always allowed directly. */
   private async tryKillAgent(agentId: string): Promise<string> {
-    return this.killById(agentId, true);
+    return this.killById(agentId);
   }
 
-  private async killById(agentId: string, grantRequired: boolean): Promise<string> {
+  private async killById(agentId: string): Promise<string> {
     if (agentId === ORCHESTRATOR_ID) return 'error: the orchestrator is not an agent tile';
-    if (grantRequired && !this.killGrants.delete(agentId)) {
-      return `error: no kill grant for ${agentId} — ask the user first (ask_user, kind confirm-kill)`;
-    }
     const tileId = this.opts.toolContext.tileOfAgent(agentId);
     if (!tileId) return `error: unknown agent ${agentId}`;
     return (await this.opts.toolContext.killAgent?.(tileId)) ?? 'error: kill unavailable';
@@ -481,7 +597,12 @@ export class ReviewerHost {
     if (!goal) return content;
     const pending = this.state.tasks.filter((t) => t.status === 'pending').length;
     const done = this.state.tasks.filter((t) => t.status === 'done').length;
-    return `[goal: ${goal.text} (${goal.state})] [tasks: ${pending} pending, ${done} done] ${content}`;
+    let block = `[goal: ${goal.text} (${goal.state})] [tasks: ${pending} pending, ${done} done]`;
+    if (this.state.subGoals.length > 0) {
+      const sd = this.state.subGoals.filter((s) => s.state === 'done').length;
+      block += ` [sub-goals: ${sd}/${this.state.subGoals.length} done]`;
+    }
+    return `${block} ${content}`;
   }
 
   private startWatch(): void {
@@ -495,16 +616,46 @@ export class ReviewerHost {
     this.watchTimer = null;
   }
 
-  /** One transparent retry on provider errors (a network blip must not kill
-   *  the harness). Aborts are never retried. */
-  private async callWithRetry(signal: AbortSignal, call: () => Promise<ProviderResult>): Promise<ProviderResult> {
+  /** One transparent retry on transient failures (a network blip must not
+   *  kill the harness). Deterministic client errors (400/401/403) are never
+   *  retried, and the backoff is abort-aware. Aborts are never retried.
+   *
+   *  Each attempt also carries a stall watchdog: if the provider stream
+   *  produces no output (deltas or thinking) for stallTimeoutMs, the
+   *  attempt is aborted and treated like a transient failure; a stall that
+   *  survives every attempt surfaces as a clear error the watchdog can
+   *  heal. */
+  private async callWithRetry(
+    signal: AbortSignal,
+    call: (signal: AbortSignal, onActivity: () => void) => Promise<ProviderResult>,
+  ): Promise<ProviderResult> {
     const max = this.opts.maxRetries ?? MAX_COMPLETE_RETRIES;
+    const stallMs = this.opts.stallTimeoutMs ?? STALL_TIMEOUT_MS;
     for (let attempt = 0; ; attempt += 1) {
+      const attemptAborter = new AbortController();
+      const composite = AbortSignal.any([signal, attemptAborter.signal]);
+      let lastActivity = Date.now();
+      const onActivity = (): void => {
+        lastActivity = Date.now();
+      };
+      const stallTimer = setInterval(() => {
+        if (Date.now() - lastActivity > stallMs) attemptAborter.abort();
+      }, Math.min(5_000, Math.max(50, stallMs / 4)));
       try {
-        return await call();
+        const result = await call(composite, onActivity);
+        clearInterval(stallTimer);
+        return result;
       } catch (err) {
-        if (signal.aborted || attempt >= max) throw err;
-        await new Promise((r) => setTimeout(r, this.opts.retryDelayMs ?? COMPLETE_RETRY_DELAY_MS));
+        clearInterval(stallTimer);
+        if (signal.aborted) throw err;
+        if (attemptAborter.signal.aborted) {
+          // stalled stream — retryable like any transient failure
+          if (attempt >= max) throw new Error(`stream stalled — no output for ${Math.round(stallMs / 1000)}s`);
+          await abortableDelay(this.opts.retryDelayMs ?? COMPLETE_RETRY_DELAY_MS, signal);
+          continue;
+        }
+        if (attempt >= max || !isRetryableError(err)) throw err;
+        await abortableDelay(this.opts.retryDelayMs ?? COMPLETE_RETRY_DELAY_MS, signal);
       }
     }
   }
@@ -524,7 +675,7 @@ export class ReviewerHost {
 
   private setStatus(status: ReviewerStatus, error?: string): void {
     this.status = status;
-    this.opts.emit.status(status, error, this.resolved?.model);
+    this.opts.emit.status(status, error, this.resolved?.model, this.variant);
   }
 
   private drainQueue(): void {
@@ -542,30 +693,34 @@ export class ReviewerHost {
       return;
     }
     try {
-      while (this.queue.length > 0) {
+      while (this.queue.length > 0 && !aborter.signal.aborted) {
         const turnStart = this.messages.length;
+        this.pendingUsageDelta = null; // per-turn usage marginal, see below
         const turn = this.queue.shift()!;
         this.lastTurnWasWake = typeof turn.content === 'string' && turn.content.includes('context was compacted');
         this.messages.push(turn);
         await this.persist();
-        this.opts.emit.message(toEntry(turn));
+        // prompts are announced at queue time — skip the duplicate emit
+        if (!turn.announced) this.opts.emit.message(toEntry(turn));
 
         for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
           if (aborter.signal.aborted) break;
-          const response = await this.callWithRetry(aborter.signal, () =>
+          const response = await this.callWithRetry(aborter.signal, (signal, onActivity) =>
             this.provider.complete({
               model: res.model,
               apiKey: this.apiKey,
               baseUrl: res.baseUrl,
               messages: this.messages,
               tools: this.tools.definitions(),
-              signal: aborter.signal,
+              signal,
               reasoningEffort: this.reasoningEffort ?? defaultReasoningEffort(res),
-              onDelta: (delta, thinking) =>
+              onDelta: (delta, thinking) => {
+                onActivity();
                 this.opts.emit.stream({
                   delta,
                   thinking: thinking && thinking.length > 0 ? thinking : undefined,
-                }),
+                });
+              },
             }),
           );
           // never persist an empty toolCalls array: providers reject
@@ -579,7 +734,9 @@ export class ReviewerHost {
           this.messages.push(assistant);
           if (response.usage) {
             const total = response.usage.inputTokens + response.usage.cachedTokens + response.usage.outputTokens;
-            this.pendingUsageDelta = Math.max(1, total - this.lastUsageTotal);
+            // accumulate across every complete() call of the turn — an
+            // overwrite would only keep the last iteration's marginal
+            this.pendingUsageDelta = (this.pendingUsageDelta ?? 0) + Math.max(1, total - this.lastUsageTotal);
             this.lastUsageTotal = total;
             this.state.usage.inputTokens += response.usage.inputTokens;
             this.state.usage.cachedTokens += response.usage.cachedTokens;
@@ -591,10 +748,15 @@ export class ReviewerHost {
           const entry = toEntry(this.messages[this.messages.length - 1]!);
           this.opts.emit.message(entry);
 
-          if (isGoalMet(response.text) && this.state.goal?.state === 'active') {
+          // a goal is only met when the model stops working — a reply that
+          // still carries tool calls is mid-work, not a verdict
+          if (response.toolCalls.length === 0 && isGoalMet(response.text) && this.state.goal?.state === 'active') {
             this.state.goal.state = 'met';
+            if (this.state.subGoals.length > 0) {
+              this.state.subGoals = this.state.subGoals.map((s) => ({ ...s, state: 'done' }));
+            }
             await persistState(this.stateFile, this.state, this.opts.logger);
-            this.opts.emit.goal({ goal: this.state.goal });
+            this.opts.emit.goal({ goal: this.state.goal, subGoals: this.state.subGoals });
           }
 
           if (response.toolCalls.length === 0) break;
@@ -619,17 +781,26 @@ export class ReviewerHost {
                 at: Date.now(),
               });
             }
-            const capped = result.length > TOOL_RESULT_CHARS ? `${result.slice(0, TOOL_RESULT_CHARS)}\n…[truncated]` : result;
+            const capped = result.length > TOOL_RESULT_CHARS ? `${result.slice(0, TOOL_RESULT_CHARS)}\n...[truncated]` : result;
             this.messages.push({ role: 'tool', content: capped, toolCallId: call.id });
             this.opts.emit.message(toEntry(this.messages[this.messages.length - 1]!));
           }
           // A failed tool must NOT end the turn: the error result is in the
           // model's context, and it decides whether to retry, adapt or
           // reply. MAX_TOOL_ITERATIONS still bounds runaway retries.
+          if (aborter.signal.aborted) {
+            // a mid-batch cancel must never leave an unanswered tool_calls
+            // block behind (every provider rejects it): roll back the
+            // assistant reply and any partial tool results, keeping the
+            // (already persisted) user prompt so the question survives
+            this.messages.length = turnStart + 1;
+            this.persistedCount = turnStart + 1;
+            break;
+          }
           await this.persist();
         }
         this.recordTurnCost(turnStart);
-        this.compactIfNeeded(false, true);
+        await this.compactIfNeeded(false, true);
       }
     } catch (err) {
       if (!aborter.signal.aborted) {
@@ -640,7 +811,7 @@ export class ReviewerHost {
       this.aborter = null;
       // a /compact deferred mid-turn lands here when the run ends early
       // (abort/error) without reaching the turn-boundary call
-      if (this.pendingCompact) this.compactIfNeeded(false, true);
+      if (this.pendingCompact) void this.compactIfNeeded(false, true);
     }
   }
 
@@ -674,7 +845,7 @@ export class ReviewerHost {
    *  orphaned, so the conversation stays API-valid at every step. The two
    *  newest turns are always kept. A /compact issued mid-turn is deferred to
    *  the next turn boundary. */
-  private compactIfNeeded(force = false, atBoundary = false): void {
+  private async compactIfNeeded(force = false, atBoundary = false): Promise<void> {
     if (this.running && !atBoundary) {
       if (force) this.pendingCompact = true;
       return;
@@ -683,8 +854,9 @@ export class ReviewerHost {
     this.pendingCompact = false;
     const budget = Math.floor(contextBudgetTokens(this.resolved?.model ?? '', this.opts.contextBudgetTokens) * 0.8);
     let dropped = 0;
+    let userIdx: number[] = [];
     for (;;) {
-      const userIdx: number[] = [];
+      userIdx = [];
       this.messages.forEach((m, i) => {
         if (m.role === 'user') userIdx.push(i);
       });
@@ -697,22 +869,42 @@ export class ReviewerHost {
       dropped += 1;
     }
     if (dropped > 0) {
-      // role user + position after the first user turn: the note joins the
-      // oldest kept turn's content and never looks like a second system
+      // role user + position right after the oldest kept user turn: the
+      // note joins that turn's content and never looks like a second
+      // system — or, on a reloaded conversation (no system prompt at
+      // index 0), never lands between an assistant and its tool results
       const note: ProviderMsg = {
         role: 'user',
         content: `[context compacted: ${dropped} exchanges dropped — your goal and ledger are unchanged; continue]`,
       };
-      this.messages.splice(2, 0, note);
+      this.messages.splice(userIdx[0]! + 1, 0, note);
       this.opts.emit.message(toEntry(note));
-      // every surviving message (except the transient note, which stays
-      // memory-only) is already on disk — re-sync the write cursor so the
-      // turns after a compaction are never skipped
+      // re-sync the write cursor (the compacted prefix is claimed on disk;
+      // the note rides along with the rewrite below)
       this.persistedCount = this.messages.length;
+      // make the compaction durable: the append-only file would otherwise
+      // resurrect every dropped turn on the next reload
+      await this.rewriteConversation();
       if (this.state.goal?.state === 'active' && !this.lastTurnWasWake) {
         this.queue.push({ role: 'user', content: this.withStateBlock('[watchdog] context was compacted — re-check progress') });
         this.drainQueue();
       }
+    }
+  }
+
+  /** Rewrites the conversation file to exactly the in-memory messages (the
+   *  system prompt is memory-only). Atomic via tmp + rename; failures are
+   *  logged and the old file is left in place (a reload then simply sees
+   *  the pre-compaction history). */
+  private async rewriteConversation(): Promise<void> {
+    try {
+      await mkdir(dirname(this.conversationFile), { recursive: true });
+      const lines = this.messages.filter((m) => m.role !== 'system').map((m) => JSON.stringify(m));
+      const tmp = `${this.conversationFile}.tmp`;
+      await writeFile(tmp, lines.length > 0 ? `${lines.join('\n')}\n` : '', 'utf8');
+      await rename(tmp, this.conversationFile);
+    } catch (err) {
+      this.opts.logger?.(`reviewer: conversation rewrite failed (${(err as Error).message})`);
     }
   }
 
@@ -748,7 +940,9 @@ export class ReviewerHost {
    *  by every provider. Orphan tool messages go with it. A window is kept
    *  only on an EXACT match — every response must belong to a call and every
    *  call must be answered, so extra responses can never leak into a
-   *  request. */
+   *  request. A tool message without a toolCallId is a broken response: it
+   *  can never be replayed (providers require the id) and marks the whole
+   *  window unrecoverable. */
   private repairSequence(msgs: ProviderMsg[]): ProviderMsg[] {
     const out: ProviderMsg[] = [];
     let i = 0;
@@ -757,15 +951,18 @@ export class ReviewerHost {
       if (m.role === 'assistant') {
         const calls = (m.toolCalls ?? []).map((c) => c.id).sort();
         const responses: string[] = [];
+        let broken = false;
         let j = i + 1;
         while (j < msgs.length && msgs[j]!.role === 'tool') {
           if (msgs[j]!.toolCallId) responses.push(msgs[j]!.toolCallId!);
+          else broken = true;
           j += 1;
         }
         responses.sort();
         const exact =
-          (calls.length === 0 && responses.length === 0) ||
-          (calls.length === responses.length && calls.every((id, k) => id === responses[k]!));
+          !broken &&
+          ((calls.length === 0 && responses.length === 0) ||
+            (calls.length === responses.length && calls.every((id, k) => id === responses[k]!)));
         if (exact) {
           out.push(m);
           for (let k = i + 1; k < j; k++) out.push(msgs[k]!);
@@ -784,16 +981,28 @@ export class ReviewerHost {
 
   /** Appends every not-yet-persisted message (never just the last one — a
    *  multi-call turn's tool results must all survive a restart). The system
-   *  prompt is memory-only, as before. */
+   *  prompt is memory-only, as before. The write cursor advances only after
+   *  a successful write — a failed append is retried on the next persist
+   *  instead of silently losing the lines. */
   private async persist(): Promise<void> {
     if (this.persistedCount >= this.messages.length) return;
     const fresh = this.messages.slice(this.persistedCount);
-    const lines = fresh.filter((m) => m.role !== 'system').map((m) => JSON.stringify(m));
-    this.persistedCount = this.messages.length;
-    if (lines.length === 0) return;
+    const lines = fresh
+      .filter((m) => m.role !== 'system')
+      .map((m) => {
+        const { announced: _announced, ...rest } = m;
+        return JSON.stringify(rest);
+      });
+    if (lines.length === 0) {
+      // nothing to write (the memory-only system prompt); the cursor still
+      // advances so the next persist starts at the right line
+      this.persistedCount = this.messages.length;
+      return;
+    }
     try {
       await mkdir(dirname(this.conversationFile), { recursive: true });
       await appendFile(this.conversationFile, `${lines.join('\n')}\n`, 'utf8');
+      this.persistedCount = this.messages.length;
     } catch (err) {
       this.opts.logger?.(`reviewer: persist failed (${(err as Error).message})`);
     }
@@ -804,10 +1013,12 @@ export class ReviewerHost {
       await mkdir(dirname(this.conversationFile), { recursive: true });
       const fs = await import('node:fs/promises');
       await fs.truncate(this.conversationFile);
-      this.persistedCount = 0;
     } catch {
-      // nothing to clear
+      // nothing to clear (a missing file is already empty)
     }
+    // always reset the cursor — a stale count would silently skip the
+    // first writes of the fresh conversation
+    this.persistedCount = 0;
   }
 }
 
@@ -820,4 +1031,32 @@ function toEntry(msg: ProviderMsg): ReviewerEntry {
     thinking: msg.thinking,
     at: Date.now(),
   };
+}
+
+/** Whether a provider failure is worth retrying: network failures (fetch
+ *  rejects with TypeError) and server-side/rate-limit statuses. A 4xx
+ *  client error is deterministic — retrying it wastes 2s+ and a request. */
+function isRetryableError(err: unknown): boolean {
+  if (err instanceof TypeError) return true;
+  if (err instanceof Error) {
+    const m = err.message.match(/API error ([45]\d\d)/);
+    if (m) return Number(m[1]!) >= 429;
+  }
+  return true; // unknown failures: one retry is the safe default
+}
+
+/** setTimeout that rejects early when the signal aborts — a stop() during
+ *  the backoff must not stall the harness for the full delay. */
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new Error('aborted'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }

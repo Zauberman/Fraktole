@@ -22,7 +22,8 @@ function toMessages(messages: ProviderMsg[]): { system: string; messages: unknow
     .map((m) => m.content)
     .join('\n\n');
   const out: unknown[] = [];
-  for (const m of messages) {
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]!;
     switch (m.role) {
       case 'user':
         out.push({ role: 'user', content: [{ type: 'text', text: m.content }] });
@@ -39,12 +40,21 @@ function toMessages(messages: ProviderMsg[]): { system: string; messages: unknow
         out.push({ role: 'assistant', content });
         break;
       }
-      case 'tool':
-        out.push({
-          role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: m.toolCallId, content: m.content }],
-        });
+      case 'tool': {
+        // batch consecutive tool results into ONE user message — the
+        // documented Anthropic shape; N separate user messages can 400 on
+        // strict "roles must alternate" enforcement
+        const blocks: unknown[] = [
+          { type: 'tool_result', tool_use_id: m.toolCallId, content: m.content },
+        ];
+        while (i + 1 < messages.length && messages[i + 1]!.role === 'tool') {
+          i += 1;
+          const next = messages[i]!;
+          blocks.push({ type: 'tool_result', tool_use_id: next.toolCallId, content: next.content });
+        }
+        out.push({ role: 'user', content: blocks });
         break;
+      }
     }
   }
   return { system, messages: out };
@@ -69,7 +79,10 @@ export class AnthropicProvider implements ProviderClient {
       },
       body: JSON.stringify({
         model: opts.model,
-        max_tokens: 4096,
+        // strictly larger than the thinking budget: extended-thinking
+        // tokens count against max_tokens, so a fully-used budget must
+        // still leave room for the actual reply
+        max_tokens: 8192,
         system: system.length > 0 ? system : undefined,
         messages,
         tools: opts.tools.map((t) => ({
@@ -115,6 +128,10 @@ export class AnthropicProvider implements ProviderClient {
           break;
         case 'content_block_start':
           if (ev.content_block?.type === 'tool_use') {
+            // a second start while a block is open means a lost
+            // content_block_stop — fail loudly instead of dropping the
+            // first call's accumulated arguments
+            if (openBlock) throw new Error('anthropic stream error: nested tool_use block');
             openBlock = {
               call: { id: ev.content_block.id ?? '', name: ev.content_block.name ?? '', args: {} },
               raw: '',
@@ -132,7 +149,10 @@ export class AnthropicProvider implements ProviderClient {
           } else if (ev.delta?.type === 'thinking_delta' && ev.delta.thinking) {
             thinking += ev.delta.thinking;
             opts.onDelta('', ev.delta.thinking);
-          } else if (ev.delta?.type === 'input_json_delta' && ev.delta.partial_json && openBlock) {
+          } else if (ev.delta?.type === 'input_json_delta' && ev.delta.partial_json) {
+            // a delta with no open block means a lost content_block_stop —
+            // fail loudly instead of running the tool with empty args
+            if (!openBlock) throw new Error('anthropic stream error: input_json_delta without an open block');
             openBlock.raw += ev.delta.partial_json;
           }
           break;

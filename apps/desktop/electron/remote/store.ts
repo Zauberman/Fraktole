@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /** Device tokens are stored SHA-256-hashed only — the plaintext lives
@@ -35,15 +35,25 @@ const DEFAULT_STATE: RemoteState = { enabled: false, port: DEFAULT_REMOTE_PORT, 
  *   key.pem      its private key (mode 0600)
  *
  * Every write goes through tmp + rename so a crash can never leave a
- * half-written file (same discipline as SettingsStore/SessionStore).
+ * half-written file (same discipline as SettingsStore/SessionStore), and all
+ * mutations run through a serial queue so concurrent writers (a pair racing a
+ * touchDevice) cannot tear the tmp file or lose each other's updates.
  */
 export class RemoteStore {
   private cache: RemoteState | null = null;
+  /** Serializes read-modify-write mutations; the tmp path is shared. */
+  private writeQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly dir: string) {}
 
   private stateFile(): string {
     return join(this.dir, 'state.json');
+  }
+
+  private mutexed<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.writeQueue.then(fn, fn);
+    this.writeQueue = run.catch(() => undefined);
+    return run;
   }
 
   async get(): Promise<RemoteState> {
@@ -68,6 +78,9 @@ export class RemoteStore {
         devices,
       };
     } catch {
+      // unreadable/corrupt state — keep the blob aside (it may hold every
+      // paired device) instead of silently overwriting it on the next write
+      await rename(this.stateFile(), `${this.stateFile()}.corrupt-${Date.now()}`).catch(() => undefined);
       this.cache = { ...DEFAULT_STATE };
     }
     return this.cache;
@@ -77,60 +90,73 @@ export class RemoteStore {
     this.cache = state;
     await mkdir(this.dir, { recursive: true });
     const tmp = `${this.stateFile()}.tmp`;
-    await writeFile(tmp, JSON.stringify(state, null, 2), 'utf8');
+    await writeFile(tmp, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
     await rename(tmp, this.stateFile());
+    // rename can drop the requested mode depending on umask — state.json holds
+    // device metadata and token hashes, keep it private like key.pem
+    await chmod(this.stateFile(), 0o600);
   }
 
-  async setEnabled(enabled: boolean): Promise<RemoteState> {
-    const state = await this.get();
-    const next = { ...state, enabled };
-    await this.persist(next);
-    return next;
-  }
-
-  async setPort(port: number): Promise<RemoteState> {
-    const state = await this.get();
-    const clamped = Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_REMOTE_PORT;
-    const next = { ...state, port: clamped };
-    await this.persist(next);
-    return next;
-  }
-
-  /** Registers a new device, returning its raw token (never persisted). */
-  async addDevice(name: string): Promise<{ device: RemoteDevice; token: string }> {
-    const state = await this.get();
-    const token = randomBytes(32).toString('hex');
-    const now = Date.now();
-    const device: RemoteDevice = {
-      deviceId: randomUUID(),
-      name: name
-        .trim()
-        // eslint-disable-next-line no-control-regex
-        .replace(/[\u0000-\u001f]/g, '')
-        .slice(0, 64) || 'Device',
-      tokenHash: hashToken(token),
-      createdAt: now,
-      lastSeen: now,
-    };
-    const devices = [...state.devices.filter((d) => d.deviceId !== device.deviceId), device];
-    await this.persist({ ...state, devices });
-    return { device, token };
-  }
-
-  async touchDevice(deviceId: string, at = Date.now()): Promise<void> {
-    const state = await this.get();
-    if (!state.devices.some((d) => d.deviceId === deviceId)) return;
-    await this.persist({
-      ...state,
-      devices: state.devices.map((d) => (d.deviceId === deviceId ? { ...d, lastSeen: at } : d)),
+  setEnabled(enabled: boolean): Promise<RemoteState> {
+    return this.mutexed(async () => {
+      const state = await this.get();
+      const next = { ...state, enabled };
+      await this.persist(next);
+      return next;
     });
   }
 
-  async revokeDevice(deviceId: string): Promise<boolean> {
-    const state = await this.get();
-    const devices = state.devices.filter((d) => d.deviceId !== deviceId);
-    if (devices.length === state.devices.length) return false;
-    await this.persist({ ...state, devices });
-    return true;
+  setPort(port: number): Promise<RemoteState> {
+    return this.mutexed(async () => {
+      const state = await this.get();
+      const clamped = Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_REMOTE_PORT;
+      const next = { ...state, port: clamped };
+      await this.persist(next);
+      return next;
+    });
+  }
+
+  /** Registers a new device, returning its raw token (never persisted). */
+  addDevice(name: string): Promise<{ device: RemoteDevice; token: string }> {
+    return this.mutexed(async () => {
+      const state = await this.get();
+      const token = randomBytes(32).toString('hex');
+      const now = Date.now();
+      const device: RemoteDevice = {
+        deviceId: randomUUID(),
+        name: name
+          .trim()
+          // eslint-disable-next-line no-control-regex
+          .replace(/[\u0000-\u001f]/g, '')
+          .slice(0, 64) || 'Device',
+        tokenHash: hashToken(token),
+        createdAt: now,
+        lastSeen: now,
+      };
+      const devices = [...state.devices.filter((d) => d.deviceId !== device.deviceId), device];
+      await this.persist({ ...state, devices });
+      return { device, token };
+    });
+  }
+
+  touchDevice(deviceId: string, at = Date.now()): Promise<void> {
+    return this.mutexed(async () => {
+      const state = await this.get();
+      if (!state.devices.some((d) => d.deviceId === deviceId)) return;
+      await this.persist({
+        ...state,
+        devices: state.devices.map((d) => (d.deviceId === deviceId ? { ...d, lastSeen: at } : d)),
+      });
+    });
+  }
+
+  revokeDevice(deviceId: string): Promise<boolean> {
+    return this.mutexed(async () => {
+      const state = await this.get();
+      const devices = state.devices.filter((d) => d.deviceId !== deviceId);
+      if (devices.length === state.devices.length) return false;
+      await this.persist({ ...state, devices });
+      return true;
+    });
   }
 }

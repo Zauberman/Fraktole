@@ -16,12 +16,16 @@ export interface PairingCode {
   expiresAt: number;
 }
 
-export type CodeVerdict = 'ok' | 'invalid-code' | 'expired';
+export type CodeVerdict = 'ok' | 'invalid-code';
 
 /**
  * One-time pairing codes. A code is valid for `ttlMs`, is invalidated as soon
  * as it is used, and a fresh code is generated on demand (the bridge rotates
  * on a timer and right after a successful pair).
+ *
+ * The wire verdict is deliberately two-valued: a stale code answers
+ * `invalid-code` exactly like a wrong one, so an attacker can never learn
+ * that a guess matched the (about-to-rotate) code.
  */
 export class PairingCodes {
   private readonly ttlMs: number;
@@ -59,8 +63,9 @@ export class PairingCodes {
     const current = this.current;
     if (!current) return 'invalid-code';
     if (current.expiresAt <= this.now()) {
-      // an expired code is reported as such until it rotates away
-      if (current.code.replace('-', '') === cleaned) return 'expired';
+      // a matching stale code is consumed so rotation is forced; the verdict
+      // stays 'invalid-code' — the response must not confirm a guess
+      if (current.code.replace('-', '') === cleaned) this.current = null;
       return 'invalid-code';
     }
     if (!timingSafeEqual(Buffer.from(current.code.replace('-', '')), Buffer.from(cleaned))) {

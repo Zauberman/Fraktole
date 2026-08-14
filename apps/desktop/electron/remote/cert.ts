@@ -1,6 +1,24 @@
-import { createHash, createSign, generateKeyPairSync, randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import {
+  createHash,
+  createPrivateKey,
+  createSign,
+  createVerify,
+  generateKeyPair,
+  randomBytes,
+  type KeyObject,
+} from 'node:crypto';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+
+/** Promise wrapper around the callback-style RSA keygen. */
+function generateRsaKeyPair(): Promise<{ publicKey: KeyObject; privateKey: KeyObject }> {
+  return new Promise((resolve, reject) => {
+    generateKeyPair('rsa', { modulusLength: 2048, publicExponent: 0x10001 }, (err, publicKey, privateKey) => {
+      if (err) reject(err);
+      else resolve({ publicKey, privateKey });
+    });
+  });
+}
 
 /** Minimal DER encoder sufficient to build a self-signed X.509 v3 server
  *  certificate (RSA-2048 / SHA-256). We hand-roll the ASN.1 because the
@@ -82,11 +100,14 @@ function derUtf8String(text: string): Uint8Array {
   return derTlv(0x0c, new TextEncoder().encode(text));
 }
 
-function derUtcTime(d: Date): Uint8Array {
+/** GeneralizedTime (4-digit year). UTCTime only encodes years 1950-2049 —
+ *  with a 10-year validity window a cert minted from 2040 on would silently
+ *  be read as 19xx and instantly "expired". */
+function derGeneralizedTime(d: Date): Uint8Array {
   const pad = (n: number): string => String(n).padStart(2, '0');
-  const s = `${pad(d.getUTCFullYear() % 100)}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
+  const s = `${pad(d.getUTCFullYear())}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}` +
     `${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
-  return derTlv(0x17, new TextEncoder().encode(s));
+  return derTlv(0x18, new TextEncoder().encode(s));
 }
 
 function concat(parts: Uint8Array[]): Uint8Array {
@@ -111,12 +132,10 @@ function derName(cn: string, org: string): Uint8Array {
 const SHA256_RSA = derSequence(derOid('1.2.840.113549.1.1.11'), derTlv(0x05, new Uint8Array(0)));
 const RSA_ENCRYPTION = derSequence(derOid('1.2.840.113549.1.1.1'), derTlv(0x05, new Uint8Array(0)));
 
-/** Generates a fresh self-signed cert for 10 years, returns PEM + fingerprint. */
-function generateCert(): { certPem: string; keyPem: string; fingerprint256: string } {
-  const { publicKey, privateKey } = generateKeyPairSync('rsa', {
-    modulusLength: 2048,
-    publicExponent: 0x10001,
-  });
+/** Generates a fresh self-signed cert for 10 years, returns PEM + fingerprint.
+ *  Async so the (comparatively slow) RSA keygen never blocks the main thread. */
+async function generateCert(): Promise<{ certPem: string; keyPem: string; fingerprint256: string }> {
+  const { publicKey, privateKey } = await generateRsaKeyPair();
 
   // PKCS#1 RSAPublicKey DER — exactly the structure wrapped by SPKI.
   const rsaPub = publicKey.export({ type: 'pkcs1', format: 'der' });
@@ -133,7 +152,7 @@ function generateCert(): { certPem: string; keyPem: string; fingerprint256: stri
     derInteger(BigInt('0x' + serial.toString('hex'))),
     SHA256_RSA,
     name, // issuer
-    derSequence(derUtcTime(notBefore), derUtcTime(notAfter)),
+    derSequence(derGeneralizedTime(notBefore), derGeneralizedTime(notAfter)),
     name, // subject
     spki, // subjectPublicKeyInfo
   );
@@ -167,24 +186,40 @@ export interface RemoteCert {
   fingerprint256: string;
 }
 
-/** Loads the persisted cert/key pair, generating them when absent. */
+/** Loads the persisted cert/key pair, generating them when absent. A persisted
+ *  pair whose key is unreadable or does not match the cert is regenerated too
+ *  (a torn first write, a crash between the key and cert writes, or manual
+ *  tampering must never leave the bridge permanently broken). */
 export async function loadOrCreateCert(dir: string): Promise<RemoteCert> {
   const certFile = join(dir, 'cert.pem');
   const keyFile = join(dir, 'key.pem');
   try {
     const [certPem, keyPem] = await Promise.all([readFile(certFile, 'utf8'), readFile(keyFile, 'utf8')]);
     const cert = new (await import('node:crypto')).X509Certificate(certPem);
+    // verify the persisted key actually belongs to the persisted cert (a
+    // corrupt or mismatched key must be regenerated, not shipped to TLS):
+    // sign a probe with the key and check it against the cert's public key
+    const probe = 'frakt-tofu-key-check';
+    const verifier = createVerify('RSA-SHA256');
+    verifier.update(probe);
+    if (!verifier.verify(cert.publicKey, createSign('RSA-SHA256').update(probe).sign(createPrivateKey(keyPem)))) {
+      throw new Error('persisted key does not match the certificate');
+    }
     return { certPem, keyPem, fingerprint256: cert.fingerprint256.replaceAll(':', '').toLowerCase() };
   } catch {
-    // missing or unreadable — generate a fresh pair
+    // missing, unreadable, or an inconsistent pair — generate a fresh one
   }
-  const generated = generateCert();
+  const generated = await generateCert();
   await mkdir(dir, { recursive: true });
-  await writeFile(keyFile, generated.keyPem, { encoding: 'utf8', mode: 0o600 });
-  await writeFile(certFile, generated.certPem, { encoding: 'utf8', mode: 0o600 });
-  // chmod the key explicitly — a previous generation may have raced or the
-  // umask widened it before writeFile's mode applied
+  // atomic (tmp + rename) and key-first: a crash mid-write leaves either the
+  // old pair or a mismatched one that the consistency check above regenerates
+  await writeFile(`${keyFile}.tmp`, generated.keyPem, { encoding: 'utf8', mode: 0o600 });
+  await rename(`${keyFile}.tmp`, keyFile);
+  // chmod explicitly — a previous generation may have raced or the umask
+  // widened it before writeFile's mode applied
   await chmod(keyFile, 0o600);
+  await writeFile(`${certFile}.tmp`, generated.certPem, { encoding: 'utf8', mode: 0o600 });
+  await rename(`${certFile}.tmp`, certFile);
   return generated;
 }
 

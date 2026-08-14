@@ -314,6 +314,82 @@ button:active:not(:disabled) {
   gap: var(--s2);
 }
 
+/* ————— auto compose (autonomous mode) popover ————— */
+
+.autonomy-wrap {
+  position: relative;
+}
+
+/* the toggle button sits above the open menu's full-screen backdrop, so a
+   real pointer click on it lands on the button (toggle), never on the
+   backdrop (close) — otherwise clicking while open closes-and-reopens */
+.autonomy-wrap .btn {
+  position: relative;
+  z-index: 57;
+}
+
+.autonomy-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+}
+
+.autonomy-menu {
+  position: absolute;
+  top: calc(100% + var(--s1));
+  right: 0;
+  min-width: 180px;
+  padding: var(--s1);
+  background: var(--bg-overlay);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-dialog);
+  z-index: 56;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: dialog-fade var(--dur-fast) var(--ease-out);
+}
+
+.autonomy-menu-label {
+  padding: var(--s1) var(--s3) var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.autonomy-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  text-align: left;
+  text-transform: capitalize;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.autonomy-item:hover {
+  background: var(--hover-surface);
+}
+
+.autonomy-item:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: -1px;
+}
+
+.autonomy-item-current {
+  background: var(--accent-tint);
+}
+
 .orch-judge-status {
   display: inline-flex;
   align-items: center;
@@ -788,6 +864,7 @@ button:active:not(:disabled) {
 
 .reviewer-goal-banner {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--s2);
   padding: var(--s2) var(--s3);
@@ -795,7 +872,44 @@ button:active:not(:disabled) {
   border: 1px solid var(--line-strong);
   border-radius: var(--r-sm);
   background: var(--bg-raised);
-  animation: reviewer-in 180ms var(--ease-out);
+}
+
+.reviewer-subgoals {
+  list-style: none;
+  margin: 0;
+  padding: var(--s1) 0 0;
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.reviewer-subgoal {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  font-family: var(--font-mono-alt);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reviewer-subgoal-mark {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.reviewer-subgoal-done {
+  color: var(--text-faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--ok);
+}
+
+.reviewer-subgoal-done .reviewer-subgoal-mark {
+  color: var(--ok);
 }
 
 .reviewer-goal-state {

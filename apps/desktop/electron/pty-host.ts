@@ -22,13 +22,20 @@ interface PtyHostOpts {
   send: (channel: string, tileId: string, payload: unknown) => void;
 }
 
+interface PtySessionEntry {
+  pty: pty.IPty;
+  cwd: string;
+  /** Pending SIGKILL escalation from kill(); cleared when the pty exits. */
+  killTimer: NodeJS.Timeout | null;
+}
+
 /**
  * One PTY per tile. Children are spawned as session leaders by node-pty, so
  * killing the negative pid kills the shell and its whole process group —
  * agents started inside a tile die with it.
  */
 export class PtyHost {
-  private readonly sessions = new Map<string, { pty: pty.IPty; cwd: string }>();
+  private readonly sessions = new Map<string, PtySessionEntry>();
 
   constructor(private readonly opts: PtyHostOpts) {}
 
@@ -46,18 +53,31 @@ export class PtyHost {
         ...opts.envExt,
       },
     });
+    const entry: PtySessionEntry = { pty: term, cwd: opts.cwd, killTimer: null };
     term.onData((data) => this.opts.send(IPC.ptyData, tileId, data));
     term.onExit(({ exitCode }) => {
+      // clear any pending kill escalation so it can never fire against a
+      // recycled tileId/pid, and only drop the entry if it is still ours
+      if (entry.killTimer !== null) {
+        clearTimeout(entry.killTimer);
+        entry.killTimer = null;
+      }
       const payload: PtyExitPayload = { code: exitCode };
       this.opts.send(IPC.tileExit, tileId, payload);
-      this.sessions.delete(tileId);
+      if (this.sessions.get(tileId) === entry) this.sessions.delete(tileId);
     });
-    this.sessions.set(tileId, { pty: term, cwd: opts.cwd });
+    this.sessions.set(tileId, entry);
     return { pid: term.pid, cwd: opts.cwd };
   }
 
   write(tileId: string, data: string): void {
-    this.sessions.get(tileId)?.pty.write(data);
+    const session = this.sessions.get(tileId);
+    if (!session) return;
+    try {
+      session.pty.write(data);
+    } catch {
+      // the pty exited between our lookup and the write — nothing to do
+    }
   }
 
   cwdOf(tileId: string): string | null {
@@ -65,7 +85,13 @@ export class PtyHost {
   }
 
   resize(tileId: string, cols: number, rows: number): void {
-    this.sessions.get(tileId)?.pty.resize(Math.max(cols, 2), Math.max(rows, 2));
+    const session = this.sessions.get(tileId);
+    if (!session) return;
+    try {
+      session.pty.resize(Math.max(cols, 2), Math.max(rows, 2));
+    } catch {
+      // the pty exited between our lookup and the resize — nothing to do
+    }
   }
 
   kill(tileId: string): void {
@@ -77,8 +103,10 @@ export class PtyHost {
     } catch {
       term.kill('SIGTERM');
     }
-    const escalation = setTimeout(() => {
-      if (this.sessions.has(tileId)) {
+    session.killTimer = setTimeout(() => {
+      session.killTimer = null;
+      // only escalate while this exact session still owns the tileId
+      if (this.sessions.get(tileId) === session) {
         try {
           process.kill(-term.pid, 'SIGKILL');
         } catch {
@@ -86,7 +114,7 @@ export class PtyHost {
         }
       }
     }, 2_000);
-    escalation.unref();
+    session.killTimer.unref();
   }
 
   killAll(): void {

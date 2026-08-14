@@ -1,12 +1,12 @@
 /** Sliding-window per-connection message rate limiter.
  *
- *  Budget: `limit` messages per rolling `windowMs`. The window slides at the
- *  start of every check, so bursts that cross a clock boundary are still
- *  bounded by the limit over any 1-second span.
+ *  Budget: `limit` messages per rolling `windowMs`. Every allowance is a
+ *  timestamp in a deque; entries older than the window are dropped on each
+ *  check, so the count over ANY windowMs-long span is bounded by `limit` —
+ *  bursts that cross a clock boundary cannot exceed it.
  */
 export class RateLimiter {
-  private windowStart = 0;
-  private count = 0;
+  private readonly stamps: number[] = [];
 
   constructor(
     private readonly limit = 120,
@@ -17,15 +17,13 @@ export class RateLimiter {
   /** Returns false once the connection exceeds its per-window budget. */
   allow(): boolean {
     const t = this.now();
-    if (t - this.windowStart >= this.windowMs) {
-      this.windowStart = t;
-      this.count = 0;
-    }
-    this.count += 1;
-    return this.count <= this.limit;
+    while (this.stamps.length > 0 && t - this.stamps[0]! >= this.windowMs) this.stamps.shift();
+    if (this.stamps.length >= this.limit) return false;
+    this.stamps.push(t);
+    return true;
   }
 
   get used(): number {
-    return this.count;
+    return this.stamps.length;
   }
 }

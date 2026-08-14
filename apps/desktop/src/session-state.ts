@@ -23,6 +23,7 @@ interface SessionStateRefs {
   focusedIdRef: React.MutableRefObject<TileId | null>;
   zoomedIdRef: React.MutableRefObject<TileId | null>;
   reviewerFocusedRef: React.MutableRefObject<boolean>;
+  sessionRef: React.MutableRefObject<SessionSummary | null>;
 }
 
 export interface SessionState extends SessionStateRefs {
@@ -144,7 +145,7 @@ export function useSessionState(sessionId: string): SessionState {
           zoomedAgentId: zoomId ? (tilesRef.current.get(zoomId)?.agentId ?? null) : null,
           focusedAgentId: focusId ? (tilesRef.current.get(focusId)?.agentId ?? null) : null,
           judgeCwd: focusId ? (tilesRef.current.get(focusId)?.cwd ?? null) : null,
-          scrollback: opts?.scrollback ?? captureAll((id) => tilesRef.current.get(id)?.agentId ?? null),
+          scrollback: opts?.scrollback ?? captureAll(sessionId, (id) => tilesRef.current.get(id)?.agentId ?? null),
         });
       } catch {
         // a save must never take the workspace down
@@ -165,8 +166,12 @@ export function useSessionState(sessionId: string): SessionState {
       idByAgent.set(agent.agentId, id);
       metas.set(id, { id, cwd: agent.cwd, agentId: agent.agentId });
     }
+    // build everything before committing: treeFromSer throws on unknown
+    // agents, and a half-rebuilt state would let auto-save erase the
+    // persisted arrangement
+    const tree = treeFromSer(opened.session.tree, (agentId) => idByAgent.get(agentId) ?? null);
     setTiles(metas);
-    setTree(treeFromSer(opened.session.tree, (agentId) => idByAgent.get(agentId) ?? null));
+    setTree(tree);
     const focus = opened.session.focusedAgentId ? (idByAgent.get(opened.session.focusedAgentId) ?? null) : null;
     const zoom = opened.session.zoomedAgentId ? (idByAgent.get(opened.session.zoomedAgentId) ?? null) : null;
     setFocusedId(focus);
@@ -200,8 +205,9 @@ export function useSessionState(sessionId: string): SessionState {
         rebuildFrom(opened);
         loadedRef.current = true;
       }
-    } catch {
+    } catch (err) {
       // session load failure: leave the view empty; the switcher can retry
+      console.error('session load failed:', err);
     } finally {
       busyRef.current = false;
     }
@@ -272,19 +278,33 @@ export function useSessionState(sessionId: string): SessionState {
   );
 
   const closeTile = useCallback((id: TileId, external = false): void => {
-    const next = remove(treeRef.current, id);
-    setTree(next);
-    if (listIds(next).length === 0) externalEmptyRef.current = external;
-    if (focusedIdRef.current === id) {
-      setFocusedId(listIds(next).length > 0 ? (listIds(next)[0] ?? null) : null);
-    }
-    if (zoomedIdRef.current === id) setZoomedId(null);
+    // remove against the latest scheduled tree (not the effect-synced ref):
+    // batched tile:exit events must each see the previous removal
+    setTree((t) => {
+      if (t === null) return t;
+      if (!listIds(t).includes(id)) return t;
+      const next = remove(t, id);
+      if (listIds(next).length === 0 && external) externalEmptyRef.current = true;
+      return next;
+    });
+    if (zoomedIdRef.current === id) setZoomedId((z) => (z === id ? null : z));
     setTiles((m) => {
+      if (!m.has(id)) return m;
       const copy = new Map(m);
       copy.delete(id);
       return copy;
     });
   }, []);
+
+  // keep focus valid: when the focused tile disappears (close/exit), fall
+  // back to the first remaining tile; computed from the latest tree so
+  // batched closes cannot leave focus dangling
+  useEffect(() => {
+    const ids = listIds(tree);
+    if (focusedId === null) return;
+    if (ids.length === 0) setFocusedId(null);
+    else if (!ids.includes(focusedId)) setFocusedId(ids[0] ?? null);
+  }, [tree, focusedId]);
 
   const moveFocus = useCallback((dir: 'prev' | 'next'): void => {
     const target = nextFocusTarget(listIds(treeRef.current), focusedIdRef.current, reviewerFocusedRef.current, dir);
@@ -301,7 +321,13 @@ export function useSessionState(sessionId: string): SessionState {
   }, []);
 
   const onSwap = useCallback((a: TileId, b: TileId): void => {
-    setTree((t) => (t === null ? t : swap(t, a, b)));
+    setTree((t) => {
+      if (t === null) return t;
+      const ids = listIds(t);
+      // a drag can outlive a tile: ignore drops referencing unknown ids
+      if (!ids.includes(a) || !ids.includes(b)) return t;
+      return swap(t, a, b);
+    });
   }, []);
 
   const toggleZoom = useCallback((id: TileId): void => {
@@ -322,6 +348,7 @@ export function useSessionState(sessionId: string): SessionState {
     focusedIdRef,
     zoomedIdRef,
     reviewerFocusedRef,
+    sessionRef,
     addTile,
     registerAgent,
     closeTile,

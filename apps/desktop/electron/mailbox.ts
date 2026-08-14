@@ -1,6 +1,6 @@
 import { watch, type FSWatcher } from 'node:fs';
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import type { FraktoleMessage, SessionFile } from '../src/shared/ipc.js';
 
 export const ORCHESTRATOR_ID = 'orchestrator';
@@ -13,22 +13,35 @@ export function messageId(): string {
   return `m-${Date.now()}-${seq}`;
 }
 
+/** Ids and targets flow into filesystem paths (mailbox dirs, inbox file
+ *  names): keep them flat so a crafted message can never escape the
+ *  session's agents directory. */
+const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
+
 /** Star topology + kind whitelist. The orchestrator may message any agent;
  *  an agent may only message the orchestrator. */
 export function routeMessage(msg: FraktoleMessage, srcRole: 'agent' | 'judge'): 'ok' | 'forbidden' | 'malformed' {
   if (!msg || typeof msg !== 'object') return 'malformed';
   if (typeof msg.from !== 'string' || typeof msg.to !== 'string') return 'malformed';
+  if (typeof msg.id !== 'string') return 'malformed';
   if (typeof msg.body !== 'string' || typeof msg.at !== 'number') return 'malformed';
   if (msg.kind !== 'task' && msg.kind !== 'result' && msg.kind !== 'note') return 'malformed';
   if (srcRole === 'agent' && msg.to !== ORCHESTRATOR_ID) return 'forbidden';
   if (msg.to === msg.from) return 'forbidden';
+  if (!SAFE_ID_RE.test(msg.id) || !SAFE_ID_RE.test(msg.from) || !SAFE_ID_RE.test(msg.to)) return 'malformed';
   return 'ok';
 }
+
+/** Control bytes that could inject terminal escape sequences into the echo
+ *  line (CSI/OSC and friends) — the echo goes to a live terminal. */
+// eslint-disable-next-line no-control-regex
+const ESC_SCRUB_RE = /[\x00-\x1f\x7f]/g;
 
 /** Visible text injected into the target's terminal so a human or TUI agent
  *  sees the message; the panel log and mailbox files are the canonical copy. */
 export function echoText(from: string, to: string, kind: string, body: string): string {
-  return `\r\n\x1b[36m[fraktole]\x1b[0m ${from} \x1b[2m\u2192\x1b[0m ${to} \x1b[2m(${kind})\x1b[0m: ${body}\r\n`;
+  const safe = body.replace(ESC_SCRUB_RE, '');
+  return `\r\n\x1b[36m[fraktole]\x1b[0m ${from} \x1b[2m\u2192\x1b[0m ${to} \x1b[2m(${kind})\x1b[0m: ${safe}\r\n`;
 }
 
 export interface MailboxRouterOpts {
@@ -56,7 +69,14 @@ function log(opts: MailboxRouterOpts, line: string): void {
 export class MailboxRouter {
   private watcher: FSWatcher | null = null;
   private scanTimer: NodeJS.Timeout | null = null;
+  private pendingScanTimer: NodeJS.Timeout | null = null;
   private scanPending = false;
+  /** One in-flight scan; the watcher path and the interval share it so two
+   *  passes can never ingest the same outbox file concurrently. */
+  private scanPromise: Promise<void> | null = null;
+  /** Serializes log appends: read-modify-write on messages.jsonl must not
+   *  interleave (shared tmp file, lost updates, torn lines). */
+  private appendQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly opts: MailboxRouterOpts) {}
 
@@ -78,19 +98,33 @@ export class MailboxRouter {
     this.watcher = null;
     if (this.scanTimer) clearInterval(this.scanTimer);
     this.scanTimer = null;
+    if (this.pendingScanTimer) clearTimeout(this.pendingScanTimer);
+    this.pendingScanTimer = null;
+    this.scanPending = false;
   }
 
   private scheduleScan(): void {
     if (this.scanPending) return;
     this.scanPending = true;
-    setTimeout(() => {
+    this.pendingScanTimer = setTimeout(() => {
+      this.pendingScanTimer = null;
       this.scanPending = false;
       void this.scanOutboxes();
     }, 150);
   }
 
-  /** Reads every outbox and ingests new message files. */
-  async scanOutboxes(): Promise<void> {
+  /** Reads every outbox and ingests new message files. Concurrent callers
+   *  (interval + watcher) share one in-flight pass. */
+  scanOutboxes(): Promise<void> {
+    if (this.scanPromise !== null) return this.scanPromise;
+    const run = this.doScan().finally(() => {
+      this.scanPromise = null;
+    });
+    this.scanPromise = run;
+    return run;
+  }
+
+  private async doScan(): Promise<void> {
     const session = this.opts.currentSession();
     if (!session) return;
     const agentsDir = join(this.opts.root, session.id, 'agents');
@@ -131,9 +165,21 @@ export class MailboxRouter {
     try {
       msg = JSON.parse(raw) as FraktoleMessage;
     } catch {
-      log(this.opts, `mailbox: dropping malformed ${file}`);
-      await unlink(file).catch(() => undefined);
-      return;
+      // the writer may still be mid-write: retry once after a beat before
+      // declaring the file malformed and dropping it
+      await new Promise((r) => setTimeout(r, 250));
+      try {
+        raw = await readFile(file, 'utf8');
+      } catch {
+        return; // already consumed elsewhere
+      }
+      try {
+        msg = JSON.parse(raw) as FraktoleMessage;
+      } catch {
+        log(this.opts, `mailbox: dropping malformed ${file}`);
+        await unlink(file).catch(() => undefined);
+        return;
+      }
     }
     const verdict = routeMessage(msg, sourceAgentId === ORCHESTRATOR_ID ? 'judge' : 'agent');
     if (verdict !== 'ok') {
@@ -142,8 +188,17 @@ export class MailboxRouter {
       return;
     }
     msg.from = sourceAgentId;
-    await this.deliver(msg, sourceAgentId);
-    await unlink(file).catch(() => undefined);
+    try {
+      // dedup is deliver's job, but when the message is already in the
+      // canonical log the file must still be consumed (and never redelivered)
+      if (await this.alreadyLogged(session.id, msg.id)) {
+        log(this.opts, `mailbox: ${file} already delivered — consuming`);
+      } else {
+        await this.deliver(msg, sourceAgentId);
+      }
+    } finally {
+      await unlink(file).catch(() => undefined);
+    }
   }
 
   /** Validates + writes a message produced inside Fraktole (the composer). */
@@ -163,10 +218,15 @@ export class MailboxRouter {
     if (!session) return;
     if (await this.alreadyLogged(session.id, msg.id)) return;
     if (sourceAgentId !== ORCHESTRATOR_ID) msg.from = sourceAgentId;
-    if (msg.from === ORCHESTRATOR_ID && msg.at === 0) msg.at = Date.now();
+    if (msg.at === 0) msg.at = Date.now();
 
     const agentsDir = join(this.opts.root, session.id, 'agents');
-    const targetDir = join(agentsDir, msg.to);
+    // belt over routeMessage's flat-id check: never write outside agentsDir
+    const targetDir = resolve(join(agentsDir, msg.to));
+    if (!targetDir.startsWith(resolve(agentsDir) + sep)) {
+      log(this.opts, `mailbox: refusing target outside the agents dir (${msg.to})`);
+      return;
+    }
     await mkdir(join(targetDir, 'inbox'), { recursive: true });
     await this.appendLog(session.id, msg);
     await writeFile(join(targetDir, 'inbox', `${msg.id}.json`), JSON.stringify(msg, null, 2), 'utf8');
@@ -176,10 +236,20 @@ export class MailboxRouter {
     this.opts.emit(msg);
   }
 
+  /** Exact id match over the parsed log lines — a raw substring check would
+   *  false-positive on ids like m-<ts>-1 vs m-<ts>-12. */
   private async alreadyLogged(sessionId: string, id: string): Promise<boolean> {
     try {
       const raw = await readFile(this.logFile(sessionId), 'utf8');
-      return raw.includes(id);
+      for (const line of raw.split('\n')) {
+        if (line.trim().length === 0) continue;
+        try {
+          if ((JSON.parse(line) as { id?: unknown }).id === id) return true;
+        } catch {
+          // a corrupt line must not hide the rest of the history
+        }
+      }
+      return false;
     } catch {
       return false;
     }
@@ -189,8 +259,16 @@ export class MailboxRouter {
     return join(this.opts.root, sessionId, 'messages.jsonl');
   }
 
-  /** Append-only log with tmp+rename so a crash never truncates history. */
-  private async appendLog(sessionId: string, msg: FraktoleMessage): Promise<void> {
+  /** Append-only log with tmp+rename so a crash never truncates history.
+   *  Appends are queued so concurrent deliveries can neither interleave
+   *  the shared tmp file nor lose a line to last-rename-wins. */
+  private appendLog(sessionId: string, msg: FraktoleMessage): Promise<void> {
+    const run = this.appendQueue.then(() => this.doAppendLog(sessionId, msg));
+    this.appendQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async doAppendLog(sessionId: string, msg: FraktoleMessage): Promise<void> {
     const file = this.logFile(sessionId);
     let raw = '';
     try {

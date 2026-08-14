@@ -39,8 +39,9 @@ describe('tool documentation', () => {
     expect(ld).toContain('search_files');
   });
 
-  it('kill_agent documents the grant flow', () => {
-    expect(byName.get('kill_agent')!.description).toContain('ask_user');
-    expect(byName.get('kill_agent')!.description).toContain('confirm-kill');
+  it('kill_agent documents the direct-kill contract', () => {
+    const d = byName.get('kill_agent')!.description;
+    expect(d).toContain('Always allowed');
+    expect(d).toContain('Never target the orchestrator');
   });
 });

@@ -13,6 +13,10 @@ const MAX_PAYLOAD = 1024 * 1024; // 1 MiB per frame
 const RATE_LIMIT = 120; // messages per second per connection
 const AUTH_TIMEOUT_MS = 5000;
 const PING_INTERVAL_MS = 15_000;
+/** Closes a peer that misses this many consecutive pings (dead-peer eviction). */
+const PING_MISS_TOLERANCE = 3;
+/** Cap on tile subscriptions per connection (bounded fan-out per event). */
+const MAX_SUBS_PER_CONN = 64;
 
 export interface RemoteBridgeOpts {
   port?: number;
@@ -33,17 +37,41 @@ export interface RemoteBridgeOpts {
   logger?: (line: string) => void;
 }
 
+/** One tile subscription on a connection: the client-facing tile id (as the
+ *  phone knows it) plus the live ephemeral tile id resolved at subscribe time.
+ *  `liveTileId` is re-resolved on publish misses so a tile that (re)spawned
+ *  after subscribe still streams (see deliverTileEvent). */
+interface TileSub {
+  sessionId: string;
+  clientTileId: string;
+  liveTileId: string | null;
+}
+
 interface Conn {
   socket: WebSocket;
   device: { deviceId: string; name: string } | null;
   limiter: RateLimiter;
   authTimer: NodeJS.Timeout;
   pingTimer: NodeJS.Timeout | null;
-  /** clientFacingTileId → { sessionId, liveTileId } */
-  subs: Map<string, { sessionId: string; liveTileId: string | null }>;
+  /** Monotonic clock of the last pong, for dead-peer detection. */
+  lastPongAt: number;
+  /** True while the first frame's handler is still in flight; a second frame
+   *  before it settles is rejected (serializes the pair/auth handshake). */
+  firstFramePending: boolean;
+  /** clientFacingTileId → subscription. */
+  subs: Map<string, TileSub>;
 }
 
 const log = (opts: RemoteBridgeOpts, line: string): void => (opts.logger ?? console.log)(`[remote] ${line}`);
+
+/** Client-supplied session/tile/agent ids: a single path component (no `/`),
+ *  no control characters, bounded length. Real ids are `s-…` / `agent-N`
+ *  style tokens, so this rejects nothing legitimate while keeping ids safe to
+ *  use as composite keys and path components downstream. */
+const ID_RE = /^[A-Za-z0-9_.-]{1,128}$/;
+function validId(value: unknown): value is string {
+  return typeof value === 'string' && ID_RE.test(value) && value !== '.' && value !== '..';
+}
 
 /** LAN IPv4 addresses, for the Remote tab's connect hints. */
 export function lanIps(): string[] {
@@ -169,13 +197,19 @@ export class RemoteBridge {
     this.wss = wss;
     this.codes = new PairingCodes({ now: this.now });
     wss.on('connection', (socket) => this.onConnection(socket));
-    await new Promise<void>((resolve, reject) => {
-      listenError = reject;
-      server.listen(this.port, this.host, () => {
-        listenError = null;
-        resolve();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        listenError = reject;
+        server.listen(this.port, this.host, () => {
+          listenError = null;
+          resolve();
+        });
       });
-    });
+    } catch (err) {
+      // nothing is listening — a pairing code must not be shown (or usable)
+      this.codes = null;
+      throw err;
+    }
     this.started = true;
     log(this.opts, `listening on ${this.host}:${this.boundPort} (fingerprint ${this.fingerprint})`);
     this.scheduleRotate();
@@ -218,18 +252,25 @@ export class RemoteBridge {
       switch (ev.type) {
         case 'tile.output':
           for (const sub of conn.subs.values()) {
-            if (sub.sessionId === ev.sessionId && sub.liveTileId === ev.tileId) {
-              sendJson(conn.socket, { type: 'tile.output', params: { tileId: ev.tileId, data: ev.data, ts: ev.ts } });
+            if (sub.sessionId === ev.sessionId) {
+              void this.deliverTileEvent(
+                conn,
+                sub,
+                ev.tileId,
+                { type: 'tile.output', params: { tileId: ev.tileId, data: ev.data, ts: ev.ts } },
+              );
             }
           }
           break;
         case 'tile.state':
           for (const sub of conn.subs.values()) {
-            if (sub.sessionId === ev.sessionId && sub.liveTileId === ev.tileId) {
-              sendJson(conn.socket, {
-                type: 'tile.state',
-                params: { tileId: ev.tileId, alive: ev.alive, lines: ev.lines },
-              });
+            if (sub.sessionId === ev.sessionId) {
+              void this.deliverTileEvent(
+                conn,
+                sub,
+                ev.tileId,
+                { type: 'tile.state', params: { tileId: ev.tileId, alive: ev.alive, lines: ev.lines } },
+              );
             }
           }
           break;
@@ -243,12 +284,38 @@ export class RemoteBridge {
     }
   }
 
+  /** Streams a tile event to one subscription. The happy path is synchronous;
+   *  when the subscription's cached live tile id no longer matches the event
+   *  (the tile died and respawned since subscribe, or was stopped at subscribe
+   *  time) the mapping is re-resolved — so a phone never silently misses a
+   *  respawned tile's output and never picks up another tile's stream. */
+  private async deliverTileEvent(conn: Conn, sub: TileSub, eventTileId: string, frame: unknown): Promise<void> {
+    if (sub.liveTileId === eventTileId) {
+      sendJson(conn.socket, frame);
+      return;
+    }
+    if (!this.conns.has(conn)) return;
+    const live = await this.backend.liveTileOf(sub.sessionId, sub.clientTileId);
+    if (!this.conns.has(conn)) return;
+    if (live === eventTileId) {
+      sub.liveTileId = live;
+      sendJson(conn.socket, frame);
+    }
+  }
+
   // ————— connection lifecycle —————
 
   private onConnection(socket: WebSocket): void {
     if (this.conns.size >= this.maxConnections) {
-      socket.close(1008, 'too many connections');
-      return;
+      // never let unauthenticated sockets starve the real device: evict the
+      // oldest unauthenticated connection to make room for the newest one
+      const victim = [...this.conns].find((c) => c.device === null);
+      if (victim) {
+        this.closeConn(victim, 1008, 'replaced by new connection');
+      } else {
+        socket.close(1008, 'too many connections');
+        return;
+      }
     }
     const conn: Conn = {
       socket,
@@ -256,6 +323,8 @@ export class RemoteBridge {
       limiter: new RateLimiter(this.rateLimit, 1000, this.now),
       authTimer: setTimeout(() => this.closeConn(conn, 1008, 'auth timeout'), this.authTimeoutMs),
       pingTimer: null,
+      lastPongAt: 0,
+      firstFramePending: false,
       subs: new Map(),
     };
     conn.authTimer.unref();
@@ -320,31 +389,50 @@ export class RemoteBridge {
     }
     const msg = frame as Record<string, unknown>;
     if (!conn.device) {
+      // the first frame settles the handshake; a second frame while the
+      // first is still being processed must not interleave with it (an auth
+      // could otherwise race a pair on the same socket)
+      if (conn.firstFramePending) {
+        this.closeConn(conn, 1008, 'expected pair or auth');
+        return;
+      }
+      conn.firstFramePending = true;
       void this.handleFirstFrame(conn, msg);
       return;
     }
-    if (msg.type === 'pong') return; // heartbeat acknowledgement
+    if (msg.type === 'pong') {
+      conn.lastPongAt = this.now();
+      return; // heartbeat acknowledgement
+    }
     if (msg.id !== undefined && typeof msg.method === 'string') {
       void this.handleRpc(conn, msg.id, msg.method, msg.params);
     }
   }
 
-  /** The first frame on a socket must be pair or auth (§2/§3). */
+  /** The first frame on a socket must be pair or auth (§2/§3). Any failure —
+   *  including a store error — must close the connection: the auth timer was
+   *  already cleared, so a leftover socket would hold a connection slot
+   *  forever and never authenticate. */
   private async handleFirstFrame(conn: Conn, msg: Record<string, unknown>): Promise<void> {
     clearTimeout(conn.authTimer);
-    if (msg.type === 'pair') {
-      await this.handlePair(conn, msg);
-      return;
+    try {
+      if (msg.type === 'pair') {
+        await this.handlePair(conn, msg);
+        return;
+      }
+      if (msg.type === 'auth') {
+        await this.handleAuth(conn, msg);
+        return;
+      }
+      if (typeof msg.method === 'string') {
+        // RPC before auth: answer -32000 then close
+        sendJson(conn.socket, jsonError(msg.id, -32000, 'not authenticated'));
+      }
+      this.closeConn(conn, 1008, 'expected pair or auth');
+    } catch (err) {
+      log(this.opts, `first-frame handler failed: ${(err as Error).message}`);
+      this.closeConn(conn, 1011, 'internal error');
     }
-    if (msg.type === 'auth') {
-      await this.handleAuth(conn, msg);
-      return;
-    }
-    if (typeof msg.method === 'string') {
-      // RPC before auth: answer -32000 then close
-      sendJson(conn.socket, jsonError(msg.id, -32000, 'not authenticated'));
-    }
-    this.closeConn(conn, 1008, 'expected pair or auth');
   }
 
   private async handlePair(conn: Conn, msg: Record<string, unknown>): Promise<void> {
@@ -356,12 +444,9 @@ export class RemoteBridge {
       return;
     }
     const verdict = codes.check(code);
-    if (verdict === 'expired') {
-      sendJson(conn.socket, { type: 'pair-fail', reason: 'expired' });
-      this.closeConn(conn, 1008, 'expired');
-      return;
-    }
     if (verdict !== 'ok') {
+      // one verdict on the wire: a stale/expired code must not be told apart
+      // from a wrong one (an oracle would confirm guessed codes)
       sendJson(conn.socket, { type: 'pair-fail', reason: 'invalid-code' });
       this.closeConn(conn, 1008, 'invalid code');
       return;
@@ -405,14 +490,23 @@ export class RemoteBridge {
     }
     conn.device = { deviceId: device.deviceId, name: device.name };
     this.connsByDevice.set(device.deviceId, conn);
-    void this.store.touchDevice(device.deviceId, this.now());
+    void this.store
+      .touchDevice(device.deviceId, this.now())
+      .catch((err: unknown) => log(this.opts, `touchDevice failed: ${(err as Error).message}`));
     sendJson(conn.socket, {
       type: 'auth-ok',
       serverName: this.backend.serverName,
       version: this.backend.version,
       deviceId: device.deviceId,
     });
+    conn.lastPongAt = this.now();
     conn.pingTimer = setInterval(() => {
+      // dead-peer eviction: a phone that stops answering pings must not hold
+      // a connection slot (and its subscriptions) forever
+      if (this.now() - conn.lastPongAt > this.pingIntervalMs * PING_MISS_TOLERANCE) {
+        this.closeConn(conn, 1008, 'pong timeout');
+        return;
+      }
       sendJson(conn.socket, { type: 'ping', params: { ts: Date.now() } });
     }, this.pingIntervalMs);
     conn.pingTimer.unref();
@@ -434,7 +528,7 @@ export class RemoteBridge {
         }
         case 'tiles.list':
         case 'tile.list': {
-          if (typeof p.sessionId !== 'string') {
+          if (!validId(p.sessionId)) {
             fail('sessionId required');
             return;
           }
@@ -442,12 +536,16 @@ export class RemoteBridge {
           return;
         }
         case 'tile.subscribe': {
-          if (typeof p.sessionId !== 'string' || typeof p.tileId !== 'string') {
+          if (!validId(p.sessionId) || !validId(p.tileId)) {
             fail('sessionId and tileId required');
             return;
           }
+          if (conn.subs.size >= MAX_SUBS_PER_CONN) {
+            fail('too many subscriptions');
+            return;
+          }
           const liveTileId = await this.backend.liveTileOf(p.sessionId, p.tileId);
-          conn.subs.set(`${p.sessionId}/${p.tileId}`, { sessionId: p.sessionId, liveTileId });
+          conn.subs.set(`${p.sessionId}/${p.tileId}`, { sessionId: p.sessionId, clientTileId: p.tileId, liveTileId });
           // stream one snapshot of the recent scrollback tail (§4) — tagged
           // with the LIVE tile id so the client can match streamed events
           const snapshot = await this.backend.snapshot(p.tileId);
@@ -456,7 +554,7 @@ export class RemoteBridge {
           return;
         }
         case 'tile.unsubscribe': {
-          if (typeof p.tileId !== 'string') {
+          if (!validId(p.tileId)) {
             fail('tileId required');
             return;
           }
@@ -467,7 +565,7 @@ export class RemoteBridge {
           return;
         }
         case 'scrollback.read': {
-          if (typeof p.tileId !== 'string') {
+          if (!validId(p.tileId)) {
             fail('tileId required');
             return;
           }
@@ -477,7 +575,7 @@ export class RemoteBridge {
         }
         case 'task.send': {
           const kind = p.kind === 'note' ? 'note' : 'task';
-          if (typeof p.agentId !== 'string' || typeof p.body !== 'string') {
+          if (!validId(p.agentId) || typeof p.body !== 'string') {
             fail('agentId and body required');
             return;
           }
@@ -490,11 +588,29 @@ export class RemoteBridge {
           return;
         }
         case 'agent.spawn': {
+          const cwd = typeof p.cwd === 'string' ? p.cwd : undefined;
+          if (cwd !== undefined && cwd.length > 1024) {
+            fail('invalid cwd');
+            return;
+          }
+          const kind = typeof p.kind === 'string' ? p.kind : undefined;
+          const name = typeof p.name === 'string' ? p.name : undefined;
+          // the launcher command is written into a spawned shell — no newlines
+          // or control characters may cross that boundary
+          if (
+            // eslint-disable-next-line no-control-regex
+            (kind !== undefined && (kind.length > 128 || /[\r\n\x00-\x1f]/.test(kind))) ||
+            // eslint-disable-next-line no-control-regex
+            (name !== undefined && (name.length > 64 || /[\r\n\x00-\x1f]/.test(name)))
+          ) {
+            fail('invalid spawn params');
+            return;
+          }
           ok(
             await this.backend.spawnAgent({
-              cwd: typeof p.cwd === 'string' ? p.cwd : undefined,
-              kind: typeof p.kind === 'string' ? p.kind : undefined,
-              name: typeof p.name === 'string' ? p.name : undefined,
+              cwd,
+              kind,
+              name,
             }),
           );
           return;
@@ -506,7 +622,9 @@ export class RemoteBridge {
           sendJson(conn.socket, jsonError(id, -32601, `unknown method: ${method}`));
       }
     } catch (err) {
-      sendJson(conn.socket, jsonError(id, -32000, `internal error: ${(err as Error).message}`));
+      // never leak internal error details (paths, ENOENT strings) to the phone
+      log(this.opts, `RPC ${method} failed: ${(err as Error).message}`);
+      sendJson(conn.socket, jsonError(id, -32000, 'internal error'));
     }
   }
 

@@ -18,7 +18,12 @@ import type { OpenedSession, SessionFile, SessionSummary } from '../src/shared/i
 export class SessionStore {
   constructor(private readonly root: string) {}
 
+  /** Session ids are always internally generated as s-<ts36>-<rand36>
+   *  (see newSession); anything else must never reach the filesystem. */
+  private static readonly ID_RE = /^s-[a-z0-9-]+$/;
+
   private dir(id: string): string {
+    if (!SessionStore.ID_RE.test(id)) throw new Error(`invalid session id ${id}`);
     return join(this.root, id);
   }
 
@@ -55,6 +60,7 @@ export class SessionStore {
   async list(): Promise<SessionSummary[]> {
     const entries = await this.readIndex();
     const summaries: SessionSummary[] = [];
+    const corrupt: Array<{ id: string; name: string; updatedAt: number }> = [];
     for (const entry of entries) {
       try {
         const session = await this.load(entry.id);
@@ -66,8 +72,14 @@ export class SessionStore {
           projectPath: session.projectPath,
         });
       } catch {
-        // a corrupt/missing session.json must not hide every other session
+        // a corrupt/missing session.json must not hide every other session;
+        // drop its index entry so it does not linger undeletable forever
+        corrupt.push(entry);
       }
+    }
+    if (corrupt.length > 0) {
+      const bad = new Set(corrupt.map((e) => e.id));
+      await this.writeIndex(entries.filter((e) => !bad.has(e.id))).catch(() => undefined);
     }
     return summaries;
   }
@@ -78,7 +90,7 @@ export class SessionStore {
     const session: SessionFile = {
       version: 1,
       id,
-      name: name.trim() || `Session ${new Date().toLocaleDateString()}`,
+      name: typeof name === 'string' && name.trim().length > 0 ? name.trim() : `Session ${new Date().toLocaleDateString()}`,
       createdAt: now,
       updatedAt: now,
       nextAgentSeq: 1,
@@ -95,7 +107,7 @@ export class SessionStore {
 
   async rename(id: string, name: string): Promise<SessionFile> {
     const session = await this.load(id);
-    session.name = name.trim() || session.name;
+    session.name = typeof name === 'string' && name.trim().length > 0 ? name.trim() : session.name;
     session.updatedAt = Date.now();
     await this.persist(this.sessionFile(id), session);
     await this.touchIndex(id, session.name, session.updatedAt);
@@ -105,7 +117,13 @@ export class SessionStore {
   async load(id: string): Promise<SessionFile> {
     const raw = await readFile(this.sessionFile(id), 'utf8');
     const session = JSON.parse(raw) as SessionFile;
-    if (session.version !== 1 || typeof session.id !== 'string') {
+    if (
+      session.version !== 1 ||
+      typeof session.id !== 'string' ||
+      typeof session.name !== 'string' ||
+      !Array.isArray(session.tiles) ||
+      typeof session.nextAgentSeq !== 'number'
+    ) {
       throw new Error(`unsupported session format in ${id}`);
     }
     return session;

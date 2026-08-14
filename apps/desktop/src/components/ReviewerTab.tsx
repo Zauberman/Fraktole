@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import type { ReviewerEntry, ReviewerGoal, ReviewerQuestion, ReviewerStatus, ReviewerToolCallEvent } from '../ipc.js';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReviewerEntry, ReviewerGoal, ReviewerQuestion, ReviewerStatus, ReviewerToolCallEvent, SubGoal } from '../ipc.js';
 import { bridge, type Settings } from '../ipc.js';
 import {
   DEFAULT_MODELS,
@@ -67,6 +67,10 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const [thinkingOpen, setThinkingOpen] = useState<Record<number, boolean>>({});
   const [thinkingGlobal, setThinkingGlobal] = useState(false);
   const [goal, setGoal] = useState<ReviewerGoal | null>(null);
+  const [subGoals, setSubGoals] = useState<SubGoal[]>([]);
+  /** Active autonomous-mode variant (null = normal mode). */
+  const [variant, setVariant] = useState<string | null>(null);
+  const [autonomyOpen, setAutonomyOpen] = useState(false);
   const [question, setQuestion] = useState<ReviewerQuestion | null>(null);
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
@@ -95,13 +99,19 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     return seqRef.current;
   };
 
-  // mount: load the persisted transcript, current config
-  useEffect(() => {
+  // reload the persisted transcript (mount and after a restart, which
+  // clears the live items)
+  const loadTranscript = useCallback((): void => {
     void bridge.reviewerTranscript(sessionId).then((rows) => {
       if (rows.length > 0) {
         setItems(rows.map((entry) => ({ seq: nextSeq(), at: entry.at, kind: 'message', role: entry.role, content: entry.content, thinking: entry.thinking, finalized: true })));
       }
     });
+  }, [sessionId]);
+
+  // mount: load the persisted transcript, current config
+  useEffect(() => {
+    loadTranscript();
     void bridge.getSettings().then((s) => {
       setSettings(s);
       setDraft({
@@ -113,7 +123,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         reasoningEffort: s.reviewer.reasoningEffort ?? '',
       });
     });
-  }, [sessionId]);
+  }, [sessionId, loadTranscript]);
 
   useEffect(() => {
     const unsubs = [
@@ -121,10 +131,15 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         setStatus(s.status as ReviewerStatus);
         setStatusError(s.error);
         setRunningModel(s.model);
+        setVariant(s.variant ?? null);
       }),
       bridge.onReviewerStream(sessionId, (ev) => {
         const { delta, thinking } = ev;
         if (delta) setStreamChars((n) => n + delta.length);
+        // seq is allocated here, outside the updater: an updater may be
+        // re-invoked by React, and an impure increment inside it would mint
+        // duplicate keys
+        const seq = nextSeq();
         setItems((its) => {
           const last = its[its.length - 1];
           const live =
@@ -143,7 +158,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             return [
               ...its,
               {
-                seq: nextSeq(),
+                seq,
                 at: Date.now(),
                 kind: 'message',
                 role: 'assistant',
@@ -159,9 +174,10 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       }),
       bridge.onReviewerToolCall(sessionId, (ev: ReviewerToolCallEvent) => {
         if (ev.state === 'start') {
+          const seq = nextSeq();
           setItems((its) => [
             ...its,
-            { seq: nextSeq(), at: ev.at, kind: 'tool', callId: ev.callId, name: ev.name, args: JSON.stringify(ev.args), state: 'start' },
+            { seq, at: ev.at, kind: 'tool', callId: ev.callId, name: ev.name, args: JSON.stringify(ev.args), state: 'start' },
           ]);
         } else {
           setItems((its) =>
@@ -177,6 +193,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         }
       }),
       bridge.onReviewerMessage(sessionId, (entry) => {
+        const seq = nextSeq();
         setItems((its) => {
           if (entry.role === 'assistant') {
             const last = its[its.length - 1];
@@ -192,10 +209,13 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               return next;
             }
           }
-          return [...its, { seq: nextSeq(), at: entry.at, kind: 'message', role: entry.role, content: entry.content, thinking: entry.thinking, finalized: true }];
+          return [...its, { seq, at: entry.at, kind: 'message', role: entry.role, content: entry.content, thinking: entry.thinking, finalized: true }];
         });
       }),
-      bridge.onReviewerGoal(sessionId, (ev) => setGoal(ev.goal)),
+      bridge.onReviewerGoal(sessionId, (ev) => {
+        setGoal(ev.goal);
+        setSubGoals(ev.subGoals ?? []);
+      }),
       bridge.onReviewerQuestion(sessionId, (ev) => setQuestion(ev)),
       bridge.onReviewerUsage(sessionId, (ev) => {
         setUsage({ inputTokens: ev.inputTokens, cachedTokens: ev.cachedTokens, outputTokens: ev.outputTokens });
@@ -208,17 +228,38 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   }, [sessionId]);
 
   // keep the transcript pinned to the newest content — but never yank a
-  // reader who scrolled up; pinning resumes once they return to the bottom
+  // reader who scrolled up; pinning resumes once they return to the bottom.
+  // Programmatic pin-scrolls must not un-pin via their own scroll event.
   const pinnedRef = useRef(true);
+  const programmaticScrollRef = useRef(false);
   const onScroll = (): void => {
     const el = scrollRef.current;
-    if (!el) return;
+    if (!el || programmaticScrollRef.current) return;
     pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   };
+  const pinToBottom = (): void => {
+    const el = scrollRef.current;
+    if (!el || !pinnedRef.current) return;
+    programmaticScrollRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+    });
+  };
+  useEffect(() => {
+    // let the new content lay out first (a single frame can still race a
+    // second layout — tool cards growing when their results land), then pin
+    requestAnimationFrame(() => requestAnimationFrame(pinToBottom));
+  }, [items]);
+  // re-pin on container size changes while the user is still at the bottom
+  // (scrollbar appearance, column resize)
   useEffect(() => {
     const el = scrollRef.current;
-    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [items]);
+    if (!el) return;
+    const ro = new ResizeObserver(() => pinToBottom());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const submit = (): void => {
     const text = input.trim();
@@ -256,6 +297,9 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     void bridge.restartReviewer(sessionId).then((ok) => {
       setStatus(ok ? 'running' : 'unconfigured');
       setItems([]);
+      // the live transcript was cleared; reload the persisted one so the
+      // history does not vanish until the next remount
+      loadTranscript();
     });
   };
 
@@ -331,6 +375,51 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           {runningModel && <span className="reviewer-model-label">{runningModel}</span>}
         </div>
         <div className="reviewer-actions">
+          <div className="autonomy-wrap">
+            <button
+              type="button"
+              className={`btn btn-sm${variant ? ' btn-active' : ''}`}
+              title="autonomous mode — plugin system for the reviewer"
+              onClick={() => setAutonomyOpen((o) => !o)}
+            >
+              auto compose{variant ? ` · ${variant}` : ''}
+            </button>
+            {autonomyOpen && (
+              <>
+                <div className="autonomy-menu-backdrop" onMouseDown={() => setAutonomyOpen(false)} />
+                <div className="autonomy-menu" onMouseDown={(e) => e.stopPropagation()}>
+                  <div className="autonomy-menu-label">Autonomous mode</div>
+                  <button
+                    type="button"
+                    className={`autonomy-item${variant === null ? ' autonomy-item-current' : ''}`}
+                    onClick={() => {
+                      setAutonomyOpen(false);
+                      void bridge.setReviewerAutonomy(sessionId, null).then((res) => {
+                        if (!res.ok) setComposeError(res.error ?? 'could not clear autonomous mode');
+                      });
+                    }}
+                  >
+                    off
+                  </button>
+                  {(['cyber', 'frontend', 'bugs'] as const).map((id) => (
+                    <button
+                      key={id}
+                      type="button"
+                      className={`autonomy-item${variant === id ? ' autonomy-item-current' : ''}`}
+                      onClick={() => {
+                        setAutonomyOpen(false);
+                        void bridge.setReviewerAutonomy(sessionId, id).then((res) => {
+                          if (!res.ok) setComposeError(res.error ?? 'autonomous mode failed to start');
+                        });
+                      }}
+                    >
+                      {id}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           <button
             type="button"
             className={`btn btn-sm${thinkingGlobal ? ' btn-active' : ''}`}
@@ -372,12 +461,12 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               <label>
                 model
                 <input
-                  list="reviewer-models"
+                  list={`reviewer-models-${sessionId}`}
                   value={draft.model}
                   onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
                   placeholder={DEFAULT_MODELS[derived]}
                 />
-                <datalist id="reviewer-models">
+                <datalist id={`reviewer-models-${sessionId}`}>
                   {(liveModels ?? REVIEWER_MODEL_SUGGESTIONS[derived]).map((m) => (
                     <option key={m} value={m} />
                   ))}
@@ -585,6 +674,18 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           <button type="button" className="btn btn-sm" title="clear the goal" onClick={() => void bridge.setReviewerGoal(sessionId, null)}>
             clear
           </button>
+          {subGoals.length > 0 && (
+            <ul className="reviewer-subgoals">
+              {subGoals.map((s) => (
+                <li key={s.id} className={`reviewer-subgoal${s.state === 'done' ? ' reviewer-subgoal-done' : ''}`}>
+                  <span className="reviewer-subgoal-mark" aria-hidden="true">
+                    {s.state === 'done' ? '✓' : '·'}
+                  </span>
+                  {sanitizeChatText(s.text)}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

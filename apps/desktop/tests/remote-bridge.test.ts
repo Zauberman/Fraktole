@@ -248,14 +248,14 @@ describe('pairing', () => {
     expect(e.bridge.pairingCode!.code).not.toBe(code);
   });
 
-  it('reports expired codes once past the TTL', async () => {
+  it('answers a code past its TTL like a wrong one (no oracle)', async () => {
     const e = await startBridge();
     envs.push(e);
     const code = e.bridge.pairingCode!.code;
     // simulate the code aging out
     (e.bridge as unknown as { codes: { current: { expiresAt: number } } }).codes!.current!.expiresAt = Date.now() - 1;
     const { reply } = await doPair(e, code);
-    expect(reply).toMatchObject({ type: 'pair-fail', reason: 'expired' });
+    expect(reply).toMatchObject({ type: 'pair-fail', reason: 'invalid-code' });
   });
 });
 
@@ -361,14 +361,32 @@ describe('connection policy', () => {
     a2.client.ws.close();
   });
 
-  it('rejects a 5th concurrent connection', async () => {
+  it('evicts the oldest unauthenticated connection to admit a newer one', async () => {
     const e = await startBridge({ authTimeoutMs: 5000 });
     envs.push(e);
     const clients = await Promise.all([connect(e.port), connect(e.port), connect(e.port), connect(e.port)]);
+    // a 5th connection evicts the OLDEST unauthenticated one — unauthenticated
+    // sockets can never starve the real device
+    const fifth = await connect(e.port);
+    await clients[0].closed;
+    expect(clients[0].closeCode).toBe(1008);
+    expect(fifth.ws.readyState).toBe(WebSocket.OPEN);
+    for (const c of [clients[1], clients[2], clients[3]]) c.ws.close();
+    fifth.ws.close();
+  });
+
+  it('rejects a connection when every slot is authenticated', async () => {
+    const e = await startBridge({ authTimeoutMs: 5000 });
+    envs.push(e);
+    const tokens: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      tokens.push(((await doPair(e, undefined, `Device ${i}`)).reply as { token: string }).token);
+    }
+    const authed = await Promise.all(tokens.map((t) => doAuth(e, t)));
     const fifth = await connect(e.port);
     await fifth.closed;
     expect(fifth.closeCode).toBe(1008);
-    for (const c of clients) c.ws.close();
+    for (const a of authed) a.client.ws.close();
   });
 
   it('closes a connection that exceeds 120 msg/s', async () => {

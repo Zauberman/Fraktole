@@ -44,6 +44,9 @@ export function useFileEditor(): FileEditorState {
   useEffect(() => {
     filesRef.current = files;
   }, [files]);
+  // latest content, updated synchronously with each edit so a save issued in
+  // the same task as the last keystroke can never write stale bytes
+  const contentRef = useRef<Map<string, string>>(new Map());
 
   const openFile = useCallback(async (path: string): Promise<void> => {
     // already open? just activate
@@ -54,9 +57,14 @@ export function useFileEditor(): FileEditorState {
     try {
       const st = await bridge.statFile(path);
       const readOnly = st.size > MAX_EDITABLE;
-      const { content } = await bridge.readFile(path);
+      // a file too large to edit must not be read into memory at all
+      const { content } = readOnly ? { content: '' } : await bridge.readFile(path);
       const name = path.split('/').pop() ?? path;
-      setFiles((prev) => [...prev, { path, name, content, lang: langFor(path), dirty: false, readOnly }]);
+      setFiles((prev) =>
+        // dedupe inside the updater: two concurrent openFile calls for the
+        // same path must not register the file twice
+        prev.some((f) => f.path === path) ? prev : [...prev, { path, name, content, lang: langFor(path), dirty: false, readOnly }],
+      );
       setActivePath(path);
     } catch {
       // unreadable file — stay put
@@ -68,22 +76,24 @@ export function useFileEditor(): FileEditorState {
   }, []);
 
   const closeFile = useCallback((path: string): void => {
-    setFiles((prev) => {
-      const next = prev.filter((f) => f.path !== path);
-      return next;
-    });
+    const f = filesRef.current.find((x) => x.path === path);
+    if (f && f.dirty && !window.confirm(`Discard unsaved changes in "${f.name}"?`)) return;
+    contentRef.current.delete(path);
+    setFiles((prev) => prev.filter((f2) => f2.path !== path));
     setActivePath((cur) => (cur === path ? null : cur));
   }, []);
 
   const updateContent = useCallback((path: string, content: string): void => {
+    contentRef.current.set(path, content);
     setFiles((prev) => prev.map((f) => (f.path === path ? { ...f, content, dirty: true } : f)));
   }, []);
 
   const saveFile = useCallback(async (path: string): Promise<boolean> => {
     const f = filesRef.current.find((x) => x.path === path);
     if (!f || f.readOnly) return false;
+    const content = contentRef.current.get(path) ?? f.content;
     try {
-      await bridge.writeFile(path, f.content);
+      await bridge.writeFile(path, content);
       setFiles((prev) => prev.map((x) => (x.path === path ? { ...x, dirty: false } : x)));
       return true;
     } catch {

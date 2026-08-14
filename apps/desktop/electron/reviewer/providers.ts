@@ -24,6 +24,10 @@ export interface ProviderMsg {
   toolCalls?: ReviewerToolCall[];
   /** tool only: which call this result answers */
   toolCallId?: string;
+  /** user only (in-memory): the message was already emitted to the
+   *  renderer at queue time — run() must not emit it again. Never
+   *  persisted. */
+  announced?: boolean;
   /** assistant only: the model's reasoning output, captured from the
    *  provider's thinking field (deepseek reasoning_content, ollama
    *  thinking, anthropic thinking blocks, ...). Persisted with the
@@ -106,7 +110,9 @@ export async function* readBytes(body: ReadableStream<Uint8Array<ArrayBufferLike
   }
 }
 
-/** SSE reader: yields parsed JSON payloads of `data:` lines until [DONE]. */
+/** SSE reader: yields parsed JSON payloads of `data:` lines until [DONE].
+ *  Malformed payloads are skipped (one bad line must never kill the turn),
+ *  and a final event without a trailing newline is still delivered. */
 export async function* ssePayloads(body: ReadableStream<Uint8Array<ArrayBufferLike>>): AsyncGenerator<unknown> {
   let buf = '';
   for await (const chunk of readBytes(body)) {
@@ -119,12 +125,31 @@ export async function* ssePayloads(body: ReadableStream<Uint8Array<ArrayBufferLi
       const data = line.slice(5).trim();
       if (data === '[DONE]') return;
       if (data.length === 0) continue;
-      yield JSON.parse(data);
+      try {
+        yield JSON.parse(data) as unknown;
+      } catch {
+        // malformed payload — skip
+      }
+    }
+  }
+  // flush an unterminated tail: the final chunk may carry the usage block
+  // or [DONE] without a trailing newline
+  const tail = buf.trim();
+  if (tail.startsWith('data:')) {
+    const data = tail.slice(5).trim();
+    if (data === '[DONE]') return;
+    if (data.length > 0) {
+      try {
+        yield JSON.parse(data) as unknown;
+      } catch {
+        // malformed payload — skip
+      }
     }
   }
 }
 
-/** NDJSON reader (ollama-style streaming). */
+/** NDJSON reader (ollama-style streaming). Malformed lines are skipped and
+ *  a final unterminated line (the done/usage chunk) is still delivered. */
 export async function* ndjsonPayloads(body: ReadableStream<Uint8Array<ArrayBufferLike>>): AsyncGenerator<unknown> {
   let buf = '';
   for await (const chunk of readBytes(body)) {
@@ -134,7 +159,19 @@ export async function* ndjsonPayloads(body: ReadableStream<Uint8Array<ArrayBuffe
       const line = buf.slice(0, idx).trim();
       buf = buf.slice(idx + 1);
       if (line.length === 0) continue;
-      yield JSON.parse(line);
+      try {
+        yield JSON.parse(line) as unknown;
+      } catch {
+        // malformed line — skip
+      }
+    }
+  }
+  const tail = buf.trim();
+  if (tail.length > 0) {
+    try {
+      yield JSON.parse(tail) as unknown;
+    } catch {
+      // malformed line — skip
     }
   }
 }

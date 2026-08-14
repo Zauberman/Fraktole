@@ -7,9 +7,13 @@
 const CSI_RE = /\x1b\[[0-9;?]*[- /]*[@-~]/g;
 // eslint-disable-next-line no-control-regex
 const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+// two-byte sequences: charset select (\x1b(0), DECKPAM/DECKPNM (\x1b= >),
+// DECALN (\x1b#8), ISO 2022 (\x1b%G) and friends
+// eslint-disable-next-line no-control-regex
+const TWO_BYTE_RE = /\x1b[()#%=>][0-9A-Za-z]?/g;
 
 export function stripAnsi(text: string): string {
-  return text.replace(OSC_RE, '').replace(CSI_RE, '');
+  return text.replace(OSC_RE, '').replace(CSI_RE, '').replace(TWO_BYTE_RE, '');
 }
 
 export interface TileRecorderOpts {
@@ -99,6 +103,14 @@ export class TileRecorder {
       if (lines > 0 || (live && live.length > 0)) out.set(tileId, this.summary(tileId));
     }
     return out;
+  }
+
+  /** Releases all state for a tile (its PTY exited or the tile was pruned)
+   *  so long-lived sessions do not accumulate per-tile memory forever. */
+  drop(tileId: string): void {
+    this.buffers.delete(tileId);
+    this.partial.delete(tileId);
+    this.lastAt.delete(tileId);
   }
 
   private append(tileId: string, line: string): void {

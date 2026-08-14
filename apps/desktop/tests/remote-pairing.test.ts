@@ -47,26 +47,26 @@ describe('PairingCodes', () => {
     expect(codes.check(code)).toBe('invalid-code');
   });
 
-  it('reports the correct code as expired after the TTL, then rotates', () => {
+  it('answers a stale code with invalid-code, then rotates on demand', () => {
     const { codes, tick } = make(5 * 60_000);
     const { code } = codes.currentOrNew();
     tick(5 * 60_000 + 1);
-    expect(codes.check(code)).toBe('expired');
-    expect(codes.check(code)).toBe('expired');
+    // a stale code gets the exact same verdict as a wrong one — no oracle
+    expect(codes.check(code)).toBe('invalid-code');
+    expect(codes.check(code)).toBe('invalid-code');
     // after rotation a fresh code is accepted
     const next = codes.currentOrNew();
     expect(next.code).not.toBe(code);
     expect(codes.check(next.code)).toBe('ok');
   });
 
-  it('does not reveal which code expired vs which is wrong', () => {
+  it('does not reveal whether a guess matched an expired code', () => {
     const { codes, tick } = make(5 * 60_000);
     const { code } = codes.currentOrNew();
     tick(5 * 60_000 + 1);
-    // the expired code still answers 'expired' (not 'invalid') — but a wrong
-    // code gets 'invalid-code' in both states
+    // the expired code and a wrong code get the exact same verdict
     expect(codes.check('AAAA-AAAA')).toBe('invalid-code');
-    expect(codes.check(code)).toBe('expired');
+    expect(codes.check(code)).toBe('invalid-code');
   });
 
   it('rotate() always produces a fresh code', () => {

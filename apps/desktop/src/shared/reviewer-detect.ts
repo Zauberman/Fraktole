@@ -62,7 +62,9 @@ export function resolveProvider(key: string, opts: ResolveOpts = {}): ProviderRe
     return {
       adapter: 'ollama',
       model: opts.modelHint ?? DEFAULT_MODELS.ollama,
-      baseUrl: 'http://localhost:11434',
+      // a configured endpoint must win: keyless resolution is not
+      // hard-wired to localhost (remote/self-hosted ollama works)
+      baseUrl: opts.baseUrl ?? 'http://localhost:11434',
       ambiguous: false,
     };
   }
@@ -92,6 +94,17 @@ export function resolveProvider(key: string, opts: ResolveOpts = {}): ProviderRe
       };
     }
     if (opts.providerHint === 'openai' || (opts.baseUrl && opts.baseUrl.length > 0)) {
+      // a custom baseUrl that is clearly an ollama-native endpoint (the
+      // /api/chat surface, or the default ollama port without a /v1 path)
+      // must use the ollama wire format — not the openai one
+      if (!opts.providerHint && isOllamaNative(opts.baseUrl!)) {
+        return {
+          adapter: 'ollama',
+          model: opts.modelHint ?? DEFAULT_MODELS.ollama,
+          baseUrl: opts.baseUrl!,
+          ambiguous: false,
+        };
+      }
       return {
         adapter: 'openai',
         model: opts.modelHint ?? DEFAULT_MODELS.openai,
@@ -113,4 +126,11 @@ export function resolveProvider(key: string, opts: ResolveOpts = {}): ProviderRe
     baseUrl: opts.baseUrl ?? BASE_URLS.openai,
     ambiguous: !opts.baseUrl,
   };
+}
+
+/** Ollama-native endpoints speak /api/chat, not the OpenAI-compatible
+ *  /v1/chat/completions surface — the wire format must match. */
+function isOllamaNative(baseUrl: string): boolean {
+  const u = baseUrl.toLowerCase();
+  return u.includes('/api/chat') || (u.includes(':11434') && !u.includes('/v1'));
 }

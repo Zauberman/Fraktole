@@ -155,6 +155,8 @@ const api = {
     ipcRenderer.on(IPC.reviewerUsage, listener);
     return () => ipcRenderer.removeListener(IPC.reviewerUsage, listener);
   },
+  setReviewerAutonomy: (sessionId: string, variant: string | null): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.reviewerAutonomy, sessionId, variant),
   listReviewerModels: (opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]> =>
     ipcRenderer.invoke(IPC.reviewerListModels, opts),
   onReviewerQuestion: (sessionId: string, cb: (ev: ReviewerQuestion) => void): (() => void) => {

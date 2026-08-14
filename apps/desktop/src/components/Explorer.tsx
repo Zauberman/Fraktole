@@ -15,22 +15,24 @@ interface TreeRowProps {
   entry: FsEntry;
   depth: number;
   children: FsEntry[] | null;
-  loading: boolean;
   expanded: boolean;
-  onToggle(): void;
+  dirs: Map<string, FsEntry[]>;
+  expandedSet: Set<string>;
+  loadingPaths: Set<string>;
+  onToggleDir(path: string): void;
   onOpenFile(path: string): void;
 }
 
 function TreeRow(props: TreeRowProps): React.JSX.Element {
-  const { entry, depth, children, loading, expanded, onToggle, onOpenFile } = props;
+  const { entry, depth, children, expanded, dirs, expandedSet, loadingPaths, onToggleDir, onOpenFile } = props;
   const pad = { paddingLeft: `${10 + depth * 12}px` };
   if (entry.isDir) {
     return (
       <li>
-        <button type="button" className="tree-row" style={pad} onClick={onToggle}>
+        <button type="button" className="tree-row" style={pad} onClick={() => onToggleDir(entry.path)}>
           <span className={`tree-chevron${expanded ? ' tree-chevron-open' : ''}`}>{expanded ? '▾' : '▸'}</span>
           <span className="tree-name">{entry.name}</span>
-          {loading && <span className="tree-loading">…</span>}
+          {loadingPaths.has(entry.path) && <span className="tree-loading">…</span>}
         </button>
         {expanded && children !== null && (
           <ul className="tree-children">
@@ -39,10 +41,12 @@ function TreeRow(props: TreeRowProps): React.JSX.Element {
                 key={c.path}
                 entry={c}
                 depth={depth + 1}
-                children={null}
-                loading={false}
-                expanded={false}
-                onToggle={() => undefined}
+                dirs={dirs}
+                expandedSet={expandedSet}
+                loadingPaths={loadingPaths}
+                children={expandedSet.has(c.path) ? (dirs.get(c.path) ?? null) : null}
+                expanded={expandedSet.has(c.path)}
+                onToggleDir={onToggleDir}
                 onOpenFile={onOpenFile}
               />
             ))}
@@ -70,21 +74,27 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
   const [treeOpen, setTreeOpen] = useState(false);
   const [dirs, setDirs] = useState<Map<string, FsEntry[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(false);
-  const loadingRef = useRef(false);
+  const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
+  const loadingRef = useRef<Set<string>>(new Set());
 
+  // per-path loading: expanding a second dir while a first is in flight must
+  // not drop the second load
   const loadDir = useCallback(async (path: string): Promise<void> => {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-    setLoading(true);
+    if (loadingRef.current.has(path)) return;
+    loadingRef.current.add(path);
+    setLoadingPaths((prev) => new Set(prev).add(path));
     try {
       const entries = await bridge.listDir(path);
       setDirs((prev) => new Map(prev).set(path, entries));
     } catch {
       setDirs((prev) => new Map(prev).set(path, []));
     } finally {
-      loadingRef.current = false;
-      setLoading(false);
+      loadingRef.current.delete(path);
+      setLoadingPaths((prev) => {
+        const next = new Set(prev);
+        next.delete(path);
+        return next;
+      });
     }
   }, []);
 
@@ -173,10 +183,12 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
                             key={c.path}
                             entry={c}
                             depth={0}
+                            dirs={dirs}
+                            expandedSet={expanded}
+                            loadingPaths={loadingPaths}
                             children={expanded.has(c.path) ? (dirs.get(c.path) ?? null) : null}
-                            loading={loading && expanded.has(c.path)}
                             expanded={expanded.has(c.path)}
-                            onToggle={() => toggleDir(c.path)}
+                            onToggleDir={toggleDir}
                             onOpenFile={onOpenFile}
                           />
                         ))}
