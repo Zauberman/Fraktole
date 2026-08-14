@@ -145,3 +145,56 @@ describe('send_keystroke + type_into_tile', () => {
     expect(await tools.run('type_into_tile', { agentId: '', text: '' }, ctx)).toContain('error:');
   });
 });
+
+describe('read_tile', () => {
+  it('full returns the entire recording, tail returns a slice', async () => {
+    const root = await makeTree();
+    const recorder = new TileRecorder();
+    recorder.record('tile-1', 'a\nb\nc\nd\ne');
+    const ctx: ReviewerToolContext = {
+      ...ctxFor(root),
+      recorder,
+      tileOfAgent: (id) => (id === 'agent-1' ? 'tile-1' : null),
+    };
+    const full = await tools.run('read_tile', { agentId: 'agent-1', full: true }, ctx);
+    expect(full).toBe('a\nb\nc\nd\ne');
+    const tail = await tools.run('read_tile', { agentId: 'agent-1', tail: 2 }, ctx);
+    expect(tail).toBe('d\ne');
+  });
+
+  it('full is capped by the result cap', async () => {
+    const root = await makeTree();
+    const recorder = new TileRecorder();
+    recorder.record('tile-1', Array.from({ length: 4000 }, (_, i) => `line-${i}`).join('\n'));
+    const ctx: ReviewerToolContext = {
+      ...ctxFor(root),
+      recorder,
+      tileOfAgent: (id) => (id === 'agent-1' ? 'tile-1' : null),
+    };
+    const out = await tools.run('read_tile', { agentId: 'agent-1', full: true }, ctx);
+    expect(out.length).toBeLessThan(20_000 + 100);
+    expect(out).toContain('line-0');
+    expect(out).toContain('[truncated]');
+  });
+});
+
+describe('read_scrollback + list_messages', () => {
+  it('read_scrollback serves a tail well beyond 1000 lines', async () => {
+    const root = await makeTree();
+    const sessionDir = join(root, 'sessions', 's1');
+    await mkdir(join(sessionDir, 'scrollback'), { recursive: true });
+    const lines = Array.from({ length: 1200 }, (_, i) => `sb-${i}`);
+    await writeFile(join(sessionDir, 'scrollback', 'agent-1.json'), JSON.stringify({ lines }));
+    const ctx: ReviewerToolContext = { ...ctxFor(root), sessionDir };
+    const out = await tools.run('read_scrollback', { agentId: 'agent-1', tail: 5000 }, ctx);
+    expect(out!.split('\n').length).toBe(1200);
+    expect(out!.startsWith('sb-0'));
+  });
+
+  it('list_messages guides the model when the mailbox log is empty', async () => {
+    const root = await makeTree();
+    const ctx: ReviewerToolContext = { ...ctxFor(root), listMessages: async () => [] };
+    const out = await tools.run('list_messages', {}, ctx);
+    expect(out).toBe('(no messages yet — tasks you dispatch with send_message appear here)');
+  });
+});

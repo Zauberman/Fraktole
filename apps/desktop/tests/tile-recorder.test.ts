@@ -62,6 +62,23 @@ describe('TileRecorder', () => {
     expect(re.lastIndex).toBe(0);
   });
 
+  it('full returns the entire recording including the live line', () => {
+    const r = new TileRecorder();
+    r.record('t1', 'a\nb\nc\n');
+    r.record('t1', 'd\nlive-here');
+    expect(r.full('t1')).toEqual(['a', 'b', 'c', 'd', 'live-here']);
+    expect(r.tail('t1', 2)).toEqual(['d', 'live-here']);
+  });
+
+  it('keeps the newest 5000 lines by default', () => {
+    const r = new TileRecorder();
+    for (let i = 1; i <= 5100; i += 1) r.record('t1', `line-${i}\n`);
+    const all = r.full('t1');
+    expect(all.length).toBe(5000);
+    expect(all[0]).toBe('line-101');
+    expect(all[4999]).toBe('line-5100');
+  });
+
   it('has() is true only after content, summary reports lines', () => {
     const r = new TileRecorder();
     expect(r.has('t1')).toBe(false);

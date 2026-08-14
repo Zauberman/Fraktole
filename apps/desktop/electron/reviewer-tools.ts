@@ -115,7 +115,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'read_tile',
     description:
-      'Read the live recording of an agent tile: the last `tail` lines, or lines matching `grep`. Prefer a small tail (5-40). The recording is transient — use read_scrollback for the persisted full history.',
+      'Read the live recording of an agent tile: the last `tail` lines, lines matching `grep`, or the ENTIRE recording with `full`. Prefer a small tail (5-40); use full when you need the complete output of a finished step. The recording is transient — use read_scrollback for the persisted full history.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -123,11 +123,15 @@ const TOOLS: ReviewerTool[] = [
         tileId: { type: 'string', description: 'tile id (from list_tiles); agentId also works' },
         tail: { type: 'number', description: 'last N lines to return (default 40)' },
         grep: { type: 'string', description: 'return only lines matching this regex' },
+        full: { type: 'boolean', description: 'true returns the entire recorded output (not just a tail)' },
       },
     },
     async run(args, ctx) {
       const tileId = resolveTile(args, ctx);
       if (!tileId) return 'error: unknown tile — call list_tiles first';
+      if (args.full === true) {
+        return capResult(ctx.recorder.full(tileId).join('\n') || '(empty)');
+      }
       if (typeof args.grep === 'string' && args.grep.length > 0) {
         if (RE_UNSAFE.test(args.grep)) return 'error: bad grep regex: unsafe pattern (nested quantifiers)';
         let re: RegExp;
@@ -144,12 +148,12 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'read_scrollback',
-    description: "Read the persisted scrollback of an agent (full history captured at save time, up to 1000 lines). Use it when read_tile's live tail is not enough to judge a completed piece of work.",
+    description: "Read the persisted scrollback of an agent (full history captured at save time, up to 5000 lines). Use it when read_tile's live tail is not enough to judge a completed piece of work.",
     inputSchema: {
       type: 'object',
       properties: {
         agentId: { type: 'string', description: 'agent id (from list_tiles)' },
-        tail: { type: 'number', description: 'last N lines (default 200, max 1000)' },
+        tail: { type: 'number', description: 'last N lines (default 200, max 5000)' },
       },
     },
     async run(args, ctx) {
@@ -175,7 +179,7 @@ const TOOLS: ReviewerTool[] = [
       } catch {
         return 'error: corrupt scrollback file';
       }
-      const n = clampInt(args.tail, 200, 1, 1000);
+      const n = clampInt(args.tail, 200, 1, 5000);
       return capResult(lines.slice(-n).join('\n') || '(empty)');
     },
   },
@@ -459,7 +463,7 @@ const TOOLS: ReviewerTool[] = [
           at: new Date(m.at).toISOString(),
           body: sanitizeChatText(m.body).slice(0, 300),
         }));
-      return rows.length > 0 ? JSON.stringify(rows, null, 2) : '(no messages)';
+      return rows.length > 0 ? JSON.stringify(rows, null, 2) : '(no messages yet — tasks you dispatch with send_message appear here)';
     },
   },
   {

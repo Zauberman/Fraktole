@@ -14,6 +14,7 @@ import { ReviewerHost, type ReviewerToolCallEvent } from './reviewer.js';
 import { AUTONOMY_VARIANTS, type AutonomyVariant } from './reviewer-plugins.js';
 import { forkProject } from './fork.js';
 import { ReviewerTools } from './reviewer-tools.js';
+import { exportSessionBundle, importSessionBundle, type BundleResult } from './session-bundle.js';
 import { SessionRegistry, SessionRuntime } from './session-runtime.js';
 import { SessionStore } from './sessions.js';
 import { SettingsStore } from './settings.js';
@@ -119,6 +120,9 @@ function buildMenu(currentTheme: ThemeId, sessions: Array<{ id: string; name: st
     { label: 'New Session…', click: () => mainWindow?.webContents.send(IPC.menuSession, { action: 'new' }) },
     { label: 'Save As…', click: () => mainWindow?.webContents.send(IPC.menuSession, { action: 'save-as' }) },
     { label: 'Rename…', click: () => mainWindow?.webContents.send(IPC.menuSession, { action: 'rename' }) },
+    { type: 'separator' },
+    { label: 'Export Session Bundle…', click: () => mainWindow?.webContents.send(IPC.menuSession, { action: 'export-bundle' }) },
+    { label: 'Import Session Bundle…', click: () => mainWindow?.webContents.send(IPC.menuSession, { action: 'import-bundle' }) },
   ];
   if (sessions.length > 0) {
     sessionItems.push({ type: 'separator' });
@@ -711,6 +715,32 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle(IPC.sessionStart, (_e, id: string) => {
       registry?.start(id);
       remote?.publish({ type: 'session.state', sessionId: id, alive: true });
+    });
+    ipcMain.handle(IPC.sessionExportBundle, async (_e, id: string): Promise<BundleResult> => {
+      const session = await sessions.load(id).catch(() => null);
+      const base = (session?.name ?? id).replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 60);
+      const picked = await dialog.showSaveDialog(mainWindow!, {
+        title: 'Export session bundle',
+        defaultPath: `fraktole-session-${base}.tar.gz`,
+        filters: [{ name: 'Fraktole session bundle', extensions: ['tar.gz'] }],
+      });
+      if (picked.canceled || !picked.filePath) return { ok: false as const, canceled: true as const, error: '' };
+      return exportSessionBundle(sessionsRoot, id, picked.filePath);
+    });
+    ipcMain.handle(IPC.sessionImportBundle, async (): Promise<BundleResult> => {
+      const picked = await dialog.showOpenDialog(mainWindow!, {
+        title: 'Import session bundle',
+        filters: [{ name: 'Fraktole session bundle', extensions: ['tar.gz'] }],
+        properties: ['openFile'],
+      });
+      if (picked.canceled || picked.filePaths.length === 0) {
+        return { ok: false as const, canceled: true as const, error: '' };
+      }
+      const res = await importSessionBundle(sessionsRoot, picked.filePaths[0]!);
+      if (!res.ok || !res.session) return res;
+      registry!.open(res.session.id, res.session);
+      refreshMenu();
+      return { ok: true as const, session: res.session };
     });
     ipcMain.handle(IPC.projectOpen, (_e, path: string): Promise<OpenedSession> => {
       const run = projectOpenQueue.then(async (): Promise<OpenedSession> => {

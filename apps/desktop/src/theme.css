@@ -882,6 +882,11 @@ button:active:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* the list grows freely up to this cap, then scrolls — the goal text
+     and clear button stay visible above it */
+  max-height: 10rem;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .reviewer-subgoal {
@@ -1995,6 +2000,29 @@ button:active:not(:disabled) {
 
 .term-menu-item:hover:not(:disabled) {
   background: var(--hover-surface);
+}
+
+/* ————— app notice chip (session export/import feedback) ————— */
+
+.app-notice {
+  position: fixed;
+  right: var(--s4);
+  bottom: var(--s4);
+  z-index: 70;
+  max-width: min(420px, calc(100vw - 2 * var(--s4)));
+  padding: var(--s2) var(--s3);
+  background: var(--bg-overlay);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-dialog);
+  font-family: var(--font-mono-alt);
+  font-size: var(--text-xs);
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .term-menu-item:focus-visible {

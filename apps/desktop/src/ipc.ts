@@ -1,5 +1,6 @@
 import type {
   AppInfo,
+  BundleResult,
   FraktoleMessage,
   FsEntry,
   FsStat,
@@ -31,6 +32,7 @@ import type {
 
 export type {
   AppInfo,
+  BundleResult,
   FraktoleMessage,
   FsEntry,
   FsStat,
@@ -87,6 +89,8 @@ export interface FraktoleBridge {
   deleteSession(id: string): Promise<void>;
   stopSession(id: string): Promise<void>;
   startSession(id: string): Promise<void>;
+  exportSessionBundle(id: string): Promise<BundleResult>;
+  importSessionBundle(): Promise<BundleResult>;
   openProject(path: string): Promise<OpenedSession>;
   sendMessage(sessionId: string, args: SendMessageArgs): Promise<boolean>;
   listMessages(sessionId: string): Promise<FraktoleMessage[]>;

@@ -15,6 +15,12 @@ import type { OpenedSession, SessionFile, SessionSummary } from '../src/shared/i
  * Every write goes through a tmp-file + rename so a crash can never leave a
  * half-written file behind (same discipline as SettingsStore).
  */
+/** Session ids are always internally generated as s-<ts36>-<rand36>
+ *  (see newSessionId); anything else must never reach the filesystem. */
+export function newSessionId(): string {
+  return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export class SessionStore {
   constructor(private readonly root: string) {}
 
@@ -85,7 +91,7 @@ export class SessionStore {
   }
 
   async newSession(name: string): Promise<OpenedSession> {
-    const id = `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = newSessionId();
     const now = Date.now();
     const session: SessionFile = {
       version: 1,

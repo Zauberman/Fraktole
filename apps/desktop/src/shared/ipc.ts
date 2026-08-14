@@ -23,6 +23,8 @@ export const IPC = {
   sessionDelete: 'session:delete',
   sessionStop: 'session:stop',
   sessionStart: 'session:start',
+  sessionExportBundle: 'session:export-bundle',
+  sessionImportBundle: 'session:import-bundle',
   projectOpen: 'project:open',
   fsListDir: 'fs:list-dir',
   fsReadFile: 'fs:read-file',
@@ -71,9 +73,15 @@ export const IPC = {
 } as const;
 
 export interface MenuSessionAction {
-  action: 'new' | 'save-as' | 'rename' | 'open' | 'delete' | 'stop' | 'start';
+  action: 'new' | 'save-as' | 'rename' | 'open' | 'delete' | 'stop' | 'start' | 'export-bundle' | 'import-bundle';
   id?: string;
 }
+
+/** Result of exporting/importing a session bundle (tar.gz). `canceled` is
+ *  set when the user dismissed the file dialog — the UI shows no error. */
+export type BundleResult =
+  | { ok: true; path?: string; session?: SessionFile }
+  | { ok: false; canceled?: boolean; error: string };
 
 export interface AppInfo {
   version: string;

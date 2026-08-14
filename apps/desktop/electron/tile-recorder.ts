@@ -31,7 +31,7 @@ export class TileRecorder {
   private readonly lastAt = new Map<string, number>();
 
   constructor(opts: TileRecorderOpts = {}) {
-    this.maxLines = opts.maxLines ?? 2000;
+    this.maxLines = opts.maxLines ?? 5000;
     this.maxLineLen = opts.maxLineLen ?? 4096;
   }
 
@@ -68,6 +68,14 @@ export class TileRecorder {
     const live = this.partial.get(tileId);
     const withLive = live && live.length > 0 ? [...lines, live] : lines;
     return withLive.slice(Math.max(0, withLive.length - n));
+  }
+
+  /** The ENTIRE recording of the tile (every buffered line plus the
+   *  in-flight line) — the full picture for the reviewer, not a tail. */
+  full(tileId: string): string[] {
+    const lines = this.buffers.get(tileId) ?? [];
+    const live = this.partial.get(tileId);
+    return live && live.length > 0 ? [...lines, live] : lines;
   }
 
   /** Lines matching `re` (reset between tests so /g flags are safe). */

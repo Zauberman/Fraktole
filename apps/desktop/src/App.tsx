@@ -62,6 +62,7 @@ export function App(): React.JSX.Element {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogDefault, setDialogDefault] = useState('/home/walid');
   const [sessionDialog, setSessionDialog] = useState<{ mode: 'new' } | { mode: 'rename' | 'save-as'; value: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   /** URL pushed by the reviewer's open_test_page; forwarded to the TestTab. */
   const [pendingTestUrl, setPendingTestUrl] = useState<string | null>(null);
   const defaultCwd = useRef('/home/walid');
@@ -375,6 +376,24 @@ export function App(): React.JSX.Element {
         void stopSession(action.id);
       } else if (action.action === 'start' && action.id) {
         void startSession(action.id);
+      } else if (action.action === 'export-bundle') {
+        if (!activeId) {
+          setNotice('no active session to export');
+          return;
+        }
+        void bridge.exportSessionBundle(activeId).then((res) => {
+          if (res.ok) setNotice(`session exported to ${res.path}`);
+          else if (!res.canceled) setNotice(res.error);
+        });      } else if (action.action === 'import-bundle') {
+        void bridge.importSessionBundle().then((res) => {
+          if (res.ok && res.session) {
+            activate(res.session.id);
+            void refreshSessions();
+            setNotice(`session "${res.session.name}" imported`);
+          } else if (!res.ok && !res.canceled) {
+            setNotice(res.error);
+          }
+        });
       }
     });
     // the reviewer's open_test_page: switch to the Test tab and load
@@ -400,6 +419,12 @@ export function App(): React.JSX.Element {
       window.clearTimeout(t2);
     };
   }, []);
+
+  useEffect(() => {
+    if (!notice) return;
+    const t = window.setTimeout(() => setNotice(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [notice]);
 
   return (
     <ThemeProvider themeId={themeId} setTheme={setTheme}>
@@ -496,6 +521,11 @@ export function App(): React.JSX.Element {
           onConfirm={confirmSessionDialog}
           onCancel={() => setSessionDialog(null)}
         />
+      )}
+      {notice && (
+        <div className="app-notice" role="status" onClick={() => setNotice(null)}>
+          {notice}
+        </div>
       )}
       {!bootGone && <BootOverlay leaving={bootLeaving} />}
       </div>

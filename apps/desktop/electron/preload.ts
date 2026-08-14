@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import {
   IPC,
   type AppInfo,
+  type BundleResult,
   type FraktoleMessage,
   type FsEntry,
   type FsStat,
@@ -88,6 +89,8 @@ const api = {
   deleteSession: (id: string): Promise<void> => ipcRenderer.invoke(IPC.sessionDelete, id),
   stopSession: (id: string): Promise<void> => ipcRenderer.invoke(IPC.sessionStop, id),
   startSession: (id: string): Promise<void> => ipcRenderer.invoke(IPC.sessionStart, id),
+  exportSessionBundle: (id: string): Promise<BundleResult> => ipcRenderer.invoke(IPC.sessionExportBundle, id),
+  importSessionBundle: (): Promise<BundleResult> => ipcRenderer.invoke(IPC.sessionImportBundle),
   openProject: (path: string): Promise<OpenedSession> => ipcRenderer.invoke(IPC.projectOpen, path),
 
   sendMessage: (sessionId: string, args: SendMessageArgs): Promise<boolean> =>
