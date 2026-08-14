@@ -7,6 +7,15 @@ export type ForkResult = { ok: true; path: string } | { ok: false; error: string
 /** Directories never carried into a fork — heavy or recursive by nature. */
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.fraktole-auto', 'release']);
 const MAX_ENTRIES = 50_000;
+/** Error codes meaning "this entry is unreadable or not a plain file" — a
+ *  fork is best-effort: one permission-denied file must not abort the whole
+ *  run. EISDIR covers symlinks pointing at directories. */
+const SKIPPABLE_CODES = new Set(['EACCES', 'EPERM', 'ENOENT', 'EISDIR']);
+
+function isSkippable(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code !== undefined && SKIPPABLE_CODES.has(code);
+}
 
 /** Clones (git) or copies the project into a fresh fork folder.
  *  - git repos with a clean worktree: `git clone --local` (fast, history).
@@ -51,7 +60,13 @@ export async function forkProject(src: string, dest: string, home: string): Prom
   try {
     await mkdir(dest, { recursive: true });
     const walk = async (from: string, to: string): Promise<boolean> => {
-      const entries = await readdir(from, { withFileTypes: true });
+      let entries;
+      try {
+        entries = await readdir(from, { withFileTypes: true });
+      } catch (err) {
+        if (isSkippable(err)) return true; // unreadable directory — skip the subtree
+        throw err;
+      }
       for (const entry of entries) {
         if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
         if (++count > MAX_ENTRIES) return false;
@@ -60,9 +75,16 @@ export async function forkProject(src: string, dest: string, home: string): Prom
         if (entry.isDirectory()) {
           await mkdir(t, { recursive: true });
           if (!(await walk(s, t))) return false;
-        } else {
-          await copyFile(s, t);
+        } else if (entry.isFile() || entry.isSymbolicLink()) {
+          try {
+            await copyFile(s, t);
+          } catch (err) {
+            if (isSkippable(err)) continue; // unreadable or broken link — skip
+            throw err;
+          }
         }
+        // other entry types (fifo, socket, device) are never copied —
+        // copying a fifo would block the fork forever
       }
       return true;
     };
@@ -72,6 +94,8 @@ export async function forkProject(src: string, dest: string, home: string): Prom
     }
     return { ok: true, path: dest };
   } catch (err) {
+    // never leave a partial fork behind on a failed copy
+    await rm(dest, { recursive: true, force: true }).catch(() => undefined);
     return { ok: false, error: `fork failed: ${(err as Error).message}` };
   }
 }

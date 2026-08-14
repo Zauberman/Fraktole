@@ -87,6 +87,107 @@ describe('OpenAIProvider', () => {
     ]);
   });
 
+  it('keeps full arguments when a fragment is independently-valid JSON (deepseek token-boundary split)', async () => {
+    // the exact split captured from api.deepseek.com: numbers and literals
+    // stream as their own delta (`2`, `20`, `true`) — a fragment that is
+    // valid JSON alone must never replace the accumulated prefix
+    const frags = ['{', '"', 'path', '"', ': ', '"', 'front', 'end', '/src', '"', ', ', '"', 'depth', '"', ': ', '2', '}'];
+    stubFetch(
+      sseStream([
+        ...frags.map((f, i) =>
+          JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    i === 0
+                      ? { index: 0, id: 'c1', function: { name: 'list_dir', arguments: f } }
+                      : { index: 0, function: { arguments: f } },
+                  ],
+                },
+              },
+            ],
+          }),
+        ),
+        '[DONE]',
+      ]),
+    );
+    const res = await new OpenAIProvider().complete(baseOpts());
+    expect(res.toolCalls).toEqual([{ id: 'c1', name: 'list_dir', args: { path: 'frontend/src', depth: 2 } }]);
+  });
+
+  it('keeps the prefix across multiple calls when number fragments stream standalone', async () => {
+    const listFrags = ['{', '"', 'path', '"', ': ', '"', 'frontend', '"', ', ', '"', 'depth', '"', ': ', '2', '}'];
+    const killFrags = ['{', '"', 'agentId', '"', ': ', '"', 'agent', '-', '1', '"', '}'];
+    const lines: string[] = [];
+    listFrags.forEach((f, i) =>
+      lines.push(
+        JSON.stringify({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  i === 0
+                    ? { index: 0, id: 'c1', function: { name: 'list_dir', arguments: f } }
+                    : { index: 0, function: { arguments: f } },
+                ],
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    killFrags.forEach((f, i) =>
+      lines.push(
+        JSON.stringify({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  i === 0
+                    ? { index: 1, id: 'c2', function: { name: 'kill_agent', arguments: f } }
+                    : { index: 1, function: { arguments: f } },
+                ],
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    lines.push('[DONE]');
+    stubFetch(sseStream(lines));
+    const res = await new OpenAIProvider().complete(baseOpts());
+    expect(res.toolCalls).toEqual([
+      { id: 'c1', name: 'list_dir', args: { path: 'frontend', depth: 2 } },
+      { id: 'c2', name: 'kill_agent', args: { agentId: 'agent-1' } },
+    ]);
+  });
+
+  it('still tolerates providers that re-send the full payload per delta (post-hoc fallback)', async () => {
+    const full = '{"agentId":"tile-1","tail":5}';
+    stubFetch(
+      sseStream([
+        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'read_tile', arguments: full } }] } }] }),
+        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: full } }] } }] }),
+        '[DONE]',
+      ]),
+    );
+    const res = await new OpenAIProvider().complete(baseOpts());
+    // accumulated `{a}{a}` does not parse — the last fragment alone is the payload
+    expect(res.toolCalls).toEqual([{ id: 'c1', name: 'read_tile', args: { agentId: 'tile-1', tail: 5 } }]);
+  });
+
+  it('marks genuinely corrupt accumulated arguments as _raw', async () => {
+    stubFetch(
+      sseStream([
+        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_tile","arguments":"2}"}}]}}]}',
+        '[DONE]',
+      ]),
+    );
+    const res = await new OpenAIProvider().complete(baseOpts());
+    expect(res.toolCalls).toEqual([{ id: 'c1', name: 'read_tile', args: { _raw: '2}' } }]);
+  });
+
   it('reports API errors', async () => {
     stubFetch(new Response('nope', { status: 401 }), 401);
     await expect(new OpenAIProvider().complete(baseOpts())).rejects.toThrow('openai API error 401');

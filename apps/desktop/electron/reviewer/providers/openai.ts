@@ -104,9 +104,9 @@ export class OpenAIProvider implements ProviderClient {
     let text = '';
     let thinking = '';
     let usage: ProviderUsage | undefined;
-    const calls = new Map<number, { id: string; name: string; args: string }>();
-    const ensure = (i: number): { id: string; name: string; args: string } => {
-      const cur = calls.get(i) ?? { id: '', name: '', args: '' };
+    const calls = new Map<number, { id: string; name: string; args: string; lastFrag: string }>();
+    const ensure = (i: number): { id: string; name: string; args: string; lastFrag: string } => {
+      const cur = calls.get(i) ?? { id: '', name: '', args: '', lastFrag: '' };
       calls.set(i, cur);
       return cur;
     };
@@ -168,12 +168,15 @@ export class OpenAIProvider implements ProviderClient {
         if (raw.id) cur.id = raw.id;
         if (raw.function?.name) cur.name = raw.function.name;
         if (raw.function?.arguments) {
-          // tolerate providers that re-send the full arguments per delta:
-          // if the accumulated text does not parse but the new fragment
-          // alone does, the fragment IS the complete payload — replace
-          const frag = raw.function.arguments;
-          const combined = cur.args + frag;
-          cur.args = isJson(combined) ? combined : isJson(frag) ? frag : combined;
+          // arguments arrive as token-boundary fragments (deepseek splits
+          // even single tokens like `2` or `true` into their own delta) —
+          // they must be concatenated, never replaced: a fragment that
+          // happens to be valid JSON alone (a number, a literal) would
+          // otherwise destroy the accumulated prefix. Providers that
+          // re-send the FULL payload per delta are tolerated post-hoc in
+          // parseArgs (the last fragment alone parses).
+          cur.lastFrag = raw.function.arguments;
+          cur.args += raw.function.arguments;
         }
       }
     }
@@ -182,25 +185,29 @@ export class OpenAIProvider implements ProviderClient {
       .filter((c) => c.name.length > 0)
       // index-disambiguated fallback ids: two same-name calls without
       // provider ids must never share a tool_call_id
-      .map((c, i) => ({ id: c.id || `tc-${c.name}-${i}`, name: c.name, args: parseArgs(c.args) }));
+      .map((c, i) => ({ id: c.id || `tc-${c.name}-${i}`, name: c.name, args: parseArgs(c.args, c.lastFrag) }));
     return { text, toolCalls, thinking, usage };
   }
 }
 
-function parseArgs(raw: string): Record<string, unknown> {
+/** Parses the accumulated tool-call arguments. `lastFrag` is the final
+ *  streamed fragment: a provider that re-sends the complete payload per
+ *  delta accumulates `{a}{a}` — when the accumulated text does not parse
+ *  but the last fragment alone does, the fragment IS the complete payload
+ *  (full-resend tolerance, applied post-hoc so genuine fragment streams
+ *  are never corrupted by it). */
+function parseArgs(raw: string, lastFrag?: string): Record<string, unknown> {
   if (raw.trim().length === 0) return {};
   try {
     return JSON.parse(raw) as Record<string, unknown>;
   } catch {
+    if (lastFrag && lastFrag.length > 0 && lastFrag !== raw) {
+      try {
+        return JSON.parse(lastFrag) as Record<string, unknown>;
+      } catch {
+        // fall through to _raw
+      }
+    }
     return { _raw: raw };
-  }
-}
-
-function isJson(text: string): boolean {
-  try {
-    JSON.parse(text);
-    return true;
-  } catch {
-    return false;
   }
 }
