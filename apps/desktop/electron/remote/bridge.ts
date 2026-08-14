@@ -448,10 +448,11 @@ export class RemoteBridge {
           }
           const liveTileId = await this.backend.liveTileOf(p.sessionId, p.tileId);
           conn.subs.set(`${p.sessionId}/${p.tileId}`, { sessionId: p.sessionId, liveTileId });
-          // stream one snapshot of the recent scrollback tail (§4)
+          // stream one snapshot of the recent scrollback tail (§4) — tagged
+          // with the LIVE tile id so the client can match streamed events
           const snapshot = await this.backend.snapshot(p.tileId);
-          sendJson(conn.socket, { type: 'tile.snapshot', params: { tileId: p.tileId, data: snapshot } });
-          ok({ ok: true });
+          sendJson(conn.socket, { type: 'tile.snapshot', params: { tileId: liveTileId ?? p.tileId, data: snapshot } });
+          ok({ ok: true, liveTileId: liveTileId ?? p.tileId });
           return;
         }
         case 'tile.unsubscribe': {

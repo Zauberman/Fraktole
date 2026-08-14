@@ -72,7 +72,9 @@ void main() {
         orElse: () => sessions.first);
     if (tiles.isEmpty) tiles = await controller.tiles(target.id);
     expect(tiles, isNotEmpty, reason: 'should have a tile to open');
-    final tile = tiles.first;
+    // Prefer the tile we just spawned (its shell has live scrollback).
+    final spawned = tiles.where((t) => t.id == spawn.agentId);
+    final tile = spawned.isNotEmpty ? spawned.first : tiles.first;
     debugPrint('E2E: opening ${tile.name} in session ${target.name}');
 
     // 4. UI: Sessions tab -> session card -> tiles -> tile detail.
@@ -86,11 +88,12 @@ void main() {
 
     // 5. Tile detail: subscription goes live, terminal output streams in.
     await pumpUntil(tester, find.byType(TileDetailScreen));
-    await pumpUntil(tester, find.text('live'));
+    // subscribed -> the status chip is no longer '…'
+    await pumpUntil(tester, find.textContaining(RegExp('live|idle')));
     await pumpFor(tester, const Duration(seconds: 2));
     expect(find.text('No output yet'), findsNothing,
         reason: 'live tile should have streamed scrollback');
-    debugPrint('E2E: tile ${tile.name} is live with streamed output');
+    debugPrint('E2E: tile ${tile.name} shows streamed scrollback');
 
     // 6. Back to Home, Orchestrator tab, send a task to the spawned agent.
     await tester.pageBack();

@@ -264,11 +264,22 @@ class RemoteClient implements RemoteGateway {
     if (type == 'pong') return;
     final event = ServerEvent.fromJson(json);
     if (event is TileOutputEvent) {
-      _tileOutputs.add(event);
+      _tileOutputs.add(TileOutputEvent(
+        tileId: _clientTileId(event.tileId),
+        data: event.data,
+        ts: event.ts,
+      ));
     } else if (event is TileSnapshotEvent) {
-      _tileSnapshots.add(event);
+      _tileSnapshots.add(TileSnapshotEvent(
+        tileId: _clientTileId(event.tileId),
+        data: event.data,
+      ));
     } else if (event is TileStateEvent) {
-      _tileStates.add(event);
+      _tileStates.add(TileStateEvent(
+        tileId: _clientTileId(event.tileId),
+        alive: event.alive,
+        lines: event.lines,
+      ));
     } else if (event is SessionStateEvent) {
       _sessionStates.add(event);
     } else if (event is MessageNewEvent) {
@@ -354,18 +365,38 @@ class RemoteClient implements RemoteGateway {
     return completer.future.whenComplete(timer.cancel);
   }
 
+  /// Reverse mapping: live tile id (as tagged in streamed events) -> the
+  /// client-facing agent id the UI subscribed with.
+  final Map<String, String> _liveToClientTile = {};
+
+  /// Resolves a tile id from a streamed event to the client-facing id the
+  /// UI knows. The desktop tags tile.output/snapshot/state with the *live*
+  /// recorder tile id, which differs from the agent id the UI uses; without
+  /// this mapping the tile detail screen would never match its events.
+  String _clientTileId(String eventTileId) =>
+      _liveToClientTile[eventTileId] ?? eventTileId;
+
   @override
   Future<void> subscribeTile({
     required String sessionId,
     required String tileId,
   }) async {
     _subscribedTiles[tileId] = sessionId;
-    await rpc('tile.subscribe', {'sessionId': sessionId, 'tileId': tileId});
+    final result = await rpc(
+        'tile.subscribe', {'sessionId': sessionId, 'tileId': tileId});
+    // the desktop answers { ok: true } (and, on current builds, liveTileId)
+    if (result is Map<String, Object?>) {
+      final live = result['liveTileId'];
+      if (live is String && live.isNotEmpty) {
+        _liveToClientTile[live] = tileId;
+      }
+    }
   }
 
   @override
   Future<void> unsubscribeTile({required String tileId}) async {
     _subscribedTiles.remove(tileId);
+    _liveToClientTile.removeWhere((_, v) => v == tileId);
     try {
       await rpc('tile.unsubscribe', {'tileId': tileId});
     } catch (_) {}

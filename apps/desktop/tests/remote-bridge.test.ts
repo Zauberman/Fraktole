@@ -442,9 +442,11 @@ describe('JSON-RPC', () => {
     const { client } = await authed(e);
 
     const sub = await client.rpc(5, 'tile.subscribe', { sessionId: 's1', tileId: 'agent-1' });
-    expect(sub).toMatchObject({ id: 5, result: { ok: true } });
+    expect(sub).toMatchObject({ id: 5, result: { ok: true, liveTileId: 'live-1' } });
+    // the snapshot is tagged with the LIVE tile id so the client can match
+    // streamed tile.output / tile.state events (which carry live-1)
     const snapshot = await client.waitFor((m) => (m as { type?: string })?.type === 'tile.snapshot');
-    expect(snapshot).toMatchObject({ type: 'tile.snapshot', params: { tileId: 'agent-1', data: 'snapshot-tail' } });
+    expect(snapshot).toMatchObject({ type: 'tile.snapshot', params: { tileId: 'live-1', data: 'snapshot-tail' } });
 
     // live output for the subscribed tile arrives
     e.bridge.publish({ type: 'tile.output', sessionId: 's1', tileId: 'live-1', data: 'hello', ts: 42 });
