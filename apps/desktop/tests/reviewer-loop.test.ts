@@ -565,7 +565,7 @@ describe('ReviewerHost', () => {
     expect(provider.complete).toHaveBeenCalledTimes(2);
   });
 
-  it('kill_agent without a grant refuses and never kills', async () => {
+  it('kill_agent without a grant refuses, and the model still replies', async () => {
     const recorder = new TileRecorder();
     const ctx = ctxFor(recorder);
     const provider = new FakeProvider([
@@ -585,9 +585,40 @@ describe('ReviewerHost', () => {
     await host.start();
     await host.prompt('kill');
     await settle(80);
-    expect(provider.complete).toHaveBeenCalledTimes(1); // the failed tool ends the turn (no spin)
+    // the failed tool must NOT end the turn — the model reads the error
+    // result and replies (bounded by MAX_TOOL_ITERATIONS, not by a break)
+    expect(provider.complete).toHaveBeenCalledTimes(2);
     expect(host.conversation.some((e) => e.content.includes('no kill grant for agent-1'))).toBe(true);
+    expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'refused')).toBe(true);
     expect(ctx.killAgent).not.toHaveBeenCalled();
+    expect(host.status).toBe('running');
+  });
+
+  it('a tool error mid-turn does not stop the reviewer (no final reply is lost)', async () => {
+    const recorder = new TileRecorder();
+    const ctx = ctxFor(recorder);
+    const provider = new FakeProvider([
+      { text: '', toolCalls: [{ id: 'c1', name: 'job_status', args: { jobId: 'j-gone' } }] },
+      { text: 'job not found — moving on', toolCalls: [] },
+    ]);
+    const host = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
+      sessionId: 's1',
+      sessionDir: '/tmp/sessions/s1',
+      cwd: '/tmp/proj',
+      recorder,
+      toolContext: ctx,
+      createProvider: () => provider,
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
+    });
+    await host.start();
+    await host.prompt('check the job');
+    await settle(80);
+    expect(provider.complete).toHaveBeenCalledTimes(2);
+    const tools = host.conversation.filter((e) => e.role === 'tool');
+    expect(tools.some((t) => String(t.content).startsWith('error:'))).toBe(true);
+    expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'job not found — moving on')).toBe(true);
+    expect(host.status).toBe('running');
   });
 
   it('a confirm-kill yes grants exactly one kill', async () => {
@@ -622,12 +653,13 @@ describe('ReviewerHost', () => {
     await host.start();
     void host.prompt('kill with permission');
     await settle(120);
-    // the failed second kill ends the turn — 3 provider calls total
-    expect(provider.complete).toHaveBeenCalledTimes(3);
+    // the failed second kill does NOT end the turn — the model replies
+    expect(provider.complete).toHaveBeenCalledTimes(4);
     expect(ctx.killAgent).toHaveBeenCalledTimes(1);
     expect(ctx.killAgent).toHaveBeenCalledWith('tile-1');
     expect(host.conversation.some((e) => e.content.includes('killed tile-1'))).toBe(true);
     expect(host.conversation.some((e) => e.content.includes('no kill grant for agent-1'))).toBe(true);
+    expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'done')).toBe(true);
   });
 
   it('/kill (killAgentNow) kills directly without a grant and refuses the orchestrator', async () => {
@@ -1201,6 +1233,7 @@ describe('ReviewerHost', () => {
         { text: '', toolCalls: [{ id: 'a1', name: 'list_tiles', args: {} }, { id: 'a2', name: 'spawn_agent', args: { kind: 'opencode' } }, { id: 'a3', name: 'send_message', args: { to: 'agent-1' } }] },
         { text: 'turn two reply', toolCalls: [] },
         { text: 'turn three reply', toolCalls: [] },
+        { text: 'final reply', toolCalls: [] },
       ],
       recorder,
       { contextBudgetTokens: 4 },
@@ -1217,7 +1250,10 @@ describe('ReviewerHost', () => {
     for (let i = 0; i < msgs.length; i++) {
       const m = msgs[i]!;
       if (m.role === 'tool') {
-        const owner = msgs[i - 1];
+        // scan back past any tool chain to the owning assistant
+        let p = i - 1;
+        while (p >= 0 && msgs[p]!.role === 'tool') p -= 1;
+        const owner = p >= 0 ? msgs[p] : null;
         expect(owner?.role, `orphan tool at ${i}`).toBe('assistant');
         expect((owner as ProviderMsg).toolCalls?.some((c) => c.id === m.toolCallId), `tool ${m.toolCallId} has no owner call`).toBe(true);
       }
@@ -1348,5 +1384,104 @@ describe('ReviewerHost', () => {
     const { readFile } = await import('node:fs/promises');
     const raw = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')) as ReviewerState;
     expect(raw.usage).toEqual({ inputTokens: 260, cachedTokens: 110, outputTokens: 50 });
+  });
+
+  it('repairs a window with an EXTRA tool response (the leaked-tool 400)', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-extratool-${process.pid}-${++hostSeq}`);
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    // exactly the shape found in the live session: assistant has one call,
+    // but a second, orphan tool response follows it
+    const broken = [
+      { role: 'user', content: 'check agent-3' },
+      { role: 'assistant', content: 'Agent-3 is in Build mode', toolCalls: [{ id: 'a1', name: 'read_tile', args: {} }] },
+      { role: 'tool', content: 'ok', toolCallId: 'a1' },
+      { role: 'tool', content: 'error: timed out after 300s', toolCallId: 'orphan-extra' },
+      { role: 'user', content: 'continue' },
+    ];
+    await writeFile(join(dir, 'conversation.jsonl'), broken.map((l) => JSON.stringify(l)).join('\n'), 'utf8');
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir });
+    await host.start();
+    await host.prompt('continue');
+    await settle(60);
+    const sent = provider.complete.mock.calls[0]![0] as { messages: ProviderMsg[] };
+    const tools = sent.messages.filter((m) => m.role === 'tool');
+    expect(tools).toEqual([]);
+    const assistants = sent.messages.filter((m) => m.role === 'assistant');
+    expect(assistants.every((a) => (a.toolCalls ?? []).length === 0)).toBe(true);
+    expect(sent.messages.map((m) => m.content)).toContain('continue');
+  });
+
+  it('keeps exact tool windows intact on load (valid multi-call turns)', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-validwindows-${process.pid}-${++hostSeq}`);
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const good = [
+      { role: 'user', content: 'launch' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'a1', name: 'list_tiles', args: {} }, { id: 'a2', name: 'spawn_agent', args: {} }] },
+      { role: 'tool', content: 'one', toolCallId: 'a1' },
+      { role: 'tool', content: 'two', toolCallId: 'a2' },
+      { role: 'assistant', content: 'done', toolCalls: [] },
+      { role: 'user', content: 'next' },
+    ];
+    await writeFile(join(dir, 'conversation.jsonl'), good.map((l) => JSON.stringify(l)).join('\n'), 'utf8');
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir });
+    await host.start();
+    await host.prompt('go on');
+    await settle(60);
+    const sent = provider.complete.mock.calls[0]![0] as { messages: ProviderMsg[] };
+    const tools = sent.messages.filter((m) => m.role === 'tool');
+    expect(tools.map((t) => t.toolCallId)).toEqual(['a1', 'a2']);
+    const callers = sent.messages.filter((m) => m.role === 'assistant' && (m.toolCalls ?? []).length > 0);
+    expect(callers).toHaveLength(1);
+    expect(callers[0]!.toolCalls!.map((c) => c.id)).toEqual(['a1', 'a2']);
+  });
+
+  it('persists the newest turns even after aggressive compaction (no skipped writes)', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-desync-${process.pid}-${++hostSeq}`);
+    const { mkdir, readFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const recorder = new TileRecorder();
+    const { host } = makeHost(
+      [
+        { text: 'one', toolCalls: [] },
+        { text: 'two', toolCalls: [] },
+        { text: 'three', toolCalls: [] },
+        { text: 'four', toolCalls: [] },
+      ],
+      recorder,
+      { dir, contextBudgetTokens: 4 },
+    );
+    await host.start();
+    for (const p of ['one', 'two', 'three', 'four']) {
+      await host.prompt(p);
+      await settle(50);
+    }
+    const raw = await readFile(join(dir, 'conversation.jsonl'), 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l) as ProviderMsg);
+    expect(lines.map((l) => l.content)).toContain('four');
+    expect(lines.map((l) => l.content)).toContain('three');
+  });
+
+  it('persists the prompt sent right after loading a repaired conversation', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-loaddesync-${process.pid}-${++hostSeq}`);
+    const { mkdir, writeFile, readFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const broken = [
+      { role: 'user', content: 'old turn' },
+      { role: 'assistant', content: '', toolCalls: [{ id: 'a1', name: 'read_tile', args: {} }] },
+      { role: 'tool', content: 'ok', toolCallId: 'a1' },
+      { role: 'tool', content: 'extra', toolCallId: 'x9' },
+    ];
+    await writeFile(join(dir, 'conversation.jsonl'), broken.map((l) => JSON.stringify(l)).join('\n'), 'utf8');
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir });
+    await host.start();
+    await host.prompt('after repair');
+    await settle(60);
+    const raw = await readFile(join(dir, 'conversation.jsonl'), 'utf8');
+    expect(raw).toContain('after repair');
   });
 });

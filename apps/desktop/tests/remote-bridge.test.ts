@@ -562,3 +562,31 @@ describe('server events', () => {
     client.ws.close();
   });
 });
+
+// ————— start failures —————
+
+describe('start failures', () => {
+  it('rejects with EADDRINUSE when the port is already taken (surfaced as status.error)', async () => {
+    const { createServer } = await import('node:net');
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));
+    const port = (blocker.address() as { port: number }).port;
+    try {
+      const dir = await mkdtemp(join(tmpdir(), 'frakt-bridge-busy-'));
+      const store = new RemoteStore(join(dir, 'remote'));
+      const bridge = new RemoteBridge({
+        port,
+        certDir: join(dir, 'cert'),
+        store,
+        backend: fakeBackend(),
+        logger: () => undefined,
+      });
+      await expect(bridge.start()).rejects.toThrow(/EADDRINUSE/i);
+      expect(bridge.listening).toBe(false);
+      bridge.stop();
+      await rm(dir, { recursive: true, force: true });
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  });
+});

@@ -88,11 +88,13 @@ export function RemoteTab(): React.JSX.Element {
           <div className="remote-row">
             <label className="remote-switch-label" htmlFor="remote-enable">
               <span className="remote-title">Remote access</span>
-              <span className="remote-hint">
+              <span className={`remote-hint${enabled && !status?.listening && status?.error ? ' remote-hint-error' : ''}`}>
                 {enabled
                   ? status?.listening
                     ? 'listening — phones can pair and connect'
-                    : 'enabled, not listening (port conflict?)'
+                    : status?.error
+                      ? status.error
+                      : 'enabled, not listening'
                   : 'off — nothing is exposed'}
               </span>
             </label>

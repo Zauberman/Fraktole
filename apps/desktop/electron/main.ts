@@ -882,6 +882,8 @@ if (!app.requestSingleInstanceLock()) {
 
     const remoteStore = new RemoteStore(join(app.getPath('userData'), 'remote'));
     let remote: RemoteBridge | null = null;
+    /** Last bridge start failure, surfaced in the Remote tab. */
+    let remoteError: string | null = null;
 
     const liveTileOf = (agentId: string): { recorder: TileRecorder; tileId: string } | null => {
       for (const rt of registry?.all() ?? []) {
@@ -1038,6 +1040,7 @@ if (!app.requestSingleInstanceLock()) {
         enabled: state.enabled,
         port: state.port,
         listening: remote?.listening ?? false,
+        error: remoteError,
         fingerprint: remote?.fingerprint256 ?? null,
         lanIps: lanIps(),
         pairingCode: code?.code ?? null,
@@ -1067,7 +1070,13 @@ if (!app.requestSingleInstanceLock()) {
         logger: (line) => console.log(line),
         onStatusChange: pushRemoteStatus,
       });
-      await remote.start();
+      try {
+        await remote.start();
+        remoteError = null;
+      } catch (err) {
+        remoteError = (err as Error).message;
+        throw err;
+      }
       pushRemoteStatus();
     };
 

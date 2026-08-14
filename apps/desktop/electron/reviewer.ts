@@ -553,6 +553,7 @@ export class ReviewerHost {
         this.opts.emit.message(toEntry(turn));
 
         for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+          if (aborter.signal.aborted) break;
           const response = await this.callWithRetry(aborter.signal, () =>
             this.provider.complete({
               model: res.model,
@@ -599,14 +600,15 @@ export class ReviewerHost {
           }
 
           if (response.toolCalls.length === 0) break;
-          let failed = false;
           for (const call of response.toolCalls) {
+            // a cancel (restart/stop/idle) must end the turn promptly —
+            // the in-flight tool's rejection is a normal error result
+            if (aborter.signal.aborted) break;
             const started = Date.now();
             this.opts.emit.toolCall({ callId: call.id, name: call.name, args: call.args, state: 'start', at: Date.now() });
             const result = await this.tools.run(call.name, call.args, this.toolContext);
             const durationMs = Date.now() - started;
             if (result.startsWith('error:')) {
-              failed = true;
               this.opts.emit.toolCall({ callId: call.id, name: call.name, args: call.args, state: 'error', error: result, durationMs, at: Date.now() });
             } else {
               this.opts.emit.toolCall({
@@ -623,8 +625,10 @@ export class ReviewerHost {
             this.messages.push({ role: 'tool', content: capped, toolCallId: call.id });
             this.opts.emit.message(toEntry(this.messages[this.messages.length - 1]!));
           }
+          // A failed tool must NOT end the turn: the error result is in the
+          // model's context, and it decides whether to retry, adapt or
+          // reply. MAX_TOOL_ITERATIONS still bounds runaway retries.
           await this.persist();
-          if (failed) break; // don't spin on a broken tool
         }
         this.recordTurnCost(turnStart);
         this.compactIfNeeded(false, true);
@@ -703,6 +707,10 @@ export class ReviewerHost {
       };
       this.messages.splice(2, 0, note);
       this.opts.emit.message(toEntry(note));
+      // every surviving message (except the transient note, which stays
+      // memory-only) is already on disk — re-sync the write cursor so the
+      // turns after a compaction are never skipped
+      this.persistedCount = this.messages.length;
       if (this.state.goal?.state === 'active' && !this.lastTurnWasWake) {
         this.queue.push({ role: 'user', content: this.withStateBlock('[watchdog] context was compacted — re-check progress') });
         this.drainQueue();
@@ -731,27 +739,36 @@ export class ReviewerHost {
     }
     this.persistedCount = loaded.length;
     this.messages = this.repairSequence(loaded);
+    // the surviving messages are all already on disk (repair only drops);
+    // re-sync the write cursor so post-load turns persist immediately
+    this.persistedCount = this.messages.length;
   }
 
   /** Drops structurally-broken turns from a loaded conversation: an
    *  assistant message whose tool_calls lack their tool responses (a crash
    *  or an old build that persisted only the last result) would be rejected
-   *  by every provider. Orphan tool messages go with it. */
+   *  by every provider. Orphan tool messages go with it. A window is kept
+   *  only on an EXACT match — every response must belong to a call and every
+   *  call must be answered, so extra responses can never leak into a
+   *  request. */
   private repairSequence(msgs: ProviderMsg[]): ProviderMsg[] {
     const out: ProviderMsg[] = [];
     let i = 0;
     while (i < msgs.length) {
       const m = msgs[i]!;
       if (m.role === 'assistant') {
-        const ids = (m.toolCalls ?? []).map((c) => c.id);
-        const covered = new Set<string>();
+        const calls = (m.toolCalls ?? []).map((c) => c.id).sort();
+        const responses: string[] = [];
         let j = i + 1;
         while (j < msgs.length && msgs[j]!.role === 'tool') {
-          if (msgs[j]!.toolCallId) covered.add(msgs[j]!.toolCallId!);
+          if (msgs[j]!.toolCallId) responses.push(msgs[j]!.toolCallId!);
           j += 1;
         }
-        const complete = ids.length === 0 || ids.every((id) => covered.has(id));
-        if (complete) {
+        responses.sort();
+        const exact =
+          (calls.length === 0 && responses.length === 0) ||
+          (calls.length === responses.length && calls.every((id, k) => id === responses[k]!));
+        if (exact) {
           out.push(m);
           for (let k = i + 1; k < j; k++) out.push(msgs[k]!);
         }

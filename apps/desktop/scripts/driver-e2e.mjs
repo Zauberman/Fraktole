@@ -76,6 +76,23 @@ const mock = http.createServer((req, res) => {
             break;
           }
         }
+        // tool-precedence guard: every tool response must sit behind an
+        // assistant message that called its tool_call_id
+        if (!violation) {
+          const msgs = j.messages ?? [];
+          for (let k = 0; k < msgs.length; k++) {
+            const m = msgs[k];
+            if (m.role !== 'tool' || !m.tool_call_id) continue;
+            let p = k - 1;
+            while (p >= 0 && msgs[p].role === 'tool') p -= 1;
+            const owner = p >= 0 ? msgs[p] : null;
+            const called = (owner?.tool_calls ?? []).map((c) => c.id);
+            if (!owner || owner.role !== 'assistant' || !called.includes(m.tool_call_id)) {
+              violation = `tool message ${m.tool_call_id} has no preceding assistant call`;
+              break;
+            }
+          }
+        }
         const toolMsgs = (j.messages ?? []).filter((m) => m.role === 'tool');
         const started = toolMsgs.map((m) => String(m.content ?? '')).join('\n').match(/started (j-\d+-\d+)/);
         if (started) jobId = started[1];
@@ -115,28 +132,31 @@ const mock = http.createServer((req, res) => {
           chunk({ reasoning_content: 'about the tiles' }) +
           tool('call-1', 'read_tile', { agentId: 'agent-1', tail: 5 }),
         2: text('reviewed tile-1: DRIVER-42'),
-        3: tool('call-3', 'open_test_page', { url: `${MOCK_BASE}/page` }),
-        4: text('page opened'),
-        5: tool('call-5', 'read_test_page', {}),
-        6: text('test complete'),
-        7: tool('call-7', 'list_dir', { path: '/home/walid/Fraktole/apps/desktop', depth: 1 }),
-        8: text('listed'),
-        9: tool('call-9', 'search_files', { pattern: 'DRIVER-42', path: '/home/walid/Fraktole/apps/desktop/scripts' }),
-        10: text('searched'),
-        11: tool('call-11', 'run_background', { command: 'for i in 1 2 3; do echo JOB-42-$i; sleep 0.5; done' }),
-        12: tool('call-12', 'job_status', { jobId }),
-        13: text('job started'),
-        14: tool('call-14', 'job_status', { jobId }),
-        15: text('job done'),
-        16: tool('call-16', 'launch_agent', { agentId: 'ghost-agent', command: 'opencode' }),
-        17: tool('call-17', 'reload_test_page', {}),
-        18: text('reloaded'),
-        19: tool('call-19', 'read_test_page', {}),
-        20: text('verified'),
-        21: text('revived ok'),
-        22: tool('call-22', 'send_keystroke', { agentId: 'agent-1', keys: ['shift-tab'] }),
-        23: tool('call-23', 'type_into_tile', { agentId: 'agent-1', text: 'yes', pressEnter: true }),
-        24: text('done driving'),
+        // since a failed tool no longer ends the turn, prompt 1 consumes
+        // entries 1-2; this filler keeps the remaining prompts aligned
+        3: text('summarized ok'),
+        4: tool('call-4', 'open_test_page', { url: `${MOCK_BASE}/page` }),
+        5: text('page opened'),
+        6: tool('call-6', 'read_test_page', {}),
+        7: text('test complete'),
+        8: tool('call-8', 'list_dir', { path: '/home/walid/Fraktole/apps/desktop', depth: 1 }),
+        9: text('listed'),
+        10: tool('call-10', 'search_files', { pattern: 'DRIVER-42', path: '/home/walid/Fraktole/apps/desktop/scripts' }),
+        11: text('searched'),
+        12: tool('call-12', 'run_background', { command: 'for i in 1 2 3; do echo JOB-42-$i; sleep 0.5; done' }),
+        13: tool('call-13', 'job_status', { jobId }),
+        14: text('job started'),
+        15: tool('call-15', 'job_status', { jobId }),
+        16: text('job done'),
+        17: tool('call-17', 'launch_agent', { agentId: 'ghost-agent', command: 'opencode' }),
+        18: tool('call-18', 'reload_test_page', {}),
+        19: text('reloaded'),
+        20: tool('call-20', 'read_test_page', {}),
+        21: text('verified'),
+        22: text('revived ok'),
+        23: tool('call-23', 'send_keystroke', { agentId: 'agent-1', keys: ['shift-tab'] }),
+        24: tool('call-24', 'type_into_tile', { agentId: 'agent-1', text: 'yes', pressEnter: true }),
+        25: text('done driving'),
       };
       successCount += 1;
       const chunks = script[successCount] ?? text('ok');

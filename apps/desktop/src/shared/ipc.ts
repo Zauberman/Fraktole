@@ -371,6 +371,9 @@ export interface RemoteStatus {
   port: number;
   /** True while the WSS server is actually listening. */
   listening: boolean;
+  /** Last start failure message (null when all is well) — e.g. the port
+   *  is taken by another process. */
+  error: string | null;
   /** Self-signed cert SHA-256 fingerprint (hex, no separators). */
   fingerprint: string | null;
   /** LAN IPv4 addresses the phone can dial. */

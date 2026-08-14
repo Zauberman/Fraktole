@@ -143,19 +143,36 @@ export class RemoteBridge {
     const cert = await loadOrCreateCert(this.certDir);
     this.fingerprint = cert.fingerprint256;
     const server = createHttpsServer({ cert: cert.certPem, key: cert.keyPem });
+    // a listen failure (EADDRINUSE) must reject start() cleanly — never an
+    // unhandled 'error' event that would take the whole app down. The
+    // handler stays attached for the server's lifetime and just logs once
+    // the bridge is up.
+    let listenError: ((err: Error) => void) | null = null;
+    const onServerError = (err: Error): void => {
+      if (listenError) {
+        listenError(err);
+        listenError = null;
+      } else {
+        log(this.opts, `server error: ${err.message}`);
+      }
+    };
+    server.on('error', onServerError);
     const wss = new WebSocketServer({
       server,
       maxPayload: this.maxPayload,
       perMessageDeflate: false,
     });
+    // ws re-emits server errors on the WSS — silence that path so a bind
+    // failure can never crash the process
+    wss.on('error', () => undefined);
     this.httpsServer = server;
     this.wss = wss;
     this.codes = new PairingCodes({ now: this.now });
     wss.on('connection', (socket) => this.onConnection(socket));
     await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
+      listenError = reject;
       server.listen(this.port, this.host, () => {
-        server.off('error', reject);
+        listenError = null;
         resolve();
       });
     });

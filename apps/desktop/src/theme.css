@@ -2209,6 +2209,10 @@ button:active:not(:disabled) {
   margin-top: var(--s1);
 }
 
+.remote-hint-error {
+  color: var(--err);
+}
+
 .remote-faint {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
