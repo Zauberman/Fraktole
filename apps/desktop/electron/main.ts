@@ -4,7 +4,6 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildAgentEnv } from './agent-env.js';
 import { MailboxRouter, ORCHESTRATOR_ID, messageId } from './mailbox.js';
-import { JobRegistry } from './jobs.js';
 import { listModels } from './model-list.js';
 import { PtyHost } from './pty-host.js';
 import { ProjectsStore } from './projects.js';
@@ -66,7 +65,6 @@ const pendingSpawns = new Map<string, { agentId: string; resolve(out: string): v
 const pendingTestReads = new Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>();
 const pendingTestShots = new Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>();
 /** Per-session background-job registries (stopped with the session). */
-const sessionJobs = new Map<string, JobRegistry>();
 let testSeq = 0;
 
 /** Per-session live infra the remote bridge reads: the PTY recorder and the
@@ -264,8 +262,6 @@ if (!app.requestSingleInstanceLock()) {
         const recorder = new TileRecorder();
         const alive = new Set<string>();
         sessionInfra.set(session.id, { recorder, alive });
-        const jobs = new JobRegistry({ logger: (line) => console.log(line) });
-        sessionJobs.set(session.id, jobs);
         const host = new PtyHost({
           send: (channel, tileId, payload) => {
             if (channel === IPC.ptyData) {
@@ -372,16 +368,6 @@ if (!app.requestSingleInstanceLock()) {
               mainWindow?.webContents.send(IPC.testReload, rt.session.id);
               return Promise.resolve('reload sent to the Test tab');
             },
-            runBackground: (command, cwd) => {
-              if (!rt) return Promise.resolve('error: no runtime for session');
-              const res = jobs.start(command, cwd.length > 0 ? cwd : judgeCwdFor(rt.session));
-              return Promise.resolve('error' in res ? `error: ${res.error}` : `started ${res.jobId} (pid ${res.pid})`);
-            },
-            jobStatus: (jobId) => {
-              const info = jobs.status(jobId);
-              return Promise.resolve(info ? JSON.stringify({ jobId: info.jobId, state: info.state, code: info.code, output: info.output.slice(-4000) }) : 'error: unknown job');
-            },
-            jobStop: (jobId) => Promise.resolve(jobs.stop(jobId) ? `stopped ${jobId}` : `error: unknown job ${jobId}`),
             listMessages: () => router.listMessages(session.id),
             writeToAgent: (agentId, command) => {
               if (agentId === ORCHESTRATOR_ID) return Promise.resolve('error: the orchestrator is not an agent tile');
@@ -600,7 +586,6 @@ if (!app.requestSingleInstanceLock()) {
       refreshMenu();
     });
     ipcMain.handle(IPC.sessionStop, (_e, id: string) => {
-      sessionJobs.get(id)?.stopAll();
       registry?.stop(id);
       remote?.publish({ type: 'session.state', sessionId: id, alive: false });
     });

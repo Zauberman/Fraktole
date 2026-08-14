@@ -8,10 +8,12 @@ import 'package:integration_test/integration_test.dart';
 
 import 'package:fraktole_remote/app.dart';
 import 'package:fraktole_remote/core/protocol/models.dart';
+import 'package:fraktole_remote/core/protocol/pairing_code.dart';
 import 'package:fraktole_remote/core/security/secure_store.dart';
 import 'package:fraktole_remote/core/transport/remote_client.dart';
 import 'package:fraktole_remote/screens/home_shell.dart';
 import 'package:fraktole_remote/screens/tile_detail_screen.dart';
+import 'package:fraktole_remote/screens/tiles_screen.dart';
 import 'package:fraktole_remote/state/app_controller.dart';
 
 Future<void> pumpUntil(WidgetTester tester, Finder finder,
@@ -34,11 +36,33 @@ Future<void> pumpFor(WidgetTester tester, Duration duration) async {
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
+  // Hermetic credentials: pass a valid device token + pinned fingerprint so
+  // the test never depends on the phone's prior manual pairing state.
+  //   --dart-define=TOKEN=<64hex> --dart-define=FINGERPRINT=<64hex>
+  const token = String.fromEnvironment('TOKEN');
+  const fingerprint = String.fromEnvironment('FINGERPRINT');
+  const hostPort = String.fromEnvironment('HOST', defaultValue: '127.0.0.1:8833');
+  final hp = HostPort.tryParse(hostPort);
+
   testWidgets('full remote-control loop on device', (tester) async {
-    final controller = AppController(
-      store: ConnectionStore(kv: SecureKeyValueStore()),
-      gateway: RemoteClient(),
-    );
+    expect(token.isNotEmpty, isTrue,
+        reason: 'pass --dart-define=TOKEN=<64hex> (a device token)');
+    expect(fingerprint.isNotEmpty, isTrue,
+        reason: 'pass --dart-define=FINGERPRINT=<64hex>');
+    expect(hp, isNotNull);
+
+    final store = ConnectionStore(kv: SecureKeyValueStore());
+    // Seed secure storage exactly like a completed pairing would.
+    await store.write(StoredConnection(
+      host: hp!.host,
+      port: hp.port,
+      token: token,
+      deviceId: 'test-device',
+      fingerprint: fingerprint,
+      deviceName: 'e2e-test',
+    ));
+
+    final controller = AppController(store: store, gateway: RemoteClient());
     await tester.pumpWidget(FraktoleRemoteApp(controller: controller));
     await tester.pump();
 
@@ -96,10 +120,12 @@ void main() {
     debugPrint('E2E: tile ${tile.name} shows streamed scrollback');
 
     // 6. Back to Home, Orchestrator tab, send a task to the spawned agent.
-    await tester.pageBack();
-    await tester.pump();
-    await tester.pageBack();
-    await tester.pump();
+    // The tile detail and tiles routes both have Back buttons in the tree,
+    // so pop the Navigator explicitly (top route first).
+    Navigator.of(tester.element(find.byType(TileDetailScreen))).pop();
+    await tester.pump(const Duration(milliseconds: 400));
+    Navigator.of(tester.element(find.byType(TilesScreen))).pop();
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.text('Orchestrator'));
     await tester.pump();
     await pumpUntil(tester, find.text('Send a task'));
@@ -118,7 +144,7 @@ void main() {
     expect(msgs.any((m) => m.body.contains('hello from phone e2e')), isTrue,
         reason: 'task should appear in the desktop mailbox');
     debugPrint('E2E: task confirmed in desktop mailbox');
-
-    controller.dispose();
+    // No explicit controller.dispose(): the widget tree's teardown at the end
+    // of the test disposes AppController (and the gateway) itself.
   });
 }

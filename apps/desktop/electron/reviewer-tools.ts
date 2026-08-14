@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import type { FraktoleMessage, ReviewerQuestion, ReviewerState, ReviewerTask } from '../src/shared/ipc.js';
@@ -38,12 +37,6 @@ export interface ReviewerToolContext {
   getAgentCommand?(): string;
   /** Set or clear the watchdog goal (user-authorized: always allowed). */
   setGoal?(text: string): Promise<void>;
-  /** Start a long-running background process; returns a job id. */
-  runBackground?(command: string, cwd: string): Promise<string>;
-  /** Poll a background job's state and recent output. */
-  jobStatus?(jobId: string): Promise<string>;
-  /** Stop a background job. */
-  jobStop?(jobId: string): Promise<string>;
   /** The mailbox message log for the session. */
   listMessages?(): Promise<FraktoleMessage[]>;
   /** Write a command into an existing agent's terminal (launch_agent). */
@@ -358,30 +351,9 @@ const TOOLS: ReviewerTool[] = [
     },
   },
   {
-    name: 'run_bash',
-    description:
-      "Run a shell command in the session project (or an agent's cwd). Output capped at 64 KiB. timeout is 1-300s (default 30). Use it to verify agent work (tests, builds), grasp context, or make a quick fix yourself — but delegate substantive implementation to agents. For anything longer or long-running servers, use run_background + job_status instead.",
-    inputSchema: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', description: 'the command to run' },
-        cwd: { type: 'string', description: 'working directory (defaults to the project root)' },
-        timeout: { type: 'number', description: 'seconds before the command is killed (1–300, default 30)' },
-      },
-      required: ['command'],
-    },
-    async run(args, ctx) {
-      const command = typeof args.command === 'string' ? args.command : '';
-      if (!command) return 'error: command required';
-      const cwd = typeof args.cwd === 'string' && args.cwd.length > 0 ? args.cwd : ctx.cwd;
-      const timeoutSec = clampInt(args.timeout, 30, 1, 300);
-      return runShell(command, cwd, timeoutSec * 1000);
-    },
-  },
-  {
     name: 'list_dir',
     description:
-      'List a directory: directories first (trailing slash), then files with sizes. depth 1-3 (default 1), hidden entries skipped unless asked, node_modules/.git/dist-like dirs skipped. Use freely to understand and verify the codebase yourself before judging agent work.',
+      'List a directory: directories first (trailing slash), then files with sizes. depth 1-3 (default 1), hidden entries skipped unless asked, node_modules/.git/dist-like dirs skipped. Use freely to understand and verify the codebase yourself before judging agent work; for finding code use search_files.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -420,54 +392,6 @@ const TOOLS: ReviewerTool[] = [
       const glob = typeof args.glob === 'string' && args.glob.trim().length > 0 ? args.glob.trim() : undefined;
       const maxMatches = clampInt(args.maxMatches, 100, 1, 500);
       return searchFiles(pattern, abs, glob, maxMatches);
-    },
-  },
-  {
-    name: 'run_background',
-    description:
-      'Start a long-running process in the background (dev servers, builds, test suites) and get a job id. Poll with job_status, stop with job_stop. Output ring 32 KiB, 4 jobs max, jobs die with the session. For long verifications you supervise; prefer delegating long work to agents. Prefer this over run_bash for anything slow.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', description: 'the command to run' },
-        cwd: { type: 'string', description: 'working directory (defaults to the project root)' },
-      },
-      required: ['command'],
-    },
-    async run(args, ctx) {
-      const command = typeof args.command === 'string' ? args.command : '';
-      if (command.length === 0) return 'error: command required';
-      const cwd = typeof args.cwd === 'string' && args.cwd.length > 0 ? args.cwd : ctx.cwd;
-      return ctx.runBackground?.(command, cwd) ?? 'error: background jobs unavailable';
-    },
-  },
-  {
-    name: 'job_status',
-    description:
-      "Read a background job's state (running/exited + exit code) and recent output. Poll it after run_background to know when a build or test finished.",
-    inputSchema: {
-      type: 'object',
-      properties: { jobId: { type: 'string', description: 'the job id from run_background' } },
-      required: ['jobId'],
-    },
-    async run(args, ctx) {
-      const jobId = typeof args.jobId === 'string' ? args.jobId.trim() : '';
-      if (jobId.length === 0) return 'error: jobId required';
-      return ctx.jobStatus?.(jobId) ?? 'error: background jobs unavailable';
-    },
-  },
-  {
-    name: 'job_stop',
-    description: 'Stop a background job started with run_background (SIGTERM, SIGKILL after 2s).',
-    inputSchema: {
-      type: 'object',
-      properties: { jobId: { type: 'string', description: 'the job id from run_background' } },
-      required: ['jobId'],
-    },
-    async run(args, ctx) {
-      const jobId = typeof args.jobId === 'string' ? args.jobId.trim() : '';
-      if (jobId.length === 0) return 'error: jobId required';
-      return ctx.jobStop?.(jobId) ?? 'error: background jobs unavailable';
     },
   },
   {
@@ -576,25 +500,41 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'read_file',
-    description: 'Read a file from the project (or an absolute path), up to 4 MiB. Use freely to grasp the codebase yourself. For browsing use list_dir; for finding code use search_files.',
+    description:
+      'Read one or more files from the project (or absolute paths), up to 4 MiB each. Pass paths to read several related files in one call. Use freely to grasp the codebase yourself. For browsing use list_dir; for finding code use search_files.',
     inputSchema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'directory to search (defaults to the project root)' },
+        path: { type: 'string', description: 'single file to read (or use paths for several)' },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'several files to read in one call (each capped at 4 MiB)',
+        },
       },
-      required: ['path'],
+      anyOf: [{ required: ['path'] }, { required: ['paths'] }],
     },
     async run(args, ctx) {
-      const path = typeof args.path === 'string' ? args.path : '';
-      if (!path) return 'error: path required';
-      const abs = path.startsWith('/') ? path : join(ctx.cwd, path);
-      try {
-        const content = await readFile(abs, 'utf8');
-        if (content.length > 4 * 1024 * 1024) return 'error: file larger than 4 MiB';
-        return content;
-      } catch (err) {
-        return `error: ${(err as NodeJS.ErrnoException).message}`;
+      const single = typeof args.path === 'string' && args.path.length > 0 ? args.path : null;
+      const list = Array.isArray(args.paths) ? args.paths.filter((p): p is string => typeof p === 'string') : [];
+      const targets = single ? [single] : list;
+      if (targets.length === 0) return 'error: path or paths required';
+      if (targets.length > 8) return 'error: at most 8 files per call';
+      const out: string[] = [];
+      for (const path of targets) {
+        const abs = path.startsWith('/') ? path : join(ctx.cwd, path);
+        try {
+          const content = await readFile(abs, 'utf8');
+          if (content.length > 4 * 1024 * 1024) {
+            out.push(`=== ${path} ===\nerror: file larger than 4 MiB`);
+            continue;
+          }
+          out.push(targets.length === 1 ? content : `=== ${path} ===\n${content}`);
+        } catch (err) {
+          out.push(`=== ${path} ===\nerror: ${(err as NodeJS.ErrnoException).message}`);
+        }
       }
+      return out.join('\n\n');
     },
   },
 ];
@@ -760,23 +700,3 @@ function globToRe(glob: string): string {
   return `${out}$`;
 }
 
-function runShell(command: string, cwd: string, timeoutMs: number): Promise<string> {
-  return new Promise((resolve) => {
-    const child = execFile(
-      '/bin/bash',
-      ['-lc', command],
-      { cwd, timeout: timeoutMs, maxBuffer: 64 * 1024 + 4096, env: { ...process.env, PWD: cwd } },
-      (err, stdout, stderr) => {
-        const out = `${stdout}\n${stderr}`.trim();
-        if (err) {
-          const killed = (err as { killed?: boolean }).killed === true;
-          const kind = killed ? `timed out after ${Math.round(timeoutMs / 1000)}s` : (err as Error).message;
-          resolve(out.length > 0 ? `error: ${kind}\n${out}` : `error: ${kind}`);
-          return;
-        }
-        resolve(out.length > 0 ? out : '(no output)');
-      },
-    );
-    void child;
-  });
-}

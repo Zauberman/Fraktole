@@ -32,10 +32,11 @@ describe('tool documentation', () => {
     expect(sp).toContain('launch_agent');
     expect(la).toContain('spawn_agent');
 
-    const rb = byName.get('run_bash')!.description;
-    const bg = byName.get('run_background')!.description;
-    expect(rb).toContain('run_background');
-    expect(bg).toContain('run_bash');
+    const rf = byName.get('read_file')!.description;
+    const ld = byName.get('list_dir')!.description;
+    expect(rf).toContain('list_dir');
+    expect(rf).toContain('search_files');
+    expect(ld).toContain('search_files');
   });
 
   it('kill_agent documents the grant flow', () => {

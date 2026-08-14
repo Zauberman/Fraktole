@@ -598,8 +598,8 @@ describe('ReviewerHost', () => {
     const recorder = new TileRecorder();
     const ctx = ctxFor(recorder);
     const provider = new FakeProvider([
-      { text: '', toolCalls: [{ id: 'c1', name: 'job_status', args: { jobId: 'j-gone' } }] },
-      { text: 'job not found — moving on', toolCalls: [] },
+      { text: '', toolCalls: [{ id: 'c1', name: 'list_dir', args: { path: '/nonexistent-fraktole-xyz' } }] },
+      { text: 'dir not found — moving on', toolCalls: [] },
     ]);
     const host = new ReviewerHost({
       getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
@@ -617,7 +617,7 @@ describe('ReviewerHost', () => {
     expect(provider.complete).toHaveBeenCalledTimes(2);
     const tools = host.conversation.filter((e) => e.role === 'tool');
     expect(tools.some((t) => String(t.content).startsWith('error:'))).toBe(true);
-    expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'job not found — moving on')).toBe(true);
+    expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'dir not found — moving on')).toBe(true);
     expect(host.status).toBe('running');
   });
 
@@ -948,9 +948,6 @@ describe('ReviewerHost', () => {
     const recorder = new TileRecorder();
     const written: string[] = [];
     const ctx = ctxFor(recorder, {
-      runBackground: vi.fn(async (c: string) => `started j-1 (${c})`) as never,
-      jobStatus: vi.fn(async () => '{"jobId":"j-1","state":"exited","code":0,"output":"JOB-42"}') as never,
-      jobStop: vi.fn(async () => 'stopped j-1') as never,
       listMessages: vi.fn(async () => [
         { id: 'm1', from: 'orchestrator', to: 'agent-1', kind: 'task', body: 'go', at: 1 },
         { id: 'm2', from: 'agent-1', to: 'orchestrator', kind: 'result', body: 'done', at: 2 },
@@ -965,12 +962,9 @@ describe('ReviewerHost', () => {
       {
         text: '',
         toolCalls: [
-          { id: 'c1', name: 'run_background', args: { command: 'npm run dev' } },
-          { id: 'c2', name: 'job_status', args: { jobId: 'j-1' } },
-          { id: 'c3', name: 'job_stop', args: { jobId: 'j-1' } },
-          { id: 'c4', name: 'list_messages', args: { kind: 'task' } },
-          { id: 'c5', name: 'launch_agent', args: { agentId: 'agent-1', command: 'opencode' } },
-          { id: 'c6', name: 'reload_test_page', args: {} },
+          { id: 'c1', name: 'list_messages', args: { kind: 'task' } },
+          { id: 'c2', name: 'launch_agent', args: { agentId: 'agent-1', command: 'opencode' } },
+          { id: 'c3', name: 'reload_test_page', args: {} },
         ],
       },
       { text: 'all routed', toolCalls: [] },
@@ -989,9 +983,6 @@ describe('ReviewerHost', () => {
     await host.prompt('run everything');
     await settle(200);
     const contents = host.conversation.map((e) => e.content);
-    expect(contents.some((c) => c.includes('started j-1'))).toBe(true);
-    expect(contents.some((c) => c.includes('"state":"exited"'))).toBe(true);
-    expect(contents.some((c) => c.includes('stopped j-1'))).toBe(true);
     expect(contents.some((c) => c.includes('"kind": "task"'))).toBe(true);
     expect(contents.some((c) => c.includes('"kind": "result"'))).toBe(false); // kind filter
     expect(written).toEqual(['agent-1:opencode']);

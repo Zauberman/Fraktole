@@ -62,7 +62,6 @@ const mock = http.createServer((req, res) => {
     req.on('data', (d) => (body += d));
     req.on('end', () => {
       lastReqBody = body;
-      let jobId = 'j-1';
       let violation = '';
       try {
         const j = JSON.parse(body);
@@ -93,9 +92,6 @@ const mock = http.createServer((req, res) => {
             }
           }
         }
-        const toolMsgs = (j.messages ?? []).filter((m) => m.role === 'tool');
-        const started = toolMsgs.map((m) => String(m.content ?? '')).join('\n').match(/started (j-\d+-\d+)/);
-        if (started) jobId = started[1];
       } catch {
         console.log(`  mock hit #${callCount}: unparsable body`);
       }
@@ -143,20 +139,17 @@ const mock = http.createServer((req, res) => {
         9: text('listed'),
         10: tool('call-10', 'search_files', { pattern: 'DRIVER-42', path: '/home/walid/Fraktole/apps/desktop/scripts' }),
         11: text('searched'),
-        12: tool('call-12', 'run_background', { command: 'for i in 1 2 3; do echo JOB-42-$i; sleep 0.5; done' }),
-        13: tool('call-13', 'job_status', { jobId }),
-        14: text('job started'),
-        15: tool('call-15', 'job_status', { jobId }),
-        16: text('job done'),
-        17: tool('call-17', 'launch_agent', { agentId: 'ghost-agent', command: 'opencode' }),
-        18: tool('call-18', 'reload_test_page', {}),
-        19: text('reloaded'),
-        20: tool('call-20', 'read_test_page', {}),
-        21: text('verified'),
-        22: text('revived ok'),
-        23: tool('call-23', 'send_keystroke', { agentId: 'agent-1', keys: ['shift-tab'] }),
-        24: tool('call-24', 'type_into_tile', { agentId: 'agent-1', text: 'yes', pressEnter: true }),
-        25: text('done driving'),
+         10: tool('call-10', 'search_files', { pattern: 'DRIVER-42', path: '/home/walid/Fraktole/apps/desktop/scripts' }),
+         11: text('searched'),
+         12: tool('call-12', 'launch_agent', { agentId: 'ghost-agent', command: 'opencode' }),
+         13: tool('call-13', 'reload_test_page', {}),
+         14: text('reloaded'),
+         15: tool('call-15', 'read_test_page', {}),
+         16: text('verified'),
+         17: text('revived ok'),
+         18: tool('call-18', 'send_keystroke', { agentId: 'agent-1', keys: ['shift-tab'] }),
+         19: tool('call-19', 'type_into_tile', { agentId: 'agent-1', text: 'yes', pressEnter: true }),
+         20: text('done driving'),
       };
       successCount += 1;
       const chunks = script[successCount] ?? text('ok');
@@ -419,29 +412,6 @@ const main = async () => {
   );
   if (!searched) fail('search_files did not find the marker');
   else ok('search_files found the marker in driver-e2e.mjs');
-
-  await prompt('start a background job');
-  const jobRunning = await waitFor(
-    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('"state":"running"'))`,
-    25000,
-    'job running',
-  );
-  if (!jobRunning) fail('job_status did not report running');
-  else ok('background job reported running');
-  await sleep(3000);
-  await prompt('check the job');
-  let jobDone = false;
-  try {
-    jobDone = await waitFor(
-      `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('"state":"exited"') && e.textContent.includes('JOB-42'))`,
-      25000,
-      'job exited',
-    );
-  } catch {
-    jobDone = false;
-  }
-  if (!jobDone) fail('job_status did not report the exited job with output');
-  else ok('background job exited with JOB-42 output');
 
   await prompt('launch a harness');
   const launchErr = await waitFor(

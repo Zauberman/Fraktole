@@ -19,10 +19,17 @@ describe('system prompt', () => {
   it('delegates substantive work by default but keeps the hands-on option', () => {
     expect(prompt).toContain('GENERAL');
     expect(prompt).toContain('DELEGATE substantive work');
-    expect(prompt).toContain('do not outsource everything');
-    expect(prompt).toContain('use your own hands when it is genuinely faster or clearer');
+    expect(prompt).toContain('3 build agents for implementation');
+    expect(prompt).toContain('1 fixes agent for small fixes and corrections');
+    expect(prompt).toContain('small fixes go to the fixes agent');
     // the old anti-delegation line is gone
     expect(prompt).not.toContain('Never send a message to an agent unless the task warrants it');
+  });
+
+  it('the reviewer is read-only — no shell tools in the prompt', () => {
+    expect(prompt).toContain('read-only on the project');
+    expect(prompt).not.toContain('run_bash');
+    expect(prompt).not.toContain('run_background');
   });
 
   it('judges results and sub-results against the goal', () => {
