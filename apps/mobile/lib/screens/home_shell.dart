@@ -18,6 +18,8 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _tab = 0;
 
+  static const List<String> _tabs = ['Sessions', 'Orchestrator', 'Settings'];
+
   @override
   Widget build(BuildContext context) {
     final screens = [
@@ -32,26 +34,83 @@ class _HomeShellState extends State<HomeShell> {
           Expanded(child: IndexedStack(index: _tab, children: screens)),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _tab,
-        onDestinationSelected: (index) => setState(() => _tab = index),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.view_agenda_outlined),
-            selectedIcon: Icon(Icons.view_agenda),
-            label: 'Sessions',
+      bottomNavigationBar: _TypographyNavBar(
+        tabs: _tabs,
+        selected: _tab,
+        onSelect: (index) => setState(() => _tab = index),
+      ),
+    );
+  }
+}
+
+/// Text-only tab bar: no icons, an underline marks the active tab.
+class _TypographyNavBar extends StatelessWidget {
+  const _TypographyNavBar({
+    required this.tabs,
+    required this.selected,
+    required this.onSelect,
+  });
+
+  final List<String> tabs;
+  final int selected;
+  final ValueChanged<int> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surfaceContainer,
+      child: SafeArea(
+        top: false,
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border(
+              top: BorderSide(color: scheme.outlineVariant),
+            ),
           ),
-          NavigationDestination(
-            icon: Icon(Icons.smart_toy_outlined),
-            selectedIcon: Icon(Icons.smart_toy),
-            label: 'Orchestrator',
+          child: Row(
+            children: [
+              for (var i = 0; i < tabs.length; i++)
+                Expanded(
+                  child: InkWell(
+                    onTap: () => onSelect(i),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            tabs[i],
+                            style: TextStyle(
+                              fontSize: 14,
+                              letterSpacing: 0.2,
+                              fontWeight: selected == i
+                                  ? FontWeight.w700
+                                  : FontWeight.w400,
+                              color: selected == i
+                                  ? scheme.primary
+                                  : scheme.onSurfaceVariant,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Container(
+                            width: 24,
+                            height: 2,
+                            decoration: BoxDecoration(
+                              color: selected == i
+                                  ? scheme.primary
+                                  : Colors.transparent,
+                              borderRadius: BorderRadius.circular(1),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings),
-            label: 'Settings',
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -68,25 +127,15 @@ class _ConnectionBanner extends StatelessWidget {
     return ListenableBuilder(
       listenable: controller,
       builder: (context, _) {
-        final (label, icon, color) = switch (controller.connectionStatus) {
-          ConnectionStatus.connected => (
-              'Connected',
-              Icons.cloud_done_rounded,
-              scheme.primary,
-            ),
+        final (label, color) = switch (controller.connectionStatus) {
+          ConnectionStatus.connected => ('Connected', scheme.primary),
           ConnectionStatus.connecting => (
               'Connecting / reconnecting…',
-              Icons.sync_rounded,
               scheme.tertiary,
             ),
-          ConnectionStatus.disconnected => (
-              'Disconnected',
-              Icons.cloud_off_rounded,
-              scheme.error,
-            ),
+          ConnectionStatus.disconnected => ('Disconnected', scheme.error),
           ConnectionStatus.authFailed => (
               'Authentication failed',
-              Icons.lock_rounded,
               scheme.error,
             ),
         };
@@ -98,8 +147,15 @@ class _ConnectionBanner extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Row(
                 children: [
-                  Icon(icon, size: 18, color: color),
-                  const SizedBox(width: 8),
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -109,7 +165,10 @@ class _ConnectionBanner extends StatelessWidget {
                           style: Theme.of(context)
                               .textTheme
                               .bodySmall
-                              ?.copyWith(color: color),
+                              ?.copyWith(
+                                color: color,
+                                fontWeight: FontWeight.w600,
+                              ),
                         ),
                         if (controller.lastError != null)
                           Text(
@@ -119,7 +178,8 @@ class _ConnectionBanner extends StatelessWidget {
                             style: Theme.of(context)
                                 .textTheme
                                 .labelSmall
-                                ?.copyWith(color: color.withValues(alpha: 0.8)),
+                                ?.copyWith(
+                                    color: color.withValues(alpha: 0.8)),
                           ),
                       ],
                     ),

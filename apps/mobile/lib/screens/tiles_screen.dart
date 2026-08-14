@@ -72,11 +72,7 @@ class _TilesScreenState extends State<TilesScreen> {
       appBar: AppBar(
         title: Text(widget.session.name),
         actions: [
-          IconButton(
-            tooltip: 'Refresh',
-            icon: const Icon(Icons.refresh_rounded),
-            onPressed: _reload,
-          ),
+          TextButton(onPressed: _reload, child: const Text('Refresh')),
         ],
       ),
       body: RefreshIndicator(onRefresh: _reload, child: _buildBody()),
@@ -96,10 +92,13 @@ class _TilesScreenState extends State<TilesScreen> {
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: const [
-          SizedBox(height: 120),
-          Icon(Icons.terminal_rounded, size: 48),
-          SizedBox(height: 8),
-          Center(child: Text('No tiles in this session')),
+          SizedBox(height: 140),
+          Center(
+            child: Text(
+              'No tiles in this session',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+            ),
+          ),
         ],
       );
     }
@@ -142,10 +141,6 @@ class _TileCard extends StatelessWidget {
       child: ListTile(
         onTap: onTap,
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        leading: Icon(
-          tile.kind == 'shell' ? Icons.terminal_rounded : Icons.smart_toy_outlined,
-          color: kindColor,
-        ),
         title: Text(tile.name, style: const TextStyle(fontWeight: FontWeight.w600)),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -182,10 +177,14 @@ class _ErrorView extends StatelessWidget {
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       children: [
-        const SizedBox(height: 120),
-        const Icon(Icons.error_outline, size: 48),
-        const SizedBox(height: 8),
-        Center(child: Text(message)),
+        const SizedBox(height: 140),
+        Center(
+          child: Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 14),
+          ),
+        ),
         Center(
           child: TextButton(onPressed: onRetry, child: const Text('Retry')),
         ),

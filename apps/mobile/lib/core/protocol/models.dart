@@ -21,9 +21,7 @@ class Session {
         project: json['project'] as String? ?? '',
         alive: json['alive'] as bool? ?? false,
         tileCount: json['tileCount'] as int? ?? 0,
-        updatedAt: json['updatedAt'] != null
-            ? DateTime.tryParse(json['updatedAt'] as String)
-            : null,
+        updatedAt: parseUpdatedAt(json['updatedAt']),
       );
 }
 
@@ -76,6 +74,27 @@ class MailMessage {
         from: json['from'] as String? ?? '',
         to: json['to'] as String? ?? '',
         body: json['body'] as String? ?? '',
-        ts: json['ts'] as int? ?? 0,
+        ts: _asInt(json['ts']),
       );
+}
+
+/// The desktop sends `updatedAt` as epoch-milliseconds (a number). Accept a
+/// number, a numeric string, or an ISO string so a mismatch can never crash
+/// the sessions screen with a type-cast error.
+DateTime? parseUpdatedAt(Object? value) {
+  if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
+  if (value is num) return DateTime.fromMillisecondsSinceEpoch(value.toInt());
+  if (value is String) {
+    final ms = int.tryParse(value);
+    if (ms != null) return DateTime.fromMillisecondsSinceEpoch(ms);
+    return DateTime.tryParse(value);
+  }
+  return null;
+}
+
+int _asInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value) ?? 0;
+  return 0;
 }

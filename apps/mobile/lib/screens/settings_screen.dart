@@ -57,15 +57,12 @@ class SettingsScreen extends StatelessWidget {
             child: Column(
               children: [
                 ListTile(
-                  leading: const Icon(Icons.link_off_rounded),
                   title: const Text('Disconnect'),
                   subtitle: const Text('Reconnect later with saved credentials'),
                   onTap: () => controller.disconnect(),
                 ),
                 const Divider(height: 1),
                 ListTile(
-                  leading: Icon(Icons.delete_forever_rounded,
-                      color: theme.colorScheme.error),
                   title: Text('Forget this device',
                       style: TextStyle(color: theme.colorScheme.error)),
                   subtitle: const Text('Erase token and fingerprint, go back to pairing'),

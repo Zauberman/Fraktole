@@ -172,16 +172,9 @@ class _OrchestratorScreenState extends State<OrchestratorScreen> {
                           (value ?? '').trim().isEmpty ? 'Enter a body' : null,
                     ),
                     const SizedBox(height: 12),
-                    FilledButton.icon(
+                    FilledButton(
                       onPressed: _sending ? null : _sendTask,
-                      icon: _sending
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.send_rounded),
-                      label: const Text('Send'),
+                      child: Text(_sending ? 'Sending…' : 'Send'),
                     ),
                   ],
                 ),
@@ -224,16 +217,9 @@ class _OrchestratorScreenState extends State<OrchestratorScreen> {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    FilledButton.tonalIcon(
+                    FilledButton.tonal(
                       onPressed: _spawning ? null : _spawnAgent,
-                      icon: _spawning
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.add_circle_outline_rounded),
-                      label: const Text('Spawn'),
+                      child: Text(_spawning ? 'Spawning…' : 'Spawn'),
                     ),
                   ],
                 ),

@@ -69,10 +69,14 @@ class _SessionsScreenState extends State<SessionsScreen> {
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: const [
-          SizedBox(height: 120),
-          Icon(Icons.inbox_rounded, size: 48),
-          SizedBox(height: 8),
-          Center(child: Text('No sessions yet')),
+          SizedBox(height: 140),
+          Center(
+            child: Text(
+              'No sessions yet',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+            ),
+          ),
+          SizedBox(height: 6),
           Center(
             child: Text(
               'Start a session on the desktop to see it here.',
@@ -109,16 +113,11 @@ class _SessionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: ListTile(
         onTap: onTap,
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        leading: Icon(
-          session.alive ? Icons.play_circle_fill : Icons.pause_circle_filled,
-          color: session.alive ? Colors.greenAccent : theme.disabledColor,
-        ),
         title: Text(
           session.name,
           style: const TextStyle(fontWeight: FontWeight.w600),
@@ -182,10 +181,14 @@ class _ErrorView extends StatelessWidget {
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       children: [
-        const SizedBox(height: 120),
-        const Icon(Icons.error_outline, size: 48),
-        const SizedBox(height: 8),
-        Center(child: Text(message)),
+        const SizedBox(height: 140),
+        Center(
+          child: Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 14),
+          ),
+        ),
         Center(
           child: TextButton(onPressed: onRetry, child: const Text('Retry')),
         ),
