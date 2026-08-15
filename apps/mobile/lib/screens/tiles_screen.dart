@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/protocol/models.dart';
@@ -18,14 +20,21 @@ class _TilesScreenState extends State<TilesScreen> {
   List<Tile>? _tiles;
   Object? _error;
   bool _loading = true;
+  StreamSubscription<Object?>? _tileStatesSub;
 
   @override
   void initState() {
     super.initState();
-    widget.controller.tileStates.listen((event) {
+    _tileStatesSub = widget.controller.tileStates.listen((event) {
       _applyTileState(event.tileId, event.alive, event.lines);
     });
     _reload();
+  }
+
+  @override
+  void dispose() {
+    _tileStatesSub?.cancel();
+    super.dispose();
   }
 
   void _applyTileState(String tileId, bool alive, int lines) {

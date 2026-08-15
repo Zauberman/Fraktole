@@ -554,13 +554,14 @@ export class RemoteBridge {
           return;
         }
         case 'tile.unsubscribe': {
-          if (!validId(p.tileId)) {
-            fail('tileId required');
+          if (!validId(p.sessionId) || !validId(p.tileId)) {
+            fail('sessionId and tileId required');
             return;
           }
-          for (const key of [...conn.subs.keys()]) {
-            if (conn.subs.get(key)?.sessionId !== undefined && key.endsWith(`/${p.tileId}`)) conn.subs.delete(key);
-          }
+          // scope the deletion to the exact session/tile pair — agent ids are
+          // per-session (agent-1 exists in every session), so a bare tileId
+          // would silently drop another session's subscription
+          conn.subs.delete(`${p.sessionId}/${p.tileId}`);
           ok({ ok: true });
           return;
         }

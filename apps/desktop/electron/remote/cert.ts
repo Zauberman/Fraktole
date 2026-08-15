@@ -193,22 +193,56 @@ export interface RemoteCert {
 export async function loadOrCreateCert(dir: string): Promise<RemoteCert> {
   const certFile = join(dir, 'cert.pem');
   const keyFile = join(dir, 'key.pem');
+
+  // Stage A: read files — ONLY ENOENT means "first run / torn pair", everything
+  // else (EMFILE, EBUSY, EACCES, EISDIR, EIO, ...) is a transient I/O error
+  // that MUST propagate so we don't silently rotate the cert and break TOFU.
+  // Read sequentially so we can inspect each error code independently.
+  let certPem: string | undefined;
   try {
-    const [certPem, keyPem] = await Promise.all([readFile(certFile, 'utf8'), readFile(keyFile, 'utf8')]);
-    const cert = new (await import('node:crypto')).X509Certificate(certPem);
-    // verify the persisted key actually belongs to the persisted cert (a
-    // corrupt or mismatched key must be regenerated, not shipped to TLS):
-    // sign a probe with the key and check it against the cert's public key
-    const probe = 'frakt-tofu-key-check';
-    const verifier = createVerify('RSA-SHA256');
-    verifier.update(probe);
-    if (!verifier.verify(cert.publicKey, createSign('RSA-SHA256').update(probe).sign(createPrivateKey(keyPem)))) {
-      throw new Error('persisted key does not match the certificate');
+    certPem = await readFile(certFile, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      certPem = undefined;
+    } else {
+      throw err;
     }
-    return { certPem, keyPem, fingerprint256: cert.fingerprint256.replaceAll(':', '').toLowerCase() };
-  } catch {
-    // missing, unreadable, or an inconsistent pair — generate a fresh one
   }
+
+  let keyPem: string | undefined;
+  try {
+    keyPem = await readFile(keyFile, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      keyPem = undefined;
+    } else {
+      throw err;
+    }
+  }
+
+  // If either file is missing (ENOENT), treat as first run / torn pair — regenerate.
+  if (certPem === undefined || keyPem === undefined) {
+    // fall through to generation
+  } else {
+    // Stage B: parse + X509Certificate + key-mismatch probe — these failures
+    // mean corrupt/torn state, so regenerate as before.
+    try {
+      const cert = new (await import('node:crypto')).X509Certificate(certPem);
+      // verify the persisted key actually belongs to the persisted cert (a
+      // corrupt or mismatched key must be regenerated, not shipped to TLS):
+      // sign a probe with the key and check it against the cert's public key
+      const probe = 'frakt-tofu-key-check';
+      const verifier = createVerify('RSA-SHA256');
+      verifier.update(probe);
+      if (!verifier.verify(cert.publicKey, createSign('RSA-SHA256').update(probe).sign(createPrivateKey(keyPem)))) {
+        throw new Error('persisted key does not match the certificate');
+      }
+      return { certPem, keyPem, fingerprint256: cert.fingerprint256.replaceAll(':', '').toLowerCase() };
+    } catch {
+      // corrupt, mismatched, or unparseable — fall through to generation
+    }
+  }
+
   const generated = await generateCert();
   await mkdir(dir, { recursive: true });
   // atomic (tmp + rename) and key-first: a crash mid-write leaves either the

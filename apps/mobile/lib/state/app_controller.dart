@@ -139,7 +139,9 @@ class AppController extends ChangeNotifier {
 
   Future<void> disconnect() async {
     await _gateway.disconnect();
-    _setPhase(AppPhase.connected);
+    // drop to the connect screen (saved credentials are kept) so the user can
+    // reconnect or re-pair — never claim "connected" while the socket is down
+    _setPhase(AppPhase.needsPairing);
   }
 
   Future<void> forget() async {
@@ -166,8 +168,8 @@ class AppController extends ChangeNotifier {
   Future<void> subscribeTile({required String sessionId, required String tileId}) =>
       _gateway.subscribeTile(sessionId: sessionId, tileId: tileId);
 
-  Future<void> unsubscribeTile({required String tileId}) =>
-      _gateway.unsubscribeTile(tileId: tileId);
+  Future<void> unsubscribeTile({required String sessionId, required String tileId}) =>
+      _gateway.unsubscribeTile(sessionId: sessionId, tileId: tileId);
 
   Future<SendTaskResult> sendTask({
     required String agentId,

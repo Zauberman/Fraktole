@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { X509Certificate } from 'node:crypto';
@@ -41,6 +41,21 @@ describe('loadOrCreateCert', () => {
     const parsed = new X509Certificate(cert.certPem);
     const der = Buffer.from(parsed.raw);
     expect(createHash('sha256').update(der).digest('hex')).toBe(cert.fingerprint256);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('a transient read error (EISDIR) propagates and does not regenerate or write anything', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'frakt-cert-'));
+    // Create cert.pem as a DIRECTORY so readFile throws EISDIR (a
+    // deterministic non-ENOENT error that simulates a transient I/O blip)
+    await mkdir(join(dir, 'cert.pem'), { recursive: true });
+
+    await expect(loadOrCreateCert(dir)).rejects.toThrow();
+    // Ensure nothing was written (no key.pem, no cert.pem file)
+    const keyExists = await stat(join(dir, 'key.pem')).then(() => true).catch(() => false);
+    const certIsFile = await stat(join(dir, 'cert.pem')).then((s) => s.isFile()).catch(() => false);
+    expect(keyExists).toBe(false);
+    expect(certIsFile).toBe(false);
     await rm(dir, { recursive: true, force: true });
   });
 });

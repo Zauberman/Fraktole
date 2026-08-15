@@ -29,6 +29,37 @@ async function gitInit(dir: string, file: string, content: string): Promise<void
 }
 
 describe('forkProject', () => {
+  it('does not leak a symlink pointing outside the project into the fork', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'frak-fork-'));
+    const src = join(root, 'src');
+    const dest = join(root, 'fork');
+    await mkdir(join(src, 'sub'), { recursive: true });
+    await writeFile(join(src, 'keep.txt'), 'kept', 'utf8');
+    // a symlink escaping the project (e.g. ~/.ssh/config) must NOT be copied
+    const secret = join(root, 'secret.txt');
+    await writeFile(secret, 'TOP-SECRET', 'utf8');
+    await symlink(secret, join(src, 'leak'));
+    const res = await forkProject(src, dest, join(root, 'home'));
+    expect(res.ok).toBe(true);
+    expect(await readFile(join(dest, 'keep.txt'), 'utf8')).toBe('kept');
+    await expect(stat(join(dest, 'leak'))).rejects.toThrow(); // not present
+    await expect(readFile(join(dest, 'leak'), 'utf8')).rejects.toThrow();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('copies a symlink that stays inside the project (target materialized)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'frak-fork-'));
+    const src = join(root, 'src');
+    const dest = join(root, 'fork');
+    await mkdir(join(src, 'sub'), { recursive: true });
+    await writeFile(join(src, 'sub', 'real.txt'), 'inner', 'utf8');
+    await symlink(join('sub', 'real.txt'), join(src, 'link'));
+    const res = await forkProject(src, dest, join(root, 'home'));
+    expect(res.ok).toBe(true);
+    expect(await readFile(join(dest, 'link'), 'utf8')).toBe('inner');
+    await rm(root, { recursive: true, force: true });
+  });
+
   it('clones a clean git repo into the destination (history included)', async () => {
     const root = await mkdtemp(join(tmpdir(), 'frak-fork-'));
     const src = join(root, 'src');

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/protocol/models.dart';
@@ -17,12 +19,19 @@ class _SessionsScreenState extends State<SessionsScreen> {
   List<Session>? _sessions;
   Object? _error;
   bool _loading = true;
+  StreamSubscription<Object?>? _sessionStatesSub;
 
   @override
   void initState() {
     super.initState();
-    widget.controller.sessionStates.listen((event) => _reload());
+    _sessionStatesSub = widget.controller.sessionStates.listen((event) => _reload());
     _reload();
+  }
+
+  @override
+  void dispose() {
+    _sessionStatesSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _reload() async {

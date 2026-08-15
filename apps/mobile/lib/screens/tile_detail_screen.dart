@@ -72,7 +72,7 @@ class _TileDetailScreenState extends State<TileDetailScreen> {
 
   @override
   void dispose() {
-    widget.controller.unsubscribeTile(tileId: widget.tile.id);
+    widget.controller.unsubscribeTile(sessionId: widget.sessionId, tileId: widget.tile.id);
     for (final sub in _subscriptions) {
       sub.cancel();
     }

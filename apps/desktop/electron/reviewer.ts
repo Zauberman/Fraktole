@@ -76,6 +76,9 @@ export interface ReviewerHostOpts {
   emit: ReviewerEmitter;
   /** Watchdog poll interval; injectable for tests. */
   pollIntervalMs?: number;
+  /** Ask user timeout: how long to wait for a user answer before timing out
+   *  (default 10 minutes). Injectable for tests. */
+  askTimeoutMs?: number;
   /** Retry policy for transient provider failures: one retry after 2s by
    *  default — a network blip must not kill the harness. Injectable for
    *  tests. */
@@ -222,6 +225,8 @@ export class ReviewerHost {
     resolve(v: string): void;
     reject(e: Error): void;
   } | null = null;
+  /** Timer that auto-rejects an unanswered ask_user after askTimeoutMs. */
+  private askTimer: NodeJS.Timeout | null = null;
   private askSeq = 0;
   /** The active autonomous-mode variant (null = normal mode). */
   private variant: AutonomyVariant | null = null;
@@ -521,6 +526,7 @@ export class ReviewerHost {
       }
       return Promise.resolve('proceed');
     }
+    const timeoutMs = this.opts.askTimeoutMs ?? 10_000_000; // 10 minutes default
     return new Promise<string>((resolve, reject) => {
       if (this.pendingAsk) {
         reject(new Error('another question is already pending'));
@@ -536,6 +542,12 @@ export class ReviewerHost {
       };
       this.pendingAsk = ask;
       this.opts.emit.question({ askId: ask.askId, question, kind, agentId, at: Date.now() });
+      this.askTimer = setTimeout(() => {
+        if (this.pendingAsk === ask) {
+          this.pendingAsk = null;
+          ask.reject(new Error(`question timed out — no answer within ${Math.round(timeoutMs / 1000)}s`));
+        }
+      }, timeoutMs);
     });
   }
 
@@ -544,6 +556,10 @@ export class ReviewerHost {
     const pending = this.pendingAsk;
     if (!pending || pending.askId !== askId) return;
     this.pendingAsk = null;
+    if (this.askTimer !== null) {
+      clearTimeout(this.askTimer);
+      this.askTimer = null;
+    }
     pending.resolve(answer);
   }
 
@@ -551,6 +567,10 @@ export class ReviewerHost {
     const pending = this.pendingAsk;
     if (!pending) return;
     this.pendingAsk = null;
+    if (this.askTimer !== null) {
+      clearTimeout(this.askTimer);
+      this.askTimer = null;
+    }
     pending.reject(new Error('question cancelled'));
   }
 

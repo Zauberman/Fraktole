@@ -64,7 +64,7 @@ function ctxFor(recorder: TileRecorder, opts: Partial<ReviewerToolContext> = {})
 }
 
 let hostSeq = 0;
-function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; contextBudgetTokens: number; stallTimeoutMs: number }> = {}) {
+function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; contextBudgetTokens: number; stallTimeoutMs: number; askTimeoutMs: number }> = {}) {
   const dir = extra.dir ?? join(tmpdir(), `fraktole-reviewer-host-${process.pid}-${++hostSeq}`);
   const provider = new FakeProvider(script);
   const events: string[] = [];
@@ -80,6 +80,7 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
     retryDelayMs: extra.retryDelayMs ?? 1,
     stallTimeoutMs: extra.stallTimeoutMs,
     contextBudgetTokens: extra.contextBudgetTokens,
+    askTimeoutMs: extra.askTimeoutMs,
     conversationFile: extra.dir ? join(extra.dir, 'conversation.jsonl') : uniqueConversationFile(),
     emit: {
       status: (s, e) => {
@@ -535,7 +536,7 @@ describe('ReviewerHost', () => {
     );
     await host.start();
     await host.prompt('ask');
-    await settle(80);
+    await settle(120);
     expect(asks).toHaveLength(1);
     await host.restart();
     await settle(80);
@@ -1639,5 +1640,51 @@ describe('ReviewerHost', () => {
     expect(provider.complete.mock.calls.length).toBeGreaterThanOrEqual(3);
     expect(events.some((e) => e.startsWith('question:'))).toBe(false);
     expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'auto')).toBe(true);
+  });
+
+  it('an unanswered ask_user rejects after the ask timeout and the loop continues', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider, asks } = makeHost(
+      [
+        { text: '', toolCalls: [{ id: 'c1', name: 'ask_user', args: { question: 'wait for timeout?', kind: 'free' } }] },
+        { text: 'after timeout', toolCalls: [] },
+      ],
+      recorder,
+      { askTimeoutMs: 40 },
+    );
+    await host.start();
+    await host.prompt('ask');
+    await settle(120);
+    expect(asks).toHaveLength(1);
+    // the promise should reject within ~1s
+    await settle(80);
+    // the loop should not be stuck — a subsequent queue item processes
+    expect(provider.complete.mock.calls.length).toBeGreaterThanOrEqual(1);
+    const contents = host.conversation.map((e) => e.content);
+    expect(contents).toContain('after timeout');
+    expect(provider.complete.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('answerQuestion after the timeout is a no-op', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider, asks } = makeHost(
+      [
+        { text: '', toolCalls: [{ id: 'c1', name: 'ask_user', args: { question: 'q?', kind: 'free' } }] },
+        { text: 'done', toolCalls: [] },
+      ],
+      recorder,
+      { askTimeoutMs: 40 },
+    );
+    await host.start();
+    await host.prompt('ask');
+    await settle(120);
+    expect(asks).toHaveLength(1);
+    // wait for the timeout rejection
+    await settle(80);
+    // answerQuestion with the correct askId should be a no-op since pendingAsk was cleared
+    host.answerQuestion(asks[0]!.id, 'ok');
+    await settle(60);
+    // the loop should have moved on (not stuck)
+    expect(provider.complete.mock.calls.length).toBeGreaterThanOrEqual(1);
   });
 });

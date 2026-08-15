@@ -72,6 +72,23 @@ function makeRegistry(logs: string[] = []) {
 }
 
 describe('SessionRuntime lifecycle', () => {
+  it('activate starts the mailbox router for a fresh running runtime', () => {
+    const { host, reviewer, router } = fakes();
+    const rt = new SessionRuntime({
+      session: session('s1'),
+      sessionRoot: '/tmp/sessions',
+      host,
+      reviewer,
+      router,
+      judgeCwd: () => '/home',
+    });
+    expect(rt.state).toBe('running');
+    expect(router.start).not.toHaveBeenCalled();
+    rt.activate();
+    expect(router.start).toHaveBeenCalledTimes(1);
+    expect(rt.state).toBe('running');
+  });
+
   it('activate does not spawn the judge (lazy, on reviewer visit)', () => {
     const { host, reviewer, router } = fakes();
     const rt = new SessionRuntime({

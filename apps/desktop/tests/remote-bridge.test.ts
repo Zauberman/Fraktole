@@ -490,9 +490,35 @@ describe('JSON-RPC', () => {
     await expectSilence(client, (m) => (m as { type?: string })?.type === 'tile.output');
 
     // and after unsubscribe nothing arrives either
-    await client.rpc(7, 'tile.unsubscribe', { tileId: 'agent-1' });
+    await client.rpc(7, 'tile.unsubscribe', { sessionId: 's1', tileId: 'agent-1' });
     e.bridge.publish({ type: 'tile.output', sessionId: 's1', tileId: 'live-1', data: 'after unsub', ts: 2 });
     await expectSilence(client, (m) => (m as { type?: string })?.type === 'tile.output');
+    client.ws.close();
+  });
+
+  it('unsubscribe is scoped per session: dropping s1 keeps the s2 subscription', async () => {
+    const e = await env();
+    const { client } = await authed(e);
+    await client.rpc(6, 'tile.subscribe', { sessionId: 's1', tileId: 'agent-1' });
+    await client.waitFor((m) => (m as { type?: string })?.type === 'tile.snapshot');
+    await client.rpc(7, 'tile.subscribe', { sessionId: 's2', tileId: 'agent-1' });
+    await client.waitFor((m) => (m as { type?: string })?.type === 'tile.snapshot');
+
+    // unsubscribe ONLY s1 — the s2 subscription must survive
+    await client.rpc(8, 'tile.unsubscribe', { sessionId: 's1', tileId: 'agent-1' });
+
+    // s1 output must NOT arrive
+    e.bridge.publish({ type: 'tile.output', sessionId: 's1', tileId: 'live-1', data: 's1 after unsub', ts: 2 });
+    await expectSilence(client, (m) => (m as { type?: string })?.type === 'tile.output');
+
+    // s2 output (same tileId, different session) MUST still arrive
+    e.bridge.publish({ type: 'tile.output', sessionId: 's2', tileId: 'live-1', data: 's2 still live', ts: 3 });
+    const output = await client.waitFor((m) => (m as { type?: string })?.type === 'tile.output');
+    expect(output).toMatchObject({ type: 'tile.output', params: { data: 's2 still live' } });
+
+    // unsubscribe without sessionId is rejected
+    const bad = await client.rpc(9, 'tile.unsubscribe', { tileId: 'agent-1' });
+    expect(bad).toMatchObject({ error: { code: -32000 } });
     client.ws.close();
   });
 

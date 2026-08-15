@@ -31,6 +31,7 @@ class FakeRemoteGateway implements RemoteGateway {
 
   final List<Map<String, Object?>> pairCalls = [];
   final List<Map<String, Object?>> connectCalls = [];
+  int disconnectCalls = 0;
   final List<Map<String, Object?>> subscribeCalls = [];
   final List<Map<String, Object?>> unsubscribeCalls = [];
   final List<String> rpcCalls = [];
@@ -138,6 +139,7 @@ class FakeRemoteGateway implements RemoteGateway {
 
   @override
   Future<void> disconnect() async {
+    disconnectCalls++;
     _authInfo = null;
     emitStatus(ConnectionStatus.disconnected);
   }
@@ -161,8 +163,11 @@ class FakeRemoteGateway implements RemoteGateway {
   }
 
   @override
-  Future<void> unsubscribeTile({required String tileId}) async {
-    unsubscribeCalls.add({'tileId': tileId});
+  Future<void> unsubscribeTile({
+    required String sessionId,
+    required String tileId,
+  }) async {
+    unsubscribeCalls.add({'sessionId': sessionId, 'tileId': tileId});
   }
 
   @override

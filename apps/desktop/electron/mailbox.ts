@@ -294,7 +294,9 @@ export class MailboxRouter {
           // a corrupt line must not hide the rest of the history
         }
       }
-      return messages.sort((a, b) => b.at - a.at);
+      // coerce legacy at:0/undefined timestamps so they sort as oldest,
+      // never NaN (which would make the sort a no-op)
+      return messages.sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
     } catch {
       return [];
     }

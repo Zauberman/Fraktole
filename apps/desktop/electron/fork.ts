@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { copyFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { copyFile, mkdir, readdir, realpath, rm, stat } from 'node:fs/promises';
+import { join, resolve, sep } from 'node:path';
 
 export type ForkResult = { ok: true; path: string } | { ok: false; error: string };
 
@@ -53,7 +53,10 @@ export async function forkProject(src: string, dest: string, home: string): Prom
       });
     });
     if (cloned) return { ok: true, path: dest };
-    // clone failed — fall through to the copy
+    // clone failed — a partial .git may have been left behind; the copy
+    // fallback skips dotfiles, so it must start from a clean destination
+    // (otherwise the fork would carry a corrupt repo the agents run git on)
+    await rm(dest, { recursive: true, force: true }).catch(() => undefined);
   }
 
   let count = 0;
@@ -75,11 +78,27 @@ export async function forkProject(src: string, dest: string, home: string): Prom
         if (entry.isDirectory()) {
           await mkdir(t, { recursive: true });
           if (!(await walk(s, t))) return false;
-        } else if (entry.isFile() || entry.isSymbolicLink()) {
+        } else if (entry.isFile()) {
           try {
             await copyFile(s, t);
           } catch (err) {
-            if (isSkippable(err)) continue; // unreadable or broken link — skip
+            if (isSkippable(err)) continue; // unreadable — skip
+            throw err;
+          }
+        } else if (entry.isSymbolicLink()) {
+          // copyFile follows symlinks, so a link pointing OUTSIDE the project
+          // (e.g. ~/.ssh/config) would leak its content into the fork — the
+          // fork must stay self-contained. Resolve the real target and only
+          // copy it when it stays inside the source tree.
+          try {
+            const resolved = await realpath(s);
+            const root = resolve(src) + sep;
+            if (resolved.startsWith(root) || resolved === resolve(src)) {
+              await copyFile(resolved, t);
+            }
+            // outside the tree: skip (the fork loses the link, not the secret)
+          } catch (err) {
+            if (isSkippable(err)) continue; // broken link — skip
             throw err;
           }
         }

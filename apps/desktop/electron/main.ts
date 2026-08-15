@@ -70,6 +70,20 @@ let currentTheme: ThemeId = 'midnight';
 let registry: SessionRegistry | null = null;
 /** In-flight reviewer spawns awaiting the renderer's tile mount. */
 const pendingSpawns = new Map<string, { agentId: string; resolve(out: string): void }>();
+/**
+ * Settles the pending spawn for an agent with a final verdict. Called from
+ * the ptySpawn outcome (success or failure) — never from the mount ack,
+ * which only proves the renderer mounted a tile, not that the PTY lives.
+ */
+function settlePendingSpawn(agentId: string, out: string): void {
+  for (const [requestId, pending] of pendingSpawns) {
+    if (pending.agentId === agentId) {
+      pendingSpawns.delete(requestId);
+      pending.resolve(out);
+      return;
+    }
+  }
+}
 /** In-flight test-page reads/screenshots awaiting the renderer. */
 const pendingTestReads = new Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>();
 const pendingTestShots = new Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>();
@@ -522,6 +536,7 @@ if (!app.requestSingleInstanceLock()) {
         pendingSpawns.set(requestId, {
           agentId,
           resolve: (out) => {
+            // the verdict arrives from the ptySpawn outcome (success or error)
             clearTimeout(timer);
             if (out.startsWith('error')) resolve({ ok: false, error: out });
             else resolve({ ok: true, agentId });
@@ -625,7 +640,12 @@ if (!app.requestSingleInstanceLock()) {
         if (args.command && args.command.trim().length > 0) {
           rt.host.write(args.tileId, `${args.command.trim()}\n`);
         }
+        // the PTY is genuinely alive now — the reviewer's spawn verdict is real
+        settlePendingSpawn(agentId, `spawned agent ${agentId} (tile ${args.tileId})`);
       } catch (err) {
+        // a failed spawn must surface as a spawn error to the reviewer, not
+        // a success that the renderer mount ack already reported
+        settlePendingSpawn(agentId, `error: pty spawn failed for ${args.tileId}: ${(err as Error).message}`);
         // a failed spawn must close the tile through the normal exit path,
         // otherwise the renderer would keep a dead tile forever — and the
         // phantom tile state must not linger to resurrect on the next save
@@ -911,12 +931,17 @@ if (!app.requestSingleInstanceLock()) {
           }
           return;
         }
-        pendingSpawns.delete(requestId);
         if (!payload?.tileId) {
+          // the renderer could not mount the tile — fail immediately
+          pendingSpawns.delete(requestId);
           pending.resolve(`error: the renderer could not mount the tile for ${payload?.agentId ?? '?'}`);
           return;
         }
-        pending.resolve(`spawned agent ${payload.agentId} (tile ${payload.tileId})`);
+        // Mount succeeded — keep the pending spawn open: the "spawned" verdict
+        // must wait for the real PTY spawn (ptySpawn). Resolving here would
+        // report a false success before the shell actually exists, and a
+        // failed ptySpawn would leave the reviewer believing an agent lives.
+
       },
     );
     ipcMain.handle(
@@ -1176,29 +1201,39 @@ if (!app.requestSingleInstanceLock()) {
       },
       listMessages: async (limit?: number): Promise<MessageRow[]> => {
         const rt = activeRuntime() ?? null;
+        // read + parse one session's messages.jsonl
+        const readSessionMessages = async (sessionId: string): Promise<MessageRow[]> => {
+          try {
+            const raw = await readFile(join(sessionsRoot, sessionId, 'messages.jsonl'), 'utf8');
+            const out: MessageRow[] = [];
+            for (const line of raw.split('\n')) {
+              if (line.trim().length === 0) continue;
+              try {
+                const m = JSON.parse(line) as { kind?: string; from?: string; to?: string; body?: string; at?: number };
+                if (typeof m.kind !== 'string' || typeof m.body !== 'string') continue;
+                out.push({ kind: m.kind as MessageRow['kind'], from: m.from ?? '', to: m.to ?? '', body: m.body, ts: m.at ?? 0 });
+              } catch {
+                // a corrupt line must not hide the rest of the history
+              }
+            }
+            return out.sort((a, b) => b.ts - a.ts);
+          } catch {
+            return [];
+          }
+        };
         const rows = (rt
           ? await rt.router.listMessages(rt.session.id)
           : await (async () => {
               const list = await sessions.list();
               if (list.length === 0) return [];
-              const target = list[0]!;
-              try {
-                const raw = await readFile(join(sessionsRoot, target.id, 'messages.jsonl'), 'utf8');
-                const out: MessageRow[] = [];
-                for (const line of raw.split('\n')) {
-                  if (line.trim().length === 0) continue;
-                  try {
-                    const m = JSON.parse(line) as { kind?: string; from?: string; to?: string; body?: string; at?: number };
-                    if (typeof m.kind !== 'string' || typeof m.body !== 'string') continue;
-                    out.push({ kind: m.kind as MessageRow['kind'], from: m.from ?? '', to: m.to ?? '', body: m.body, ts: m.at ?? 0 });
-                  } catch {
-                    // a corrupt line must not hide the rest of the history
-                  }
-                }
-                return out.sort((a, b) => b.ts - a.ts);
-              } catch {
-                return [];
+              // no active runtime: merge EVERY session's history so the phone's
+              // global feed is not silently one arbitrary (most-recently-touched)
+              // session's messages
+              const allRows: MessageRow[] = [];
+              for (const session of list) {
+                allRows.push(...(await readSessionMessages(session.id)));
               }
+              return allRows.sort((a, b) => b.ts - a.ts);
             })()) as MessageRow[];
         return rows.slice(0, typeof limit === 'number' && limit > 0 ? Math.min(limit, 200) : 50).map((m) => ({
           kind: m.kind,

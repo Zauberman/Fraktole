@@ -76,7 +76,7 @@ abstract class RemoteGateway {
 
   Future<void> subscribeTile({required String sessionId, required String tileId});
 
-  Future<void> unsubscribeTile({required String tileId});
+  Future<void> unsubscribeTile({required String sessionId, required String tileId});
 
   Stream<TileOutputEvent> get tileOutputs;
   Stream<TileSnapshotEvent> get tileSnapshots;

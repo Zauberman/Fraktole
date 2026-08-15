@@ -111,4 +111,34 @@ void main() {
     expect(await ConnectionStore(kv: kv).read(), isNull);
     expect(g.connectCount, greaterThanOrEqualTo(1));
   });
+
+  testWidgets('disconnect drops to the connect screen with saved credentials kept',
+      (tester) async {
+    final stored = StoredConnection(
+      host: '192.168.1.20',
+      port: 8833,
+      token: 'a' * 64,
+      deviceId: 'device-9',
+      fingerprint: 'b' * 64,
+      deviceName: 'Pixel 8',
+    );
+    final kv = InMemoryKeyValueStore();
+    await ConnectionStore(kv: kv).write(stored);
+    final (g, _) = await pumpApp(tester, kv: kv);
+    expect(find.byType(HomeShell), findsOneWidget);
+
+    // open the Settings tab and hit Disconnect
+    await tester.tap(find.text('Settings'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Disconnect'));
+    await tester.pumpAndSettle();
+
+    // must NOT stay on the "connected" home shell; the connect screen shows
+    // with the saved-device card (credentials are kept for reconnect)
+    expect(find.byType(HomeShell), findsNothing);
+    expect(find.byType(ConnectScreen), findsOneWidget);
+    expect(find.text('Reconnect'), findsOneWidget);
+    expect(g.disconnectCalls, isNotNull);
+    expect(g.status, ConnectionStatus.disconnected);
+  });
 }

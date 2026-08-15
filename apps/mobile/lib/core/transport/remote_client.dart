@@ -193,7 +193,13 @@ class RemoteClient implements RemoteGateway {
       });
     } catch (e) {
       _lastError = '$e';
-      if (e is SocketException) {
+      // SocketException (TCP-level failure) and HandshakeException (TLS-level
+      // failure: transient network glitch mid-handshake, desktop restarting
+      // its WSS server) are both RETRYABLE — route them through the backoff
+      // reconnect. Only genuinely fatal, non-IO errors hit _failFatal().
+      // A permanent pin mismatch therefore shows 'connecting' with backoff
+      // (the user can re-pair) instead of silently killing the connection.
+      if (e is SocketException || e is HandshakeException) {
         _onSocketClosed();
         return;
       }
@@ -394,11 +400,14 @@ class RemoteClient implements RemoteGateway {
   }
 
   @override
-  Future<void> unsubscribeTile({required String tileId}) async {
+  Future<void> unsubscribeTile({
+    required String sessionId,
+    required String tileId,
+  }) async {
     _subscribedTiles.remove(tileId);
     _liveToClientTile.removeWhere((_, v) => v == tileId);
     try {
-      await rpc('tile.unsubscribe', {'tileId': tileId});
+      await rpc('tile.unsubscribe', {'sessionId': sessionId, 'tileId': tileId});
     } catch (_) {}
   }
 

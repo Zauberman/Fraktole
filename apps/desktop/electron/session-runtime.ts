@@ -49,7 +49,7 @@ export interface RuntimeRouter {
     ref?: string;
     at: number;
   }): Promise<boolean>;
-  listMessages(sessionId: string): Promise<unknown[]>;
+  listMessages(sessionId: string): Promise<FraktoleMessage[]>;
 }
 
 export interface SessionRuntimeOpts {
@@ -125,11 +125,9 @@ export class SessionRuntime {
     this.lastActiveAt = Date.now();
     this.clearIdleTimer();
     if (this.state === 'stopped') {
-      // reviving a stopped session must also restart the mailbox router,
-      // otherwise agent replies would never be scanned again
       this.state = 'running';
-      this.opts.router.start(this.sessionRef.id);
     }
+    this.opts.router.start(this.sessionRef.id);
   }
 
   /** Called when another session becomes active. */
