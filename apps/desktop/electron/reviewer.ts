@@ -192,6 +192,9 @@ export class ReviewerHost {
   private messages: ProviderMsg[] = [];
   private queue: ProviderMsg[] = [];
   private running = false;
+  /** A typed user prompt arrived while a turn was in flight: the current
+   *  turn yields at the next tool boundary so the prompt is handled next. */
+  private pendingInterrupt = false;
   private aborter: AbortController | null = null;
   private provider: ProviderClient;
   /** Provider/endpoint/model resolved from the key at start(). */
@@ -407,6 +410,10 @@ export class ReviewerHost {
     if (!(await this.ensureStarted())) return false;
     const msg: ProviderMsg = { role: 'user', content: this.withStateBlock(text), announced: true };
     this.queue.push(msg);
+    // a typed prompt yields the running turn at the next tool boundary so it
+    // is picked up within one model call + tool batch, not after the whole
+    // (up to 25-iteration) turn
+    if (this.running) this.pendingInterrupt = true;
     this.opts.emit.message(toEntry(msg));
     this.drainQueue();
     return true;
@@ -814,9 +821,18 @@ export class ReviewerHost {
         await this.persist();
         // prompts are announced at queue time — skip the duplicate emit
         if (!turn.announced) this.opts.emit.message(toEntry(turn));
+        // Clear the interrupt flag now that this turn's setup is done. A
+        // prompt that arrived during setup (persist/emit above) must not
+        // nuke a turn that has not started; only a prompt that lands while a
+        // model call / tool is running (below) preempts at the next boundary.
+        this.pendingInterrupt = false;
 
         for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
           if (aborter.signal.aborted) break;
+          // a queued user prompt yields the turn at the tool boundary: the
+          // current iteration (complete + tool results) is already persisted,
+          // so breaking here never orphans the conversation
+          if (this.pendingInterrupt) break;
           const response = await this.callWithRetry(aborter.signal, (signal, onActivity) =>
             this.provider.complete({
               model: res.model,

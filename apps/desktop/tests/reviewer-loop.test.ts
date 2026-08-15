@@ -9,7 +9,7 @@ import { TileRecorder } from '../electron/tile-recorder.js';
 import type { ProviderClient, ProviderMsg } from '../electron/reviewer/providers.js';
 
 type ScriptEntry =
-  | { text: string; toolCalls: ProviderMsg['toolCalls']; thinking?: string; usage?: { inputTokens: number; cachedTokens: number; outputTokens: number } }
+  | { text: string; toolCalls: ProviderMsg['toolCalls']; thinking?: string; usage?: { inputTokens: number; cachedTokens: number; outputTokens: number }; delay?: number }
   | { hang: boolean }
   | { fail: boolean };
 
@@ -27,12 +27,15 @@ class FakeProvider implements ProviderClient {
       if (entry && 'fail' in entry) {
         return Promise.reject(new Error('provider boom'));
       }
-      return Promise.resolve({
+      const body = {
         text: entry.text,
         toolCalls: entry.toolCalls ?? [],
         thinking: entry.thinking ?? '',
         ...(entry.usage ? { usage: entry.usage } : {}),
-      });
+      };
+      return entry.delay
+        ? new Promise((resolve) => setTimeout(() => resolve(body), entry.delay))
+        : Promise.resolve(body);
     });
   }
 }
@@ -1859,6 +1862,40 @@ describe('ReviewerHost', () => {
       await settle(40);
       expect(host.status).toBe('stopped');
       expect(host.conversation.some((e) => (e.content ?? '').includes('[watchdog]'))).toBe(false);
+    });
+  });
+
+  describe('prompt pickup: preemptive yield', () => {
+    it('yields the current turn to a queued user prompt at the tool boundary', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-interrupt-${process.pid}-${++hostSeq}`));
+      const recorder = recorderWith('line');
+      // turn A's first complete is delayed so the interrupt lands mid-turn
+      // (during the in-flight model call), before the second tool iteration
+      const { host } = makeHost(
+        [
+          { text: '', toolCalls: [{ id: 'c1', name: 'read_tile', args: { tileId: 'tile-1' } }], delay: 120 },
+          { text: '', toolCalls: [{ id: 'c2', name: 'read_tile', args: { tileId: 'tile-1' } }] },
+          { text: 'done', toolCalls: [] },
+        ],
+        recorder,
+        { dir },
+      );
+      await host.start();
+      await host.prompt('work'); // turn A starts; its first complete() is delayed
+      await settle(30); // let turn A pass setup and enter the in-flight complete()
+      host.prompt('interrupt'); // queued mid-turn → pendingInterrupt
+      await settle(120); // delayed complete resolves, tool runs, next boundary breaks
+      // the interrupt was processed
+      expect(host.conversation.some((e) => (e.content ?? '') === 'interrupt')).toBe(true);
+      // turn A yielded after ONE iteration: the 'interrupt' user turn follows
+      // turn A's first tool result directly, and turn A never issued a second
+      // tool call (c2) before it
+      const idx = host.conversation.findIndex((e) => (e.content ?? '') === 'interrupt');
+      expect(idx).toBeGreaterThan(-1);
+      const before = host.conversation.slice(0, idx);
+      expect(before.filter((e) => e.role === 'assistant')).toHaveLength(1);
+      expect(before.some((e) => e.toolCallId === 'c1')).toBe(true);
+      expect(before.some((e) => e.toolCallId === 'c2')).toBe(false);
     });
   });
 });
