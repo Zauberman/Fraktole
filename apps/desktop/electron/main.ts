@@ -4,6 +4,8 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildAgentEnv } from './agent-env.js';
 import { MailboxRouter, ORCHESTRATOR_ID, messageId } from './mailbox.js';
+import { readMessagesJsonl } from './messages-log.js';
+import { listProjectFiles } from './project-files.js';
 import { listModels } from './model-list.js';
 import { PtyHost } from './pty-host.js';
 import { ProjectsStore } from './projects.js';
@@ -89,41 +91,6 @@ const pendingTestReads = new Map<string, { resolve(out: string): void; timer: No
 const pendingTestShots = new Map<string, { resolve(out: string): void; timer: NodeJS.Timeout }>();
 /** Per-session background-job registries (stopped with the session). */
 let testSeq = 0;
-
-/** Quick-open (Ctrl+P): bounded walk of a project root → file list. The
- *  result is cached per root for a few seconds so repeated palette opens are
- *  instant; the walk itself skips heavy/recursive dirs and hidden entries. */
-const QUICK_OPEN_MAX = 5000;
-const QUICK_OPEN_SKIP = new Set(['node_modules', '.git', 'dist', 'build', 'dist-electron', 'dist-renderer', 'release', '.fraktole-auto', '.dart_tool', 'android', '.gradle', '.idea', 'coverage']);
-let quickOpenCache: { root: string; at: number; files: Array<{ name: string; path: string }> } | null = null;
-
-async function listProjectFiles(root: string): Promise<Array<{ name: string; path: string }>> {
-  if (quickOpenCache && quickOpenCache.root === root && Date.now() - quickOpenCache.at < 10_000) {
-    return quickOpenCache.files;
-  }
-  const files: Array<{ name: string; path: string }> = [];
-  const stack = [root];
-  while (stack.length > 0 && files.length < QUICK_OPEN_MAX) {
-    const dir = stack.pop()!;
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      continue; // unreadable dir — skip the subtree
-    }
-    for (const e of entries) {
-      if (files.length >= QUICK_OPEN_MAX) break;
-      if (e.name.startsWith('.')) continue;
-      if (e.isDirectory()) {
-        if (!QUICK_OPEN_SKIP.has(e.name)) stack.push(join(dir, e.name));
-      } else if (e.isFile() || e.isSymbolicLink()) {
-        files.push({ name: e.name, path: join(dir, e.name) });
-      }
-    }
-  }
-  quickOpenCache = { root, at: Date.now(), files };
-  return files;
-}
 
 /** Per-session live infra the remote bridge reads: the PTY recorder and the
  *  set of live tile ids (fed by the ptyData/tileExit send hook). */
@@ -1272,23 +1239,14 @@ if (!app.requestSingleInstanceLock()) {
         const rt = activeRuntime() ?? null;
         // read + parse one session's messages.jsonl
         const readSessionMessages = async (sessionId: string): Promise<MessageRow[]> => {
-          try {
-            const raw = await readFile(join(sessionsRoot, sessionId, 'messages.jsonl'), 'utf8');
-            const out: MessageRow[] = [];
-            for (const line of raw.split('\n')) {
-              if (line.trim().length === 0) continue;
-              try {
-                const m = JSON.parse(line) as { kind?: string; from?: string; to?: string; body?: string; at?: number };
-                if (typeof m.kind !== 'string' || typeof m.body !== 'string') continue;
-                out.push({ kind: m.kind as MessageRow['kind'], from: m.from ?? '', to: m.to ?? '', body: m.body, ts: m.at ?? 0 });
-              } catch {
-                // a corrupt line must not hide the rest of the history
-              }
-            }
-            return out.sort((a, b) => b.ts - a.ts);
-          } catch {
-            return [];
+          const parsed = await readMessagesJsonl(sessionsRoot, sessionId);
+          const out: MessageRow[] = [];
+          for (const line of parsed) {
+            const m = line as { kind?: string; from?: string; to?: string; body?: string; at?: number };
+            if (typeof m.kind !== 'string' || typeof m.body !== 'string') continue;
+            out.push({ kind: m.kind as MessageRow['kind'], from: m.from ?? '', to: m.to ?? '', body: m.body, ts: m.at ?? 0 });
           }
+          return out.sort((a, b) => b.ts - a.ts);
         };
         const rows = (rt
           ? await rt.router.listMessages(rt.session.id)

@@ -2,6 +2,7 @@ import { watch, type FSWatcher } from 'node:fs';
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import type { FraktoleMessage, SessionFile } from '../src/shared/ipc.js';
+import { readMessagesJsonl } from './messages-log.js';
 
 export const ORCHESTRATOR_ID = 'orchestrator';
 
@@ -239,20 +240,8 @@ export class MailboxRouter {
   /** Exact id match over the parsed log lines — a raw substring check would
    *  false-positive on ids like m-<ts>-1 vs m-<ts>-12. */
   private async alreadyLogged(sessionId: string, id: string): Promise<boolean> {
-    try {
-      const raw = await readFile(this.logFile(sessionId), 'utf8');
-      for (const line of raw.split('\n')) {
-        if (line.trim().length === 0) continue;
-        try {
-          if ((JSON.parse(line) as { id?: unknown }).id === id) return true;
-        } catch {
-          // a corrupt line must not hide the rest of the history
-        }
-      }
-      return false;
-    } catch {
-      return false;
-    }
+    const parsed = await readMessagesJsonl(this.opts.root, sessionId);
+    return parsed.some((line) => (line as { id?: unknown }).id === id);
   }
 
   private logFile(sessionId: string): string {
@@ -283,22 +272,9 @@ export class MailboxRouter {
   }
 
   async listMessages(sessionId: string): Promise<FraktoleMessage[]> {
-    try {
-      const raw = await readFile(this.logFile(sessionId), 'utf8');
-      const messages: FraktoleMessage[] = [];
-      for (const line of raw.split('\n')) {
-        if (line.trim().length === 0) continue;
-        try {
-          messages.push(JSON.parse(line) as FraktoleMessage);
-        } catch {
-          // a corrupt line must not hide the rest of the history
-        }
-      }
-      // coerce legacy at:0/undefined timestamps so they sort as oldest,
-      // never NaN (which would make the sort a no-op)
-      return messages.sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
-    } catch {
-      return [];
-    }
+    const messages = (await readMessagesJsonl(this.opts.root, sessionId)) as FraktoleMessage[];
+    // coerce legacy at:0/undefined timestamps so they sort as oldest,
+    // never NaN (which would make the sort a no-op)
+    return messages.sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   }
 }

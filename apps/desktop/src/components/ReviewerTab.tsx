@@ -10,6 +10,7 @@ import {
 } from '../shared/reviewer-detect.js';
 import { sanitizeChatText } from '../shared/sanitize.js';
 import { CustomPluginDialog } from './CustomPluginDialog.js';
+import { ReviewerToolCard } from './ReviewerToolCard.js';
 
 /** One row of the unified transcript timeline: a message or a tool call.
  *  Events arrive over IPC in order, so the renderer's monotonic `seq` is
@@ -661,63 +662,11 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               </div>
             </div>
           ) : (
-            (() => {
-              const key = it.callId ?? String(it.seq);
-              const open = expanded[key] || it.state === 'error';
-              return (
-                <div key={it.seq} className={`reviewer-item reviewer-item-tool reviewer-item-tool-${it.state ?? 'start'}`}>
-                  <span className={`reviewer-tool-band reviewer-tool-band-${it.state ?? 'running'}`} aria-hidden="true" />
-                  <div className="reviewer-tool-header">
-                    <div className="reviewer-tool-row">
-                      <button type="button" className="reviewer-tool-toggle" onClick={() => setExpanded((e) => ({ ...e, [key]: !e[key] }))}>
-                        <svg
-                          className={`reviewer-tool-chevron${open ? ' reviewer-tool-chevron-open' : ''}`}
-                          width="10"
-                          height="10"
-                          viewBox="0 0 10 10"
-                          fill="none"
-                          aria-hidden="true"
-                        >
-                          <path d="M3 1 L8 5 L3 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="square" />
-                        </svg>
-                        <span className="reviewer-tool-name">{it.name}</span>
-                      </button>
-                      <span className={`reviewer-tool-state reviewer-tool-state-${it.state ?? 'start'}`}>
-                        {it.state === 'start' ? 'running' : it.state}
-                      </span>
-                      {it.state !== 'start' && it.durationMs !== undefined && (
-                        <span className="reviewer-item-time">{it.durationMs}ms</span>
-                      )}
-                      {it.state !== 'start' && it.detail !== undefined && (
-                        <button
-                          type="button"
-                          className="reviewer-icon-btn"
-                          title="copy result"
-                          onClick={() => void bridge.clipboardWrite(it.detail ?? '')}
-                        >
-                          <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
-                            <rect x="3.5" y="3.5" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" />
-                            <path
-                              d="M7.5 3.5 V2.5 C7.5 1.95 7.05 1.5 6.5 1.5 H2.5 C1.95 1.5 1.5 1.95 1.5 2.5 V6.5 C1.5 7.05 1.95 7.5 2.5 7.5 H3.5"
-                              stroke="currentColor"
-                              strokeWidth="1.2"
-                              strokeLinecap="square"
-                            />
-                          </svg>
-                        </button>
-                      )}
-                    </div>
-                    {it.args !== undefined && (
-                      <span className="reviewer-tool-args">{sanitizeChatText(it.args)}</span>
-                    )}
-                  </div>
-                  {open && it.detail !== undefined && (
-                    <pre className="reviewer-tool-detail">{sanitizeChatText(it.detail)}</pre>
-                  )}
-                </div>
-              );
-            })()
-          ),
+            <ReviewerToolCard
+              it={it}
+              expanded={expanded[it.callId ?? String(it.seq)] || it.state === 'error'}
+              onToggle={() => setExpanded((e) => ({ ...e, [it.callId ?? String(it.seq)]: !e[it.callId ?? String(it.seq)] }))}
+            />          ),
         )}
         {question && (
           <div className="reviewer-question-card">

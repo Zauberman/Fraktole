@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { copyFile, mkdir, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
+import { FORK_SKIP_DIRS } from './skip-dirs.js';
 
 export type ForkResult = { ok: true; path: string } | { ok: false; error: string };
 
@@ -17,7 +18,7 @@ export async function forkExists(dest: string): Promise<boolean> {
 }
 
 /** Directories never carried into a fork — heavy or recursive by nature. */
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.fraktole-auto', 'release']);
+const SKIP_DIRS = FORK_SKIP_DIRS;
 const MAX_ENTRIES = 50_000;
 /** Error codes meaning "this entry is unreadable or not a plain file" — a
  *  fork is best-effort: one permission-denied file must not abort the whole
