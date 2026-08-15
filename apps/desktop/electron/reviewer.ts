@@ -40,6 +40,8 @@ export interface ReviewerConfig {
   agentCommand?: string;
   /** Reasoning effort (deepseek/openai); empty = auto. */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /** The user's custom autonomous loop (name + full directive). */
+  customAutonomy?: { name?: string; prompt?: string };
 }
 
 /** Smart default: 'high' on official DeepSeek/OpenAI endpoints (they accept
@@ -132,7 +134,12 @@ function contextBudgetTokens(model: string, override?: number): number {
  *  a stalled loop can never die quietly. */
 const GOAL_RECHECK_POLLS = 6;
 
-export function buildSystemPrompt(sessionId: string, cwd: string, variant?: AutonomyVariant | null): string {
+export function buildSystemPrompt(
+  sessionId: string,
+  cwd: string,
+  variant?: AutonomyVariant | null,
+  customPrompt?: string,
+): string {
   const lines = [
     `You are the Fraktole reviewer orchestrator for session ${sessionId}. You lead a workforce of agent terminals and you are accountable for the quality of what it ships. Project root: ${cwd}.`,
     '',
@@ -160,7 +167,13 @@ export function buildSystemPrompt(sessionId: string, cwd: string, variant?: Auto
     '',
   ];
   if (variant && variant in AUTONOMY_PLUGINS) {
-    lines.push('', AUTONOMY_PLUGINS[variant as AutonomyVariant]!);
+    // the custom variant's section is the user's saved directive; the
+    // built-in placeholder is the fallback when nothing is saved
+    const plugin =
+      variant === 'custom' && customPrompt && customPrompt.trim().length > 0
+        ? customPrompt
+        : AUTONOMY_PLUGINS[variant as AutonomyVariant]!;
+    lines.push('', plugin);
   }
   return lines.join('\n');
 }
@@ -301,7 +314,10 @@ export class ReviewerHost {
     // The system prompt is memory-only (never persisted), so a reloaded
     // conversation must get it back explicitly — otherwise the model runs
     // without its operating protocol after every relaunch.
-    const system: ProviderMsg = { role: 'system', content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd, this.variant) };
+    const system: ProviderMsg = {
+      role: 'system',
+      content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd, this.variant, this.customPromptOf(cfg)),
+    };
     if (this.messages[0]?.role === 'system') {
       this.messages[0] = system;
     } else {
@@ -438,26 +454,40 @@ export class ReviewerHost {
     await persistState(this.stateFile, this.state, this.opts.logger);
     const systemIdx = this.messages.findIndex((m) => m.role === 'system');
     if (systemIdx >= 0) {
+      const cfg = await this.opts.getConfig();
       this.messages[systemIdx] = {
         role: 'system',
-        content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd, variant),
+        content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd, variant, this.customPromptOf(cfg)),
       };
     }
     this.setStatus(this.status);
   }
 
+  /** The user's saved custom directive (trimmed), or undefined when none
+   *  is saved — buildSystemPrompt then falls back to the placeholder. */
+  private customPromptOf(cfg: ReviewerConfig): string | undefined {
+    const prompt = cfg.customAutonomy?.prompt;
+    return typeof prompt === 'string' && prompt.trim().length > 0 ? prompt.trim() : undefined;
+  }
+
   /** Starts an autonomous run for a variant: forks the project, arms the
-   *  mission goal and kicks the loop off with an announced turn. */
+   *  mission goal and kicks the loop off with an announced turn. The custom
+   *  variant arms a goal derived from its saved name. */
   async startAutonomy(variant: AutonomyVariant): Promise<{ ok: boolean; error?: string }> {
     if (!(await this.ensureStarted())) return { ok: false, error: 'reviewer not running' };
     const fork = await (this.opts.forkProject?.(variant) ?? Promise.resolve({ ok: false as const, error: 'fork unavailable' }));
     if (!fork.ok) return { ok: false, error: fork.error };
+    const cfg = await this.opts.getConfig();
+    const mission =
+      variant === 'custom'
+        ? `Autonomous custom run: ${cfg.customAutonomy?.name?.trim() || 'custom'}`
+        : AUTONOMY_MISSIONS[variant];
     await this.setVariant(variant);
-    await this.setGoal(AUTONOMY_MISSIONS[variant]);
+    await this.setGoal(mission);
     const kick: ProviderMsg = {
       role: 'user',
       announced: true,
-      content: `[autonomous mode] variant=${variant} — fork at ${fork.path}. ${AUTONOMY_MISSIONS[variant]} Begin the loop: spawn the read-only plan agent inside the fork and start researching.`,
+      content: `[autonomous mode] variant=${variant} — fork at ${fork.path}. ${mission} Begin the loop: spawn the read-only plan agent inside the fork and start researching.`,
     };
     this.queue.push(kick);
     this.opts.emit.message(toEntry(kick));

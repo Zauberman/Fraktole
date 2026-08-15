@@ -568,7 +568,8 @@ const main = async () => {
     if (!picker) fail('auto compose picker did not open on a real click');
     else ok('auto compose picker opens on a real click');
     const items = await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .autonomy-item')].map((b) => b.textContent.trim())`);
-    if (!['off', 'cyber', 'frontend', 'bugs'].every((i) => items.includes(i))) fail(`picker items wrong: ${items.join(',')}`);
+    if (!['off', 'Cyber', 'Frontend', 'Bugs', 'Feature', 'Test suite', 'Readability', 'custom', 'edit custom…'].every((i) => items.includes(i)))
+      fail(`picker items wrong: ${items.join(',')}`);
     else ok(`auto compose variants listed: ${items.join(', ')}`);
     // a second real click on the button must CLOSE the picker (the backdrop
     // must not eat the button's mousedown)
@@ -580,7 +581,7 @@ const main = async () => {
     // session cwd = home, no project)
     await clickAt(c.x, c.y);
     await waitFor(menuInView, 10000, 'picker reopened');
-    await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .autonomy-item')].find((b) => b.textContent.trim() === 'cyber')?.click(); true`);
+    await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .autonomy-item')].find((b) => b.textContent.trim() === 'Cyber')?.click(); true`);
     const refusal = await waitFor(
       `document.querySelector('.pane-reviewer-column .reviewer-hint-error')?.textContent ?? ''`,
       15000,
@@ -588,6 +589,17 @@ const main = async () => {
     );
     if (!refusal.includes('no project to fork')) fail(`no clean fork refusal: ${refusal}`);
     else ok(`fork refusal surfaced cleanly: ${refusal}`);
+    // reopen and open the custom loop editor from the popover
+    await clickAt(c.x, c.y);
+    await waitFor(menuInView, 10000, 'picker reopened for editor');
+    await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .autonomy-item')].find((b) => b.textContent.trim() === 'edit custom…')?.click(); true`);
+    const editorOpen = await waitFor(`document.querySelector('.pane-reviewer-column .dialog-textarea') !== null`, 5000, 'custom loop editor');
+    if (!editorOpen) fail('custom loop editor did not open');
+    else ok('custom loop editor opens from the popover');
+    await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .dialog .btn')].find((b) => b.textContent.trim() === 'cancel')?.click(); true`);
+    const editorClosed = await waitFor(`document.querySelector('.pane-reviewer-column .dialog-textarea') === null`, 5000, 'editor closed');
+    if (!editorClosed) fail('custom loop editor did not close');
+    else ok('custom loop editor closes');
   }
 
   const rowColors = await evalJs(`(() => {

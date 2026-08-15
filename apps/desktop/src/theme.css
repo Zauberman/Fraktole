@@ -390,6 +390,12 @@ button:active:not(:disabled) {
   background: var(--accent-tint);
 }
 
+.autonomy-menu-sep {
+  height: 1px;
+  margin: var(--s1) var(--s2);
+  background: var(--line-strong);
+}
+
 .orch-judge-status {
   display: inline-flex;
   align-items: center;
@@ -2242,6 +2248,31 @@ button:active:not(:disabled) {
 }
 
 .dialog-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--focus-ring);
+}
+
+.dialog-wide {
+  width: min(600px, 90vw);
+}
+
+.dialog-textarea {
+  width: 100%;
+  min-height: 260px;
+  padding: var(--s3);
+  background: var(--bg-tile);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font-family: var(--font-mono-alt);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  outline: none;
+  user-select: text;
+  resize: vertical;
+}
+
+.dialog-textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--focus-ring);
 }

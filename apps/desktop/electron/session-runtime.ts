@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import type { FraktoleMessage, ReviewerEntry, SessionFile, SessionState } from '../src/shared/ipc.js';
+import type { AutonomyVariant } from '../src/shared/autonomy.js';
 import type { ReviewerStatus } from './reviewer.js';
 
 /** Minimal shapes the runtime depends on, so tests can inject fakes. */
@@ -27,9 +28,9 @@ export interface RuntimeReviewer {
   cancel(): void;
   setGoal(text: string | null): Promise<void>;
   /** Swap the autonomous-mode variant (null clears it) + rebuild the prompt. */
-  setVariant(variant: 'cyber' | 'frontend' | 'bugs' | null): Promise<void>;
+  setVariant(variant: AutonomyVariant | null): Promise<void>;
   /** Start an autonomous run: fork, arm the mission goal, kick off. */
-  startAutonomy(variant: 'cyber' | 'frontend' | 'bugs'): Promise<{ ok: boolean; error?: string }>;
+  startAutonomy(variant: AutonomyVariant): Promise<{ ok: boolean; error?: string }>;
   answerQuestion(askId: string, answer: string): void;
   killAgentNow(agentId: string): Promise<string>;
   onAgentMessage(msg: FraktoleMessage): void;

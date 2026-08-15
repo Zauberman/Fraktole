@@ -38,6 +38,15 @@ export class SettingsStore {
             parsed.reviewer?.reasoningEffort === 'high'
               ? parsed.reviewer.reasoningEffort
               : undefined,
+          customAutonomy:
+            typeof parsed.reviewer?.customAutonomy?.name === 'string' ||
+            typeof parsed.reviewer?.customAutonomy?.prompt === 'string'
+              ? {
+                  name: typeof parsed.reviewer?.customAutonomy?.name === 'string' ? parsed.reviewer.customAutonomy.name : undefined,
+                  prompt:
+                    typeof parsed.reviewer?.customAutonomy?.prompt === 'string' ? parsed.reviewer.customAutonomy.prompt : undefined,
+                }
+              : undefined,
         },
       };
     } catch {

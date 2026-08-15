@@ -1,3 +1,5 @@
+import type { AutonomyVariant } from './autonomy.js';
+
 export const IPC = {
   ptySpawn: 'pty:spawn',
   ptyWrite: 'pty:write',
@@ -144,6 +146,9 @@ export interface Settings {
    *  Unset = auto: 'high' on official DeepSeek/OpenAI endpoints, omitted
    *  elsewhere (custom endpoints can reject unknown params). */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /** The user's custom autonomous loop: name + full directive. When the
+   *  custom variant is picked, this prompt replaces the placeholder. */
+  customAutonomy?: { name?: string; prompt?: string };
 };
 }
 
@@ -206,7 +211,7 @@ export interface ReviewerState {
    *  model may reuse it without asking again. */
   lastAgentKind: string | null;
   /** The active autonomous-mode variant (null = normal mode). */
-  variant: 'cyber' | 'frontend' | 'bugs' | null;
+  variant: AutonomyVariant | null;
   /** Cumulative model token usage (input / cache-hit / output). */
   usage: ReviewerUsage;
 }

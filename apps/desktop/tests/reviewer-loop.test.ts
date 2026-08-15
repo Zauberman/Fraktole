@@ -1588,6 +1588,42 @@ describe('ReviewerHost', () => {
     expect(host.conversation[0]?.content).not.toContain('AUTONOMOUS MODE');
   });
 
+  it('custom variant uses the saved directive and arms a name-derived mission', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-custom-${process.pid}-${++hostSeq}`);
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const recorder = new TileRecorder();
+    const { host } = makeHost(
+      [{ text: 'ok', toolCalls: [] }],
+      recorder,
+      {
+        dir,
+        config: {
+          provider: 'ollama',
+          model: 'm',
+          customAutonomy: { name: 'My Loop', prompt: 'AUTONOMOUS MODE: MY LOOP\n- my directive line' },
+        },
+      },
+    );
+    await host.start();
+    await host.setVariant('custom');
+    await settle(30);
+    const systemMsg = host.conversation[0];
+    expect(systemMsg?.content).toContain('AUTONOMOUS MODE: MY LOOP');
+    expect(systemMsg?.content).toContain('my directive line');
+    expect(systemMsg?.content).not.toContain('AUTONOMOUS MODE: CUSTOM');
+    // startAutonomy forks under 'custom' and arms the name-derived mission
+    (host as unknown as { opts: { forkProject?: (v: string) => Promise<{ ok: boolean; path?: string; error?: string }> } }).opts.forkProject = async (v: string) => ({
+      ok: true,
+      path: `/tmp/proj/.fraktole-auto/${v}`,
+    });
+    const res = await host.startAutonomy('custom');
+    expect(res.ok).toBe(true);
+    await settle(50);
+    expect(host.conversation.some((e) => (e.content ?? '').includes('Autonomous custom run: My Loop'))).toBe(true);
+    expect(host.conversation.some((e) => (e.content ?? '').includes('fork at /tmp/proj/.fraktole-auto/custom'))).toBe(true);
+  });
+
   it('startAutonomy forks, arms the mission goal and kicks off the loop', async () => {
     const recorder = new TileRecorder();
     const forked: string[] = [];

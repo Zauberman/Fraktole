@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReviewerEntry, ReviewerGoal, ReviewerQuestion, ReviewerStatus, ReviewerToolCallEvent, SubGoal } from '../ipc.js';
 import { bridge, type Settings } from '../ipc.js';
+import { AUTONOMY_NAMES, AUTONOMY_VARIANTS } from '../shared/autonomy.js';
 import {
   DEFAULT_MODELS,
   REVIEWER_MODEL_SUGGESTIONS,
@@ -8,6 +9,7 @@ import {
   type DetectedProvider,
 } from '../shared/reviewer-detect.js';
 import { sanitizeChatText } from '../shared/sanitize.js';
+import { CustomPluginDialog } from './CustomPluginDialog.js';
 
 /** One row of the unified transcript timeline: a message or a tool call.
  *  Events arrive over IPC in order, so the renderer's monotonic `seq` is
@@ -71,6 +73,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   /** Active autonomous-mode variant (null = normal mode). */
   const [variant, setVariant] = useState<string | null>(null);
   const [autonomyOpen, setAutonomyOpen] = useState(false);
+  const [customEditorOpen, setCustomEditorOpen] = useState(false);
   const [question, setQuestion] = useState<ReviewerQuestion | null>(null);
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
@@ -354,12 +357,30 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         baseUrl: draft.baseUrl.trim() || undefined,
         agentCommand: draft.agentCommand.trim() || undefined,
         reasoningEffort: (draft.reasoningEffort || undefined) as Settings['reviewer']['reasoningEffort'],
+        customAutonomy: settings.reviewer.customAutonomy,
       },
     };
     void bridge.setSettings(next).then(() => {
       setSettings(next);
       setConfigOpen(false);
       void retry();
+    });
+  };
+
+  const customName = settings?.reviewer?.customAutonomy?.name?.trim() || 'custom';
+
+  const saveCustom = (name: string, prompt: string): void => {
+    if (!settings) return;
+    const next = {
+      ...settings,
+      reviewer: {
+        ...settings.reviewer,
+        customAutonomy: { name: name.length > 0 ? name : undefined, prompt },
+      },
+    };
+    void bridge.setSettings(next).then(() => {
+      setSettings(next);
+      setCustomEditorOpen(false);
     });
   };
 
@@ -382,7 +403,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               title="autonomous mode — plugin system for the reviewer"
               onClick={() => setAutonomyOpen((o) => !o)}
             >
-              auto compose{variant ? ` · ${variant}` : ''}
+              auto compose{variant ? ` · ${variant === 'custom' ? customName : variant}` : ''}
             </button>
             {autonomyOpen && (
               <>
@@ -401,7 +422,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
                   >
                     off
                   </button>
-                  {(['cyber', 'frontend', 'bugs'] as const).map((id) => (
+                  {AUTONOMY_VARIANTS.map((id) => (
                     <button
                       key={id}
                       type="button"
@@ -413,9 +434,20 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
                         });
                       }}
                     >
-                      {id}
+                      {id === 'custom' ? customName : AUTONOMY_NAMES[id]}
                     </button>
                   ))}
+                  <div className="autonomy-menu-sep" />
+                  <button
+                    type="button"
+                    className="autonomy-item"
+                    onClick={() => {
+                      setAutonomyOpen(false);
+                      setCustomEditorOpen(true);
+                    }}
+                  >
+                    edit custom…
+                  </button>
                 </div>
               </>
             )}
@@ -510,6 +542,17 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             </div>
           </section>
         </div>
+      )}
+
+      {customEditorOpen && (
+        <CustomPluginDialog
+          initial={{
+            name: settings?.reviewer?.customAutonomy?.name ?? '',
+            prompt: settings?.reviewer?.customAutonomy?.prompt ?? '',
+          }}
+          onSave={saveCustom}
+          onCancel={() => setCustomEditorOpen(false)}
+        />
       )}
 
       <div className="reviewer-transcript" ref={scrollRef} onScroll={onScroll}>

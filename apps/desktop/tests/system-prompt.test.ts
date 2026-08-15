@@ -96,4 +96,13 @@ describe('autonomous-mode plugins', () => {
       expect(AUTONOMY_MISSIONS[v].length).toBeGreaterThan(10);
     }
   });
+
+  it('the custom variant embeds the saved directive or falls back to the placeholder', () => {
+    const withPrompt = buildSystemPrompt('s-test', '/tmp/proj', 'custom', 'AUTONOMOUS MODE: MY DIRECTIVE\n- go do the thing');
+    expect(withPrompt).toContain('AUTONOMOUS MODE: MY DIRECTIVE');
+    expect(withPrompt).toContain('go do the thing');
+    expect(withPrompt).not.toContain('AUTONOMOUS MODE: CUSTOM');
+    const fallback = buildSystemPrompt('s-test', '/tmp/proj', 'custom');
+    expect(fallback).toContain('AUTONOMOUS MODE: CUSTOM');
+  });
 });
