@@ -589,6 +589,18 @@ const main = async () => {
     );
     if (!refusal.includes('no project to fork')) fail(`no clean fork refusal: ${refusal}`);
     else ok(`fork refusal surfaced cleanly: ${refusal}`);
+    // no prior run in the driver session → picking a variant must NOT offer
+    // the resume dialog (resumableRun is false without an existing fork)
+    const noResume = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-resume-text') === null`);
+    if (!noResume) fail('resume dialog appeared without a prior run');
+    else ok('no resume dialog without a prior run');
+    // summarize is command-only: no button in the reviewer actions, but the
+    // Help menu exposes the command reference
+    const noSummarizeBtn = await evalJs(
+      `![...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].some((b) => b.textContent.trim() === 'summarize')`,
+    );
+    if (!noSummarizeBtn) fail('summarize button should not exist (command-only)');
+    else ok('summarize is command-only (no button)');
     // reopen and open the custom loop editor from the popover
     await clickAt(c.x, c.y);
     await waitFor(menuInView, 10000, 'picker reopened for editor');

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReviewerEntry, ReviewerGoal, ReviewerQuestion, ReviewerStatus, ReviewerToolCallEvent, SubGoal } from '../ipc.js';
 import { bridge, type Settings } from '../ipc.js';
-import { AUTONOMY_NAMES, AUTONOMY_VARIANTS } from '../shared/autonomy.js';
+import { AUTONOMY_NAMES, AUTONOMY_VARIANTS, type AutonomyVariant } from '../shared/autonomy.js';
 import {
   DEFAULT_MODELS,
   REVIEWER_MODEL_SUGGESTIONS,
@@ -74,6 +74,15 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const [variant, setVariant] = useState<string | null>(null);
   const [autonomyOpen, setAutonomyOpen] = useState(false);
   const [customEditorOpen, setCustomEditorOpen] = useState(false);
+  /** Fork/planning phase of an auto-compose start (cleared on first reply). */
+  const [starting, setStarting] = useState<'forking' | 'planning' | null>(null);
+  const startingRef = useRef<'forking' | 'planning' | null>(null);
+  /** A prior run exists (active goal + non-empty fork): offer resume/fresh. */
+  const [resumeOffer, setResumeOffer] = useState<{ variant: AutonomyVariant; goalText: string } | null>(null);
+  /** The last manual summarize-session recap (persisted server-side). */
+  const [recap, setRecap] = useState<{ text: string; at: number } | null>(null);
+  const [recapOpen, setRecapOpen] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
   const [question, setQuestion] = useState<ReviewerQuestion | null>(null);
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
@@ -138,7 +147,14 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       }),
       bridge.onReviewerStream(sessionId, (ev) => {
         const { delta, thinking } = ev;
-        if (delta) setStreamChars((n) => n + delta.length);
+        if (delta) {
+          setStreamChars((n) => n + delta.length);
+          // the first model output marks the start phase over
+          if (startingRef.current) {
+            startingRef.current = null;
+            setStarting(null);
+          }
+        }
         // seq is allocated here, outside the updater: an updater may be
         // re-invoked by React, and an impure increment inside it would mint
         // duplicate keys
@@ -224,6 +240,10 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         setUsage({ inputTokens: ev.inputTokens, cachedTokens: ev.cachedTokens, outputTokens: ev.outputTokens });
         setStreamChars(0);
       }),
+      bridge.onReviewerRecap(sessionId, (r) => {
+        setRecap(r);
+        setRecapOpen(true);
+      }),
     ];
     return () => {
       for (const unsub of unsubs) unsub();
@@ -272,6 +292,11 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       void bridge.compactReviewer(sessionId);
       return;
     }
+    if (text === '/summarize') {
+      setInput('');
+      summarize();
+      return;
+    }
     if (text.startsWith('/goal')) {
       const rest = text.slice(5).trim();
       setInput('');
@@ -308,6 +333,45 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
 
   const stop = (): void => {
     void bridge.stopReviewer(sessionId);
+  };
+
+  /** Ask the model for a session recap and compact the context around it.
+   *  Busy-guarded so a double-click can't queue two passes. */
+  const summarize = (): void => {
+    if (summarizing) return;
+    setSummarizing(true);
+    void bridge.summarizeReviewer(sessionId).then((res) => {
+      setSummarizing(false);
+      if (!res.ok) setComposeError(res.error ?? 'could not summarize the session');
+    });
+  };
+
+  /** Pick an auto-compose variant. When a prior run exists (active goal +
+   *  non-empty fork) offer a resume dialog instead of silently wiping it. */
+  const pickVariant = async (id: AutonomyVariant): Promise<void> => {
+    setAutonomyOpen(false);
+    setStarting('forking');
+    startingRef.current = 'forking';
+    try {
+      const r = await bridge.resumableRun(sessionId, id);
+      if (r.resumable) {
+        startingRef.current = null;
+        setStarting(null);
+        setResumeOffer({ variant: id, goalText: r.goalText ?? '' });
+        return;
+      }
+      startingRef.current = 'planning';
+      setStarting('planning');
+      const res = await bridge.setReviewerAutonomy(sessionId, id, 'auto');
+      if (!res.ok) {
+        startingRef.current = null;
+        setStarting(null);
+        setComposeError(res.error ?? 'autonomous mode failed to start');
+      }
+    } catch {
+      startingRef.current = null;
+      setStarting(null);
+    }
   };
 
   const answerQuestion = (answer: string): void => {
@@ -427,12 +491,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
                       key={id}
                       type="button"
                       className={`autonomy-item${variant === id ? ' autonomy-item-current' : ''}`}
-                      onClick={() => {
-                        setAutonomyOpen(false);
-                        void bridge.setReviewerAutonomy(sessionId, id).then((res) => {
-                          if (!res.ok) setComposeError(res.error ?? 'autonomous mode failed to start');
-                        });
-                      }}
+                      onClick={() => void pickVariant(id)}
                     >
                       {id === 'custom' ? customName : AUTONOMY_NAMES[id]}
                     </button>
@@ -732,6 +791,82 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         </div>
       )}
 
+      {starting && <div className="reviewer-activity">{starting === 'forking' ? 'forking…' : 'planning…'}</div>}
+
+      {recap && recapOpen && (
+        <div className="reviewer-recap">
+          <div className="reviewer-recap-head">
+            <span className="reviewer-recap-title">session recap</span>
+            <span className="reviewer-recap-time">{timeOf(recap.at)}</span>
+            <span className="reviewer-recap-actions">
+              <button type="button" className="btn btn-sm" onClick={() => setRecapOpen(false)}>
+                hide
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => setRecap(null)}>
+                dismiss
+              </button>
+            </span>
+          </div>
+          <div className="reviewer-recap-body">{sanitizeChatText(recap.text)}</div>
+        </div>
+      )}
+
+      {resumeOffer && (
+        <div className="dialog-backdrop" onMouseDown={() => setResumeOffer(null)}>
+          <section className="dialog" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="dialog-title">resume previous run?</div>
+            <div className="reviewer-resume-text">
+              A previous autonomous run for this variant has an active goal and an existing fork. Resume it in place,
+              or discard the fork and start fresh.
+            </div>
+            <div className="reviewer-resume-goal">{sanitizeChatText(resumeOffer.goalText)}</div>
+            <div className="reviewer-config-actions">
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                onClick={() => {
+                  const v = resumeOffer.variant;
+                  setResumeOffer(null);
+                  startingRef.current = 'planning';
+                  setStarting('planning');
+                  void bridge.setReviewerAutonomy(sessionId, v, 'auto').then((res) => {
+                    if (!res.ok) {
+                      startingRef.current = null;
+                      setStarting(null);
+                      setComposeError(res.error ?? 'could not resume the run');
+                    }
+                  });
+                }}
+              >
+                resume in place
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => {
+                  const v = resumeOffer.variant;
+                  setResumeOffer(null);
+                  startingRef.current = 'planning';
+                  setStarting('planning');
+                  void bridge.setReviewerAutonomy(sessionId, v, 'fresh').then((res) => {
+                    if (!res.ok) {
+                      startingRef.current = null;
+                      setStarting(null);
+                      setComposeError(res.error ?? 'could not start fresh');
+                    }
+                  });
+                }}
+              >
+                start fresh
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => setResumeOffer(null)}>
+                cancel
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
       <footer className="reviewer-input">
         <div className="reviewer-composer">
           <input
@@ -742,7 +877,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             }}
             placeholder={
               status === 'running'
-                ? 'prompt the reviewer…  (/goal <text> arms the watchdog)'
+                ? 'prompt the reviewer…  (/goal <text> · /compact · /summarize · /kill <id>)'
                 : status === 'unconfigured'
                   ? 'paste an api key in config — save & restart'
                   : status === 'stopped'

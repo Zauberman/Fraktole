@@ -28,6 +28,7 @@ import {
   type Settings,
   type TestPageState,
 } from '../src/shared/ipc.js';
+import type { AutonomyVariant } from '../src/shared/autonomy.js';
 
 const api = {
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke(IPC.appInfo),
@@ -70,6 +71,11 @@ const api = {
     const listener = (_e: IpcRendererEvent, action: MenuSessionAction): void => cb(action);
     ipcRenderer.on(IPC.menuSession, listener);
     return () => ipcRenderer.removeListener(IPC.menuSession, listener);
+  },
+  onMenuHelp: (cb: (topic: string) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, topic: string): void => cb(topic);
+    ipcRenderer.on(IPC.menuHelp, listener);
+    return () => ipcRenderer.removeListener(IPC.menuHelp, listener);
   },
 
   listProjects: (): Promise<Project[]> => ipcRenderer.invoke(IPC.projectsList),
@@ -142,6 +148,20 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.reviewerMessage, listener);
   },
 
+  setReviewerAutonomy: (sessionId: string, variant: AutonomyVariant | null, mode?: 'auto' | 'fresh'): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.reviewerAutonomy, sessionId, variant, mode ?? 'auto'),
+  resumableRun: (sessionId: string, variant: AutonomyVariant): Promise<{ resumable: boolean; goalText: string | null }> =>
+    ipcRenderer.invoke(IPC.reviewerResumable, sessionId, variant),
+  summarizeReviewer: (sessionId: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke(IPC.reviewerSummarize, sessionId),
+  onReviewerRecap: (sessionId: string, cb: (recap: { text: string; at: number }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, recap: { text: string; at: number }): void => {
+      if (sid === sessionId) cb(recap);
+    };
+    ipcRenderer.on(IPC.reviewerRecap, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerRecap, listener);
+  },
+
   setReviewerGoal: (sessionId: string, text: string | null): Promise<void> =>
     ipcRenderer.invoke(IPC.reviewerSetGoal, sessionId, text),
   onReviewerGoal: (sessionId: string, cb: (ev: ReviewerGoalEvent) => void): (() => void) => {
@@ -158,8 +178,6 @@ const api = {
     ipcRenderer.on(IPC.reviewerUsage, listener);
     return () => ipcRenderer.removeListener(IPC.reviewerUsage, listener);
   },
-  setReviewerAutonomy: (sessionId: string, variant: string | null): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke(IPC.reviewerAutonomy, sessionId, variant),
   listReviewerModels: (opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]> =>
     ipcRenderer.invoke(IPC.reviewerListModels, opts),
   onReviewerQuestion: (sessionId: string, cb: (ev: ReviewerQuestion) => void): (() => void) => {

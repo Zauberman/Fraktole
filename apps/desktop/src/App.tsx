@@ -29,6 +29,13 @@ function BootOverlay({ leaving }: { leaving: boolean }): React.JSX.Element {
   );
 }
 
+/** Shown via Help → Reviewer commands… — the Reviewer prompt-box commands. */
+const REVIEWER_COMMANDS = `Reviewer commands — type these in the Reviewer prompt box:
+/goal <text>   arm the watchdog goal (bare /goal clears it)
+/compact       force a context compaction now
+/summarize     ask the model for a session recap, then compact the context
+/kill <id>     kill the running agent tile <id>`;
+
 export function App(): React.JSX.Element {
   // session + tab orchestration
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -63,6 +70,7 @@ export function App(): React.JSX.Element {
   const [dialogDefault, setDialogDefault] = useState('/home/walid');
   const [sessionDialog, setSessionDialog] = useState<{ mode: 'new' } | { mode: 'rename' | 'save-as'; value: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [help, setHelp] = useState<string | null>(null);
   /** URL pushed by the reviewer's open_test_page; forwarded to the TestTab. */
   const [pendingTestUrl, setPendingTestUrl] = useState<string | null>(null);
   const defaultCwd = useRef('/home/walid');
@@ -402,12 +410,17 @@ export function App(): React.JSX.Element {
       setTab('test');
       setPendingTestUrl(ev.url);
     });
+    // the native Help menu forwards topics here
+    const unsubHelp = bridge.onMenuHelp((topic) => {
+      if (topic === 'reviewer-commands') setHelp(REVIEWER_COMMANDS);
+    });
     return () => {
       unsubTile();
       unsubTheme();
       unsubSpawn();
       unsubSession();
       unsubTest();
+      unsubHelp();
     };
   }, [openTileDialog, setTheme, sessions, activate, deleteSession, stopSession, startSession]);
 
@@ -525,6 +538,19 @@ export function App(): React.JSX.Element {
       {notice && (
         <div className="app-notice" role="status" onClick={() => setNotice(null)}>
           {notice}
+        </div>
+      )}
+      {help && (
+        <div className="dialog-backdrop" onMouseDown={() => setHelp(null)}>
+          <section className="dialog" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="dialog-title">reviewer commands</div>
+            <pre className="help-pre">{help}</pre>
+            <div className="reviewer-config-actions">
+              <button type="button" className="btn btn-sm btn-primary" onClick={() => setHelp(null)}>
+                close
+              </button>
+            </div>
+          </section>
         </div>
       )}
       {!bootGone && <BootOverlay leaving={bootLeaving} />}

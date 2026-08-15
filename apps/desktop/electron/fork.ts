@@ -4,6 +4,18 @@ import { join, resolve, sep } from 'node:path';
 
 export type ForkResult = { ok: true; path: string } | { ok: false; error: string };
 
+/** True when dest exists as a NON-EMPTY directory. Re-entry uses this to
+ *  decide whether a prior run's fork can be resumed in place — an empty or
+ *  missing fork is treated as "no prior work". */
+export async function forkExists(dest: string): Promise<boolean> {
+  try {
+    if (!(await stat(dest)).isDirectory()) return false;
+    return (await readdir(dest)).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Directories never carried into a fork — heavy or recursive by nature. */
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.fraktole-auto', 'release']);
 const MAX_ENTRIES = 50_000;
@@ -22,8 +34,10 @@ function isSkippable(err: unknown): boolean {
  *  - dirty worktrees and non-git projects: recursive copy with exclusions,
  *    so uncommitted work is included.
  *  - the destination is reset first; forking the home directory is refused
- *  (there is no project to fork). */
-export async function forkProject(src: string, dest: string, home: string): Promise<ForkResult> {
+ *  (there is no project to fork).
+ *  - keepExisting: when the destination already holds a non-empty fork,
+ *  reuse it untouched (resume-in-place) instead of wiping it. */
+export async function forkProject(src: string, dest: string, home: string, keepExisting = false): Promise<ForkResult> {
   let isDir = false;
   try {
     isDir = (await stat(src)).isDirectory();
@@ -32,6 +46,8 @@ export async function forkProject(src: string, dest: string, home: string): Prom
   }
   if (!isDir) return { ok: false, error: 'project directory not found' };
   if (src === home) return { ok: false, error: 'no project to fork (cwd is the home directory)' };
+
+  if (keepExisting && (await forkExists(dest))) return { ok: true, path: dest };
 
   try {
     await rm(dest, { recursive: true, force: true });

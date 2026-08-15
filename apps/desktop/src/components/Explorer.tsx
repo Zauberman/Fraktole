@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { bridge, type FsEntry, type Project } from '../ipc.js';
 
+/** Poll cadence for the active project tree — new files/dirs created by an
+ *  autonomous run appear within this window with no user action. Not fs.watch:
+ *  inotify watchers over 50k-entry trees (the fork cap) exhaust watcher
+ *  limits, and a rebuilt fork would burst change events. Polling expanded
+ *  dirs only is cheap and the change-guard below skips re-renders. */
+const EXPLORER_POLL_MS = 3000;
+
 interface ExplorerProps {
   projects: Project[];
   activePath: string | null;
@@ -85,7 +92,19 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
     setLoadingPaths((prev) => new Set(prev).add(path));
     try {
       const entries = await bridge.listDir(path);
-      setDirs((prev) => new Map(prev).set(path, entries));
+      setDirs((prev) => {
+        const cur = prev.get(path);
+        // unchanged listing → return the same Map reference so polling never
+        // triggers a re-render (the tree is only re-rendered on real change)
+        if (
+          cur &&
+          cur.length === entries.length &&
+          cur.every((e, i) => e.name === entries[i]!.name && e.isDir === entries[i]!.isDir)
+        ) {
+          return prev;
+        }
+        return new Map(prev).set(path, entries);
+      });
     } catch {
       setDirs((prev) => new Map(prev).set(path, []));
     } finally {
@@ -104,6 +123,18 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
     setExpanded(new Set());
     if (activeProjectPath !== null) void loadDir(activeProjectPath);
   }, [activeProjectPath, loadDir]);
+
+  // auto-refresh: while the tree is open, re-list the root and every expanded
+  // dir on a poll tick so new files/folders appear in real time (the change-
+  // guard inside loadDir makes an unchanged tree a no-op re-render)
+  useEffect(() => {
+    if (activeProjectPath === null || !treeOpen) return;
+    const id = window.setInterval(() => {
+      void loadDir(activeProjectPath);
+      for (const p of expanded) void loadDir(p);
+    }, EXPLORER_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [activeProjectPath, treeOpen, expanded, loadDir]);
 
   const toggleDir = useCallback(
     (path: string): void => {

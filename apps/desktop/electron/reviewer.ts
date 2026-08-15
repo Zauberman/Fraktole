@@ -18,7 +18,7 @@ import { sanitizeChatText } from '../src/shared/sanitize.js';
 import { ORCHESTRATOR_ID } from './mailbox.js';
 import { ReviewerTools, type ReviewerToolContext } from './reviewer-tools.js';
 import { AUTONOMY_MISSIONS, AUTONOMY_PLUGINS, type AutonomyVariant } from './reviewer-plugins.js';
-import type { ForkResult } from './fork.js';
+import { forkExists, type ForkResult } from './fork.js';
 import { emptyState, isGoalMet, loadState, persistState } from './reviewer-state.js';
 import { createProvider, type ProviderClient, type ProviderMsg, type ProviderResult } from './reviewer/providers.js';
 import type { TileRecorder } from './tile-recorder.js';
@@ -66,6 +66,8 @@ export interface ReviewerEmitter {
   question(ev: ReviewerQuestion): void;
   /** Cumulative usage totals after a completed turn. */
   usage(ev: ReviewerUsageEvent): void;
+  /** A persisted session recap, emitted when a summarize pass completes. */
+  recap?(recap: { text: string; at: number }): void;
 }
 
 export interface ReviewerHostOpts {
@@ -91,8 +93,9 @@ export interface ReviewerHostOpts {
   stallTimeoutMs?: number;
   /** Override the per-model context budget (tokens) used by compaction. */
   contextBudgetTokens?: number;
-  /** Fork the project for an autonomous run; wired by main. */
-  forkProject?: (variant: AutonomyVariant) => Promise<ForkResult>;
+  /** Fork the project for an autonomous run; wired by main. keepExisting
+   *  preserves a non-empty prior fork (resume-in-place) instead of wiping it. */
+  forkProject?: (variant: AutonomyVariant, keepExisting: boolean) => Promise<ForkResult>;
   /** injectable seams for tests */
   createProvider?: (name: string) => ProviderClient;
   tools?: ReviewerTools;
@@ -224,6 +227,9 @@ export class ReviewerHost {
   /** A /compact issued mid-turn: applied at the next turn boundary instead
    *  of splicing the conversation while the model is streaming. */
   private pendingCompact = false;
+  /** A summarize pass requested while a turn was running or the harness was
+   *  down: applied at the next quiet boundary. */
+  private pendingSummarize = false;
   /** True when the most recently processed turn was the watchdog's own
    *  compaction wake — used to never chain wakes back-to-back (an
    *  over-budget conversation would otherwise wake forever). */
@@ -326,7 +332,20 @@ export class ReviewerHost {
     }
     this.pollsSinceWake = 0;
     this.startWatch();
+    const revivedFromError = this.status === 'error';
     this.setStatus('running');
+    // A reloaded session with an armed goal resumes immediately instead of
+    // waiting for the watchdog's ~90s polling window (GOAL_RECHECK_POLLS ×
+    // 15s). First-ever starts and restarts() have no goal, so no wake fires.
+    // When reviving FROM an error, the watchdog drives the wake itself
+    // ([watchdog] re-check progress) — adding a second wake would double the
+    // turn and, in tests, exhaust a fixed mock response list.
+    if (this.state.goal !== null && this.state.goal.state === 'active' && !revivedFromError) {
+      this.queue.push({ role: 'user', content: this.withStateBlock('[resume] continuing the autonomous run — re-verify the fork and carry on') });
+    }
+    // a persisted recap is durable (state.json) — resurface it on every load
+    // so the renderer shows it even after a restart
+    if (this.state.recap) this.opts.emit.recap?.(this.state.recap);
     this.drainQueue();
     return true;
   }
@@ -472,10 +491,20 @@ export class ReviewerHost {
 
   /** Starts an autonomous run for a variant: forks the project, arms the
    *  mission goal and kicks the loop off with an announced turn. The custom
-   *  variant arms a goal derived from its saved name. */
-  async startAutonomy(variant: AutonomyVariant): Promise<{ ok: boolean; error?: string }> {
+   *  variant arms a goal derived from its saved name.
+   *
+   *  mode 'auto' (default): when the variant already has an active goal AND
+   *  a non-empty fork on disk, it RESUMES in place — no re-fork, no re-armed
+   *  goal, and a "resuming" kick instead of "begin the loop". mode 'fresh'
+   *  always re-forks and starts over. */
+  async startAutonomy(variant: AutonomyVariant, mode: 'auto' | 'fresh' = 'auto'): Promise<{ ok: boolean; error?: string }> {
     if (!(await this.ensureStarted())) return { ok: false, error: 'reviewer not running' };
-    const fork = await (this.opts.forkProject?.(variant) ?? Promise.resolve({ ok: false as const, error: 'fork unavailable' }));
+    const dest = join(this.opts.cwd, '.fraktole-auto', variant);
+    const resumable = mode !== 'fresh' && this.state.goal?.state === 'active' && (await forkExists(dest));
+    const fork = resumable
+      ? { ok: true as const, path: dest }
+      : // reaching here means a fresh start (or mode 'fresh') — wipe and rebuild
+        await (this.opts.forkProject?.(variant, false) ?? Promise.resolve({ ok: false as const, error: 'fork unavailable' }));
     if (!fork.ok) return { ok: false, error: fork.error };
     const cfg = await this.opts.getConfig();
     const mission =
@@ -483,16 +512,27 @@ export class ReviewerHost {
         ? `Autonomous custom run: ${cfg.customAutonomy?.name?.trim() || 'custom'}`
         : AUTONOMY_MISSIONS[variant];
     await this.setVariant(variant);
-    await this.setGoal(mission);
+    if (!resumable) await this.setGoal(mission);
     const kick: ProviderMsg = {
       role: 'user',
       announced: true,
-      content: `[autonomous mode] variant=${variant} — fork at ${fork.path}. ${mission} Begin the loop: spawn the read-only plan agent inside the fork and start researching.`,
+      content: resumable
+        ? `[autonomous mode] variant=${variant} — resuming the previous run in the existing fork at ${fork.path}. Verify the fork state first, then continue: finish the remaining sub-goals and tasks.`
+        : `[autonomous mode] variant=${variant} — fork at ${fork.path}. ${mission} Begin the loop: spawn the read-only plan agent inside the fork and start researching.`,
     };
     this.queue.push(kick);
     this.opts.emit.message(toEntry(kick));
     this.drainQueue();
     return { ok: true };
+  }
+
+  /** True when re-entering `variant` can resume a prior run in place: an
+   *  active goal and a non-empty fork. The UI uses this to offer the resume
+   *  dialog before calling startAutonomy. */
+  async resumableRun(variant: AutonomyVariant): Promise<{ resumable: boolean; goalText: string | null }> {
+    const active = this.state.goal !== null && this.state.goal.state === 'active';
+    const exists = await forkExists(join(this.opts.cwd, '.fraktole-auto', variant));
+    return { resumable: active && exists, goalText: active && this.state.goal ? this.state.goal.text : null };
   }
 
   /** Watchdog tick: cheap activity check (line counts only — no model call
@@ -717,6 +757,28 @@ export class ReviewerHost {
     this.compactIfNeeded(true);
   }
 
+  /** Manual "summarize session": asks the model for a concise recap, persists
+   *  it to state.recap (survives restarts), emits it, then compacts the
+   *  conversation down to the recap. Deferred to the next quiet boundary when
+   *  a turn is running or the harness is down (mirrors /compact). Returns
+   *  { ok: false } when the reviewer is explicitly stopped. */
+  summarizeSession(): { ok: boolean; error?: string } {
+    if (this.status === 'stopped') return { ok: false, error: 'reviewer is stopped' };
+    if (this.status !== 'running' || this.running) {
+      this.pendingSummarize = true;
+      return { ok: true };
+    }
+    this.pendingSummarize = false;
+    this.queue.push({
+      role: 'user',
+      content: this.withStateBlock(
+        '[summarize] Produce a concise session summary: the goal, each sub-goal and its status, the task ledger, work completed so far, and what remains open. Under 300 words, plain text.',
+      ),
+    });
+    this.drainQueue();
+    return { ok: true };
+  }
+
   /** Aborts the in-flight provider call; queued turns are dropped. */
   cancel(): void {
     this.aborter?.abort();
@@ -850,6 +912,24 @@ export class ReviewerHost {
           await this.persist();
         }
         this.recordTurnCost(turnStart);
+        // a completed summarize turn: capture the model's recap, persist it,
+        // then compact the older exchanges away — the recap is now the
+        // durable record of everything before it
+        if (typeof turn.content === 'string' && turn.content.includes('[summarize]')) {
+          let reply = '';
+          for (let k = this.messages.length - 1; k >= turnStart; k--) {
+            if (this.messages[k]!.role === 'assistant') {
+              reply = this.messages[k]!.content;
+              break;
+            }
+          }
+          if (reply && reply.length > 0) {
+            this.state.recap = { text: reply, at: Date.now() };
+            await persistState(this.stateFile, this.state, this.opts.logger);
+            this.opts.emit.recap?.(this.state.recap);
+          }
+          await this.compactIfNeeded(true, true);
+        }
         await this.compactIfNeeded(false, true);
       }
     } catch (err) {
@@ -862,6 +942,15 @@ export class ReviewerHost {
       // a /compact deferred mid-turn lands here when the run ends early
       // (abort/error) without reaching the turn-boundary call
       if (this.pendingCompact) void this.compactIfNeeded(false, true);
+      // a summarize pass deferred the same way is applied at the next quiet
+      // moment (or revives the harness when it is merely idle)
+      if (this.pendingSummarize && !this.running) {
+        this.pendingSummarize = false;
+        void this.ensureStarted().then((ok) => {
+          if (!ok) return;
+          this.summarizeSession();
+        });
+      }
     }
   }
 

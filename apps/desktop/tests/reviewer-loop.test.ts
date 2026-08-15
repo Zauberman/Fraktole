@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ReviewerHost, type ReviewerConfig } from '../electron/reviewer.js';
@@ -64,7 +64,7 @@ function ctxFor(recorder: TileRecorder, opts: Partial<ReviewerToolContext> = {})
 }
 
 let hostSeq = 0;
-function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; contextBudgetTokens: number; stallTimeoutMs: number; askTimeoutMs: number }> = {}) {
+function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; contextBudgetTokens: number; stallTimeoutMs: number; askTimeoutMs: number; cwd: string; forkProject: (variant: string, keepExisting: boolean) => Promise<{ ok: true; path: string } | { ok: false; error: string }> }> = {}) {
   const dir = extra.dir ?? join(tmpdir(), `fraktole-reviewer-host-${process.pid}-${++hostSeq}`);
   const provider = new FakeProvider(script);
   const events: string[] = [];
@@ -73,10 +73,11 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
     getConfig: async (): Promise<ReviewerConfig> => extra.config ?? { provider: 'ollama', model: 'm' },
     sessionId: 's1',
     sessionDir: dir,
-    cwd: '/tmp/proj',
+    cwd: extra.cwd ?? '/tmp/proj',
     recorder,
     toolContext: ctxFor(recorder),
     createProvider: () => provider,
+    forkProject: extra.forkProject,
     retryDelayMs: extra.retryDelayMs ?? 1,
     stallTimeoutMs: extra.stallTimeoutMs,
     contextBudgetTokens: extra.contextBudgetTokens,
@@ -96,6 +97,7 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
         events.push(`question:${ev.kind}`);
       },
       usage: (ev) => events.push(`usage:${ev.inputTokens}:${ev.cachedTokens}:${ev.outputTokens}`),
+      recap: (recap) => events.push(`recap:${recap.text}`),
     },
   });
   return { host, provider, events, asks };
@@ -1722,5 +1724,141 @@ describe('ReviewerHost', () => {
     await settle(60);
     // the loop should have moved on (not stuck)
     expect(provider.complete.mock.calls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  describe('auto compose: resume, summarize, stop', () => {
+    async function seedFork(dir: string, variant: string): Promise<void> {
+      await mkdir(join(dir, '.fraktole-auto', variant), { recursive: true });
+      await writeFile(join(dir, '.fraktole-auto', variant, 'keep.txt'), 'work', 'utf8');
+    }
+
+    it('resumableRun reports true only for an active goal + existing fork', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-resumable-${process.pid}-${++hostSeq}`));
+      await seedFork(dir, 'feature');
+      const recorder = new TileRecorder();
+      const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir, cwd: dir });
+      await host.start();
+      await host.setGoal('mission');
+      await settle(30);
+      expect(await host.resumableRun('feature')).toEqual({ resumable: true, goalText: 'mission' });
+      // existing fork but no active goal → not resumable
+      await host.setGoal(null);
+      await settle(30);
+      expect((await host.resumableRun('feature')).resumable).toBe(false);
+      // active goal but no fork → not resumable
+      await host.setGoal('again');
+      await settle(30);
+      expect((await host.resumableRun('frontend')).resumable).toBe(false);
+    });
+
+    it('startAutonomy resumes in place: no re-fork, resume kick, goal kept', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-resume2-${process.pid}-${++hostSeq}`));
+      await seedFork(dir, 'feature');
+      const recorder = new TileRecorder();
+      const forkProject = vi.fn(async () => ({ ok: true as const, path: join(dir, '.fraktole-auto', 'feature') }));
+      const { host } = makeHost(
+        [{ text: 'goal armed', toolCalls: [] }, { text: 'continue run', toolCalls: [] }],
+        recorder,
+        { dir, cwd: dir, forkProject: forkProject as never },
+      );
+      await host.start();
+      await host.setGoal('mission');
+      await settle(40);
+      const res = await host.startAutonomy('feature', 'auto');
+      expect(res.ok).toBe(true);
+      await settle(40);
+      expect(forkProject).not.toHaveBeenCalled();
+      expect(host.conversation.some((e) => (e.content ?? '').includes('resuming the previous run'))).toBe(true);
+      // the goal was not re-armed: still 'mission' (no new [goal armed] turn)
+      expect(host.conversation.filter((e) => (e.content ?? '').includes('[goal armed]'))).toHaveLength(1);
+    });
+
+    it('startAutonomy fresh forks (wipes), arms the mission and begins', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-fresh-${process.pid}-${++hostSeq}`));
+      await seedFork(dir, 'feature');
+      const recorder = new TileRecorder();
+      const forkProject = vi.fn(async () => ({ ok: true as const, path: join(dir, '.fraktole-auto', 'feature') }));
+      const { host } = makeHost(
+        [{ text: 'armed', toolCalls: [] }, { text: 'begin', toolCalls: [] }],
+        recorder,
+        { dir, cwd: dir, forkProject: forkProject as never },
+      );
+      await host.start();
+      await host.startAutonomy('feature', 'auto'); // no goal → fresh
+      await settle(40);
+      expect(forkProject).toHaveBeenCalledWith('feature', false);
+      expect(host.conversation.some((e) => (e.content ?? '').includes('Begin the loop'))).toBe(true);
+    });
+
+    it('startAutonomy mode fresh re-forks even with a resumable state', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-freshmode-${process.pid}-${++hostSeq}`));
+      await seedFork(dir, 'feature');
+      const recorder = new TileRecorder();
+      const forkProject = vi.fn(async () => ({ ok: true as const, path: join(dir, '.fraktole-auto', 'feature') }));
+      const { host } = makeHost(
+        [{ text: 'goal armed', toolCalls: [] }, { text: 'begin', toolCalls: [] }],
+        recorder,
+        { dir, cwd: dir, forkProject: forkProject as never },
+      );
+      await host.start();
+      await host.setGoal('mission');
+      await settle(40);
+      await host.startAutonomy('feature', 'fresh');
+      await settle(40);
+      expect(forkProject).toHaveBeenCalledWith('feature', false);
+      expect(host.conversation.some((e) => (e.content ?? '').includes('Begin the loop'))).toBe(true);
+    });
+
+    it('doStart pushes an immediate resume wake when a goal is armed on reload', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-dostart-${process.pid}-${++hostSeq}`));
+      await mkdir(join(dir, 'reviewer'), { recursive: true });
+      await writeFile(
+        join(dir, 'reviewer', 'state.json'),
+        JSON.stringify({ goal: { text: 'persisted goal', setAt: 1, state: 'active' }, subGoals: [], tasks: [], lastAgentKind: null, variant: 'feature', usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null }),
+        'utf8',
+      );
+      const recorder = new TileRecorder();
+      const { host } = makeHost([{ text: 'resumed', toolCalls: [] }], recorder, { dir });
+      await host.start();
+      await settle(40);
+      expect(host.conversation.some((e) => (e.content ?? '').includes('[resume] continuing the autonomous run'))).toBe(true);
+    });
+
+    it('summarizeSession captures the recap, persists it and emits it', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-summarize-${process.pid}-${++hostSeq}`));
+      const recorder = new TileRecorder();
+      const { host, events } = makeHost([{ text: 'work done', toolCalls: [] }, { text: 'RECAP: the goal is complete', toolCalls: [] }], recorder, { dir });
+      await host.start();
+      await host.prompt('do work');
+      await settle(40);
+      host.summarizeSession();
+      await settle(60);
+      const raw = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8'));
+      expect(raw.recap.text).toContain('RECAP: the goal is complete');
+      expect(events.some((e) => e.startsWith('recap:'))).toBe(true);
+    });
+
+    it('summarizeSession refuses when the reviewer is stopped', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-sumstop-${process.pid}-${++hostSeq}`));
+      const recorder = new TileRecorder();
+      const { host } = makeHost([], recorder, { dir });
+      await host.start();
+      await host.stop();
+      expect(host.summarizeSession().ok).toBe(false);
+    });
+
+    it('stop is a full stop: status stopped, queue cleared, watchdog cannot revive', async () => {
+      const recorder = new TileRecorder();
+      const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {});
+      await host.start();
+      await host.setGoal('keep');
+      await settle(30);
+      host.stop();
+      expect(host.status).toBe('stopped');
+      host.pollNow();
+      await settle(40);
+      expect(host.status).toBe('stopped');
+      expect(host.conversation.some((e) => (e.content ?? '').includes('[watchdog]'))).toBe(false);
+    });
   });
 });

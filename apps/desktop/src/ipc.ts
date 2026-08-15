@@ -75,6 +75,7 @@ export interface FraktoleBridge {
   onMenuTheme(cb: (id: string) => void): () => void;
   applyTheme(id: string): Promise<void>;
   onMenuSession(cb: (action: MenuSessionAction) => void): () => void;
+  onMenuHelp(cb: (topic: string) => void): () => void;
   listProjects(): Promise<Project[]>;
   addProject(path: string): Promise<Project>;
   removeProject(path: string): Promise<boolean>;
@@ -108,8 +109,16 @@ export interface FraktoleBridge {
   setReviewerGoal(sessionId: string, text: string | null): Promise<void>;
   onReviewerGoal(sessionId: string, cb: (ev: ReviewerGoalEvent) => void): () => void;
   onReviewerUsage(sessionId: string, cb: (ev: ReviewerUsageEvent) => void): () => void;
-  /** Start (variant) or clear (null) the autonomous-mode run for a session. */
-  setReviewerAutonomy(sessionId: string, variant: string | null): Promise<{ ok: boolean; error?: string }>;
+  /** Start (variant) or clear (null) the autonomous-mode run for a session.
+   *  mode 'auto' resumes a prior run in place when one exists; 'fresh'
+   *  always re-forks. */
+  setReviewerAutonomy(sessionId: string, variant: string | null, mode?: 'auto' | 'fresh'): Promise<{ ok: boolean; error?: string }>;
+  /** True when re-entering `variant` can resume a prior run (active goal +
+   *  existing non-empty fork). */
+  resumableRun(sessionId: string, variant: string): Promise<{ resumable: boolean; goalText: string | null }>;
+  /** Ask the model for a session recap and compact the context around it. */
+  summarizeReviewer(sessionId: string): Promise<{ ok: boolean; error?: string }>;
+  onReviewerRecap(sessionId: string, cb: (recap: { text: string; at: number }) => void): () => void;
   listReviewerModels(opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]>;
   onReviewerQuestion(sessionId: string, cb: (ev: ReviewerQuestion) => void): () => void;
   answerReviewerQuestion(sessionId: string, askId: string, answer: string): Promise<void>;

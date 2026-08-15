@@ -56,9 +56,13 @@ export const IPC = {
   reviewerStream: 'reviewer:stream',
   reviewerUsage: 'reviewer:usage',
   reviewerAutonomy: 'reviewer:autonomy',
+  reviewerSummarize: 'reviewer:summarize',
+  reviewerResumable: 'reviewer:resumable',
+  reviewerRecap: 'reviewer:recap',
   reviewerToolCall: 'reviewer:tool-call',
   reviewerMessage: 'reviewer:message',
   menuSession: 'menu:session',
+  menuHelp: 'menu:help',
   clipboardWrite: 'clipboard:write',
   clipboardRead: 'clipboard:read',
   testOpen: 'test:open',
@@ -214,6 +218,9 @@ export interface ReviewerState {
   variant: AutonomyVariant | null;
   /** Cumulative model token usage (input / cache-hit / output). */
   usage: ReviewerUsage;
+  /** The last manual "summarize session" recap, if any. Survives restarts
+   *  (persisted in state.json alongside the ledger). */
+  recap?: { text: string; at: number } | null;
 }
 
 /** reviewer:usage event payload (cumulative totals). */
@@ -228,6 +235,11 @@ export interface ReviewerUsageEvent {
 export interface ReviewerGoalEvent {
   goal: ReviewerGoal | null;
   subGoals: SubGoal[];
+}
+
+/** reviewer:recap event payload — the persisted session summary. */
+export interface ReviewerRecapEvent {
+  recap: { text: string; at: number };
 }
 
 /** A pending ask_user question. The loop suspends until the user answers

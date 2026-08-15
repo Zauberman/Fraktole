@@ -184,6 +184,15 @@ function buildMenu(currentTheme: ThemeId, sessions: Array<{ id: string; name: st
         },
       ],
     },
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'Reviewer commands…',
+          click: () => mainWindow?.webContents.send(IPC.menuHelp, 'reviewer-commands'),
+        },
+      ],
+    },
   ]);
 }
 
@@ -394,10 +403,10 @@ if (!app.requestSingleInstanceLock()) {
           sessionId: session.id,
           sessionDir: join(sessionsRoot, session.id),
           cwd: judgeCwdFor(session),
-          forkProject: (variant) => {
+          forkProject: (variant, keepExisting) => {
             if (!rt) return Promise.resolve({ ok: false as const, error: 'no runtime for session' });
             const src = judgeCwdFor(rt.session);
-            return forkProject(src, join(src, '.fraktole-auto', variant), home);
+            return forkProject(src, join(src, '.fraktole-auto', variant), home, keepExisting);
           },
           recorder,
           toolContext: {
@@ -461,6 +470,7 @@ if (!app.requestSingleInstanceLock()) {
             goal: (ev) => mainWindow?.webContents.send(IPC.reviewerGoal, session.id, ev),
             question: (ev) => mainWindow?.webContents.send(IPC.reviewerQuestion, session.id, ev),
             usage: (ev) => mainWindow?.webContents.send(IPC.reviewerUsage, session.id, ev),
+            recap: (recap) => mainWindow?.webContents.send(IPC.reviewerRecap, session.id, recap),
           },
           logger: (line) => console.log(line),
         });
@@ -888,7 +898,7 @@ if (!app.requestSingleInstanceLock()) {
       const rt = registry?.get(sessionId) ?? null;
       await rt?.reviewer.setGoal(typeof text === 'string' && text.trim().length > 0 ? text.trim() : null);
     });
-    ipcMain.handle(IPC.reviewerAutonomy, async (_e, sessionId: string, variant: unknown): Promise<{ ok: boolean; error?: string }> => {
+    ipcMain.handle(IPC.reviewerAutonomy, async (_e, sessionId: string, variant: unknown, mode: 'auto' | 'fresh' = 'auto'): Promise<{ ok: boolean; error?: string }> => {
       const rt = registry?.get(sessionId) ?? null;
       if (!rt) return { ok: false, error: 'no session runtime' };
       if (variant === null || variant === undefined) {
@@ -898,7 +908,22 @@ if (!app.requestSingleInstanceLock()) {
       if (typeof variant !== 'string' || !AUTONOMY_VARIANTS.includes(variant as AutonomyVariant)) {
         return { ok: false, error: 'unknown autonomous variant' };
       }
-      return rt.reviewer.startAutonomy(variant as AutonomyVariant);
+      return rt.reviewer.startAutonomy(variant as AutonomyVariant, mode === 'fresh' ? 'fresh' : 'auto');
+    });
+    ipcMain.handle(
+      IPC.reviewerResumable,
+      async (_e, sessionId: string, variant: unknown): Promise<{ resumable: boolean; goalText: string | null }> => {
+        const rt = registry?.get(sessionId) ?? null;
+        if (!rt || typeof variant !== 'string' || !AUTONOMY_VARIANTS.includes(variant as AutonomyVariant)) {
+          return { resumable: false, goalText: null };
+        }
+        return rt.reviewer.resumableRun(variant as AutonomyVariant);
+      },
+    );
+    ipcMain.handle(IPC.reviewerSummarize, async (_e, sessionId: string): Promise<{ ok: boolean; error?: string }> => {
+      const rt = registry?.get(sessionId) ?? null;
+      if (!rt) return { ok: false, error: 'no session runtime' };
+      return rt.reviewer.summarizeSession();
     });
     ipcMain.handle(IPC.reviewerAnswer, async (_e, sessionId: string, askId: string, answer: string): Promise<void> => {
       const rt = registry?.get(sessionId) ?? null;
@@ -997,7 +1022,10 @@ if (!app.requestSingleInstanceLock()) {
     );
     ipcMain.handle(IPC.reviewerStop, async (_e, sessionId: string): Promise<void> => {
       const rt = registry?.get(sessionId) ?? null;
-      rt?.reviewer.cancel();
+      // full stop, not just cancel(): abort the provider call, stop the
+      // watchdog, clear the queue and set status 'stopped' — the loop cannot
+      // re-awaken on its own
+      rt?.reviewer.stop();
     });
     ipcMain.handle(IPC.reviewerRestart, async (_e, sessionId: string): Promise<boolean> => {
       const rt = registry?.get(sessionId) ?? null;

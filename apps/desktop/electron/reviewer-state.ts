@@ -9,7 +9,7 @@ import type { ReviewerState, ReviewerTask } from '../src/shared/ipc.js';
 export const GOAL_MET_SENTINEL = 'GOAL-MET:';
 
 export function emptyState(): ReviewerState {
-  return { goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 } };
+  return { goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null };
 }
 
 export async function loadState(file: string): Promise<ReviewerState> {
@@ -47,10 +47,18 @@ export async function loadState(file: string): Promise<ReviewerState> {
         cachedTokens: typeof parsed.usage?.cachedTokens === 'number' ? parsed.usage.cachedTokens : 0,
         outputTokens: typeof parsed.usage?.outputTokens === 'number' ? parsed.usage.outputTokens : 0,
       },
+      recap: isValidRecap(parsed.recap) ? parsed.recap : null,
     };
   } catch {
     return emptyState();
   }
+}
+
+/** A recap row is trusted only when it has both a text and a finite time. */
+function isValidRecap(r: unknown): r is NonNullable<ReviewerState['recap']> {
+  if (typeof r !== 'object' || r === null) return false;
+  const recap = r as Partial<NonNullable<ReviewerState['recap']>>;
+  return typeof recap.text === 'string' && recap.text.length > 0 && typeof recap.at === 'number' && Number.isFinite(recap.at);
 }
 
 /** A sub-goal row is trusted only when every field has the right shape. */

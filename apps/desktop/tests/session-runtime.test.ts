@@ -37,6 +37,8 @@ function fakes() {
     setGoal: vi.fn(async () => undefined),
     setVariant: vi.fn(async () => undefined),
     startAutonomy: vi.fn(async () => ({ ok: true })),
+    resumableRun: vi.fn(async () => ({ resumable: false, goalText: null })),
+    summarizeSession: vi.fn(() => ({ ok: true })),
     answerQuestion: vi.fn(),
     killAgentNow: vi.fn(async () => 'killed'),
     onAgentMessage: vi.fn(),

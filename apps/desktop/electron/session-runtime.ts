@@ -29,8 +29,14 @@ export interface RuntimeReviewer {
   setGoal(text: string | null): Promise<void>;
   /** Swap the autonomous-mode variant (null clears it) + rebuild the prompt. */
   setVariant(variant: AutonomyVariant | null): Promise<void>;
-  /** Start an autonomous run: fork, arm the mission goal, kick off. */
-  startAutonomy(variant: AutonomyVariant): Promise<{ ok: boolean; error?: string }>;
+  /** Start an autonomous run: fork, arm the mission goal, kick off. mode
+   *  'auto' resumes a prior run in place when one exists; 'fresh' re-forks. */
+  startAutonomy(variant: AutonomyVariant, mode?: 'auto' | 'fresh'): Promise<{ ok: boolean; error?: string }>;
+  /** True when re-entering `variant` can resume a prior run (active goal +
+   *  existing non-empty fork); the UI offers a dialog on this. */
+  resumableRun(variant: AutonomyVariant): Promise<{ resumable: boolean; goalText: string | null }>;
+  /** Ask the model for a session recap, persist it, and compact context. */
+  summarizeSession(): { ok: boolean; error?: string };
   answerQuestion(askId: string, answer: string): void;
   killAgentNow(agentId: string): Promise<string>;
   onAgentMessage(msg: FraktoleMessage): void;
