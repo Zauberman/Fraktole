@@ -4,6 +4,7 @@ import type {
   FraktoleMessage,
   FsEntry,
   FsStat,
+  ProjectFile,
   MenuSessionAction,
   OpenedSession,
   Project,
@@ -39,6 +40,7 @@ export type {
   MenuSessionAction,
   OpenedSession,
   Project,
+  ProjectFile,
   PtyExitPayload,
   PtySpawnArgs,
   PtySpawnResult,
@@ -80,6 +82,9 @@ export interface FraktoleBridge {
   addProject(path: string): Promise<Project>;
   removeProject(path: string): Promise<boolean>;
   pickFolder(): Promise<string | null>;
+  /** All files under a project root (bounded walk, for the quick-open
+   *  palette). Returns [] on any error. */
+  listProjectFiles(path: string): Promise<ProjectFile[]>;
   getSettings(): Promise<Settings>;
   setSettings(patch: Partial<Settings>): Promise<Settings>;
   listSessions(): Promise<SessionSummary[]>;

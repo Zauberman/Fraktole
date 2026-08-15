@@ -90,6 +90,41 @@ const pendingTestShots = new Map<string, { resolve(out: string): void; timer: No
 /** Per-session background-job registries (stopped with the session). */
 let testSeq = 0;
 
+/** Quick-open (Ctrl+P): bounded walk of a project root → file list. The
+ *  result is cached per root for a few seconds so repeated palette opens are
+ *  instant; the walk itself skips heavy/recursive dirs and hidden entries. */
+const QUICK_OPEN_MAX = 5000;
+const QUICK_OPEN_SKIP = new Set(['node_modules', '.git', 'dist', 'build', 'dist-electron', 'dist-renderer', 'release', '.fraktole-auto', '.dart_tool', 'android', '.gradle', '.idea', 'coverage']);
+let quickOpenCache: { root: string; at: number; files: Array<{ name: string; path: string }> } | null = null;
+
+async function listProjectFiles(root: string): Promise<Array<{ name: string; path: string }>> {
+  if (quickOpenCache && quickOpenCache.root === root && Date.now() - quickOpenCache.at < 10_000) {
+    return quickOpenCache.files;
+  }
+  const files: Array<{ name: string; path: string }> = [];
+  const stack = [root];
+  while (stack.length > 0 && files.length < QUICK_OPEN_MAX) {
+    const dir = stack.pop()!;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue; // unreadable dir — skip the subtree
+    }
+    for (const e of entries) {
+      if (files.length >= QUICK_OPEN_MAX) break;
+      if (e.name.startsWith('.')) continue;
+      if (e.isDirectory()) {
+        if (!QUICK_OPEN_SKIP.has(e.name)) stack.push(join(dir, e.name));
+      } else if (e.isFile() || e.isSymbolicLink()) {
+        files.push({ name: e.name, path: join(dir, e.name) });
+      }
+    }
+  }
+  quickOpenCache = { root, at: Date.now(), files };
+  return files;
+}
+
 /** Per-session live infra the remote bridge reads: the PTY recorder and the
  *  set of live tile ids (fed by the ptyData/tileExit send hook). */
 const sessionInfra = new Map<string, { recorder: TileRecorder; alive: Set<string> }>();
@@ -1106,6 +1141,12 @@ if (!app.requestSingleInstanceLock()) {
         title: 'Add a project folder',
       });
       return result.canceled ? null : (result.filePaths[0] ?? null);
+    });
+
+    // quick-open palette: bounded file list for a project root
+    ipcMain.handle(IPC.projectsFiles, async (_e, root: string): Promise<Array<{ name: string; path: string }>> => {
+      if (typeof root !== 'string' || root.length === 0) return [];
+      return listProjectFiles(root);
     });
 
     // terminal copy/paste: the native clipboard, not the renderer's

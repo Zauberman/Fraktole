@@ -4,6 +4,7 @@ import { Explorer } from './components/Explorer.js';
 import { FileEditor } from './components/FileEditor.js';
 import { useFileEditor } from './file-state.js';
 import { NewTileDialog } from './components/NewTileDialog.js';
+import { QuickOpen } from './components/QuickOpen.js';
 import { SessionNameDialog } from './components/SessionNameDialog.js';
 import { Divider } from './components/Divider.js';
 import { StatusBar } from './components/StatusBar.js';
@@ -70,6 +71,8 @@ export function App(): React.JSX.Element {
   const [dialogDefault, setDialogDefault] = useState('/home/walid');
   const [sessionDialog, setSessionDialog] = useState<{ mode: 'new' } | { mode: 'rename' | 'save-as'; value: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** Active project root for the quick-open palette (Ctrl+P). */
+  const [quickOpenRoot, setQuickOpenRoot] = useState<string | null>(null);
   const [help, setHelp] = useState<string | null>(null);
   /** URL pushed by the reviewer's open_test_page; forwarded to the TestTab. */
   const [pendingTestUrl, setPendingTestUrl] = useState<string | null>(null);
@@ -294,6 +297,21 @@ export function App(): React.JSX.Element {
           setTab('remote');
           return;
         }
+      }
+      // quick-open palette: Ctrl+P (also works with Shift) anywhere, but
+      // never while typing in an input/textarea/editor
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && (key === 'p')) {
+        const target = e.target;
+        if (target instanceof HTMLElement) {
+          if (target.closest('input, textarea, select') !== null || target.isContentEditable) return;
+        }
+        const root = activeInfo.projectPath ?? null;
+        if (root) {
+          e.preventDefault();
+          e.stopPropagation();
+          setQuickOpenRoot(root);
+        }
+        return;
       }
       if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
       // the node-tile shortcuts must not hijack typing: they only apply on
@@ -533,6 +551,17 @@ export function App(): React.JSX.Element {
           confirmLabel={sessionDialog.mode === 'new' ? 'create' : sessionDialog.mode === 'rename' ? 'rename' : 'save'}
           onConfirm={confirmSessionDialog}
           onCancel={() => setSessionDialog(null)}
+        />
+      )}
+      {quickOpenRoot && (
+        <QuickOpen
+          root={quickOpenRoot}
+          onOpen={(path) => {
+            setQuickOpenRoot(null);
+            void editor.openFile(path);
+            setTab('editor');
+          }}
+          onCancel={() => setQuickOpenRoot(null)}
         />
       )}
       {notice && (

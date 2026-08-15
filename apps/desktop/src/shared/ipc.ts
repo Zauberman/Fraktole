@@ -28,6 +28,7 @@ export const IPC = {
   sessionExportBundle: 'session:export-bundle',
   sessionImportBundle: 'session:import-bundle',
   projectOpen: 'project:open',
+  projectsFiles: 'projects:files',
   fsListDir: 'fs:list-dir',
   fsReadFile: 'fs:read-file',
   fsWriteFile: 'fs:write-file',
@@ -349,6 +350,12 @@ export interface FsEntry {
   path: string;
   isDir: boolean;
   size: number;
+}
+
+/** One file in the quick-open palette: its basename and absolute path. */
+export interface ProjectFile {
+  name: string;
+  path: string;
 }
 
 export interface FsStat {

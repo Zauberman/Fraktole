@@ -2058,6 +2058,67 @@ button:active:not(:disabled) {
   inset: 0;
 }
 
+.term-search {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--accent-tint);
+  border-radius: 6px;
+  box-shadow: var(--shadow-dialog);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text);
+}
+
+.term-search-input {
+  width: 180px;
+  padding: 3px 6px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--accent-tint);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  outline: none;
+}
+
+.term-search-input:focus {
+  border-color: var(--accent);
+}
+
+.term-search-count {
+  min-width: 34px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+
+.term-search-btn {
+  padding: 3px 8px;
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-tint);
+  border-radius: 4px;
+  color: var(--accent-strong);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+
+.term-search-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.term-search-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* ————— terminal context menu (copy/paste) ————— */
 
 .term-menu-backdrop {
@@ -2648,4 +2709,72 @@ button:active:not(:disabled) {
 .switch-on .switch-knob {
   transform: translateX(20px);
   background: var(--btn-primary-fg);
+}
+
+/* ————— quick-open palette (Ctrl+P) ————— */
+
+.dialog-quickopen {
+  width: 520px;
+  max-width: 90vw;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.quickopen-count {
+  padding: 4px 8px;
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  text-align: right;
+}
+
+.quickopen-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 120px;
+}
+
+.quickopen-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.quickopen-item:hover,
+.quickopen-item-selected {
+  background: var(--accent-tint);
+  color: var(--accent-strong);
+}
+
+.quickopen-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.quickopen-path {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quickopen-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
 }

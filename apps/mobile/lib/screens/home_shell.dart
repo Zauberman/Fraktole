@@ -34,10 +34,19 @@ class _HomeShellState extends State<HomeShell> {
           Expanded(child: IndexedStack(index: _tab, children: screens)),
         ],
       ),
-      bottomNavigationBar: _TypographyNavBar(
-        tabs: _tabs,
-        selected: _tab,
-        onSelect: (index) => setState(() => _tab = index),
+      bottomNavigationBar: ListenableBuilder(
+        listenable: widget.controller,
+        builder: (context, _) => _TypographyNavBar(
+          tabs: _tabs,
+          selected: _tab,
+          unreadCount: widget.controller.unreadCount,
+          onSelect: (index) {
+            setState(() => _tab = index);
+            widget.controller.setOrchestratorVisible(index == 1);
+            // viewing the Orchestrator tab consumes the unread badge
+            if (index == 1) widget.controller.clearUnread();
+          },
+        ),
       ),
     );
   }
@@ -49,11 +58,13 @@ class _TypographyNavBar extends StatelessWidget {
     required this.tabs,
     required this.selected,
     required this.onSelect,
+    this.unreadCount = 0,
   });
 
   final List<String> tabs;
   final int selected;
   final ValueChanged<int> onSelect;
+  final int unreadCount;
 
   @override
   Widget build(BuildContext context) {
@@ -80,16 +91,20 @@ class _TypographyNavBar extends StatelessWidget {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            tabs[i],
+                            i == 1 && unreadCount > 0
+                                ? '${tabs[i]} $unreadCount'
+                                : tabs[i],
                             style: TextStyle(
                               fontSize: 14,
                               letterSpacing: 0.2,
                               fontWeight: selected == i
                                   ? FontWeight.w700
                                   : FontWeight.w400,
-                              color: selected == i
+                              color: i == 1 && unreadCount > 0
                                   ? scheme.primary
-                                  : scheme.onSurfaceVariant,
+                                  : selected == i
+                                      ? scheme.primary
+                                      : scheme.onSurfaceVariant,
                             ),
                           ),
                           const SizedBox(height: 4),

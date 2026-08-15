@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import 'dart:async';
+
 import '../core/protocol/events.dart';
 import '../core/protocol/models.dart';
 import '../core/security/secure_store.dart';
@@ -13,20 +15,28 @@ class AppController extends ChangeNotifier {
     required this._gateway,
   }) {
     _gateway.statusChanges.listen(_onStatusChange);
+    // count incoming messages so the UI can badge the Orchestrator tab; the
+    // controller does not know which tab is visible, the UI clears on view
+    _messageSub = _gateway.messageNews.listen((_) => _bumpUnread());
   }
 
   final ConnectionStore _store;
   final RemoteGateway _gateway;
+  StreamSubscription<Object?>? _messageSub;
 
   AppPhase _phase = AppPhase.needsPairing;
   StoredConnection? _stored;
   String? _errorMessage;
+  bool _orchestratorVisible = false;
+  int _unreadCount = 0;
 
   AppPhase get phase => _phase;
 
   String? get errorMessage => _errorMessage;
 
   StoredConnection? get stored => _stored;
+
+  bool get orchestratorVisible => _orchestratorVisible;
 
   ConnectionStatus get connectionStatus => _gateway.status;
 
@@ -45,6 +55,30 @@ class AppController extends ChangeNotifier {
   Stream<SessionStateEvent> get sessionStates => _gateway.sessionStates;
 
   Stream<MessageNewEvent> get messageNews => _gateway.messageNews;
+
+  /// Number of messages that arrived since the Orchestrator tab was last
+  /// viewed while visible. Incremented only when a new message arrives and the
+  /// Orchestrator tab is not currently showing; cleared when the tab is opened.
+  int get unreadCount => _unreadCount;
+
+  void _bumpUnread() {
+    if (!_orchestratorVisible) {
+      _unreadCount += 1;
+      notifyListeners();
+    }
+  }
+
+  void setOrchestratorVisible(bool visible) {
+    if (_orchestratorVisible == visible) return;
+    _orchestratorVisible = visible;
+    notifyListeners();
+  }
+
+  void clearUnread() {
+    if (_unreadCount == 0) return;
+    _unreadCount = 0;
+    notifyListeners();
+  }
 
   Future<void> init() async {
     _stored = await _store.read();
@@ -221,6 +255,7 @@ class AppController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _messageSub?.cancel();
     _gateway.dispose();
     super.dispose();
   }

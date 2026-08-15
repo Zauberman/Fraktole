@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Terminal as Xterm, type ITheme } from 'xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon } from '@xterm/addon-search';
 import 'xterm/css/xterm.css';
 import { bridge } from '../ipc.js';
 import { useXtermPalette } from '../theme-context.js';
@@ -89,6 +90,26 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
   const pendingThemeInput = useRef('');
   // right-click context menu (copy/paste), positioned in viewport coords
   const [menu, setMenu] = useState<{ x: number; y: number; hasSel: boolean } | null>(null);
+  // scrollback search overlay (Ctrl+Shift+F): open flag, query, and the
+  // current/total result counters fed by the SearchAddon's change event
+  const [search, setSearch] = useState<{ open: boolean; query: string; index: number; count: number }>({
+    open: false,
+    query: '',
+    index: 0,
+    count: 0,
+  });
+  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  // live counters are read by the key handler via a ref so the mount effect
+  // never needs to re-run
+  const searchRef = useRef(search);
+  searchRef.current = search;
+  const setSearchState = useCallback((patch: Partial<{ open: boolean; query: string; index: number; count: number }>): void => {
+    setSearch((prev) => {
+      const next = { ...prev, ...patch };
+      return next;
+    });
+  }, []);
 
   // copy/paste through the native clipboard (main's electron.clipboard):
   // renderer navigator.clipboard.readText is permission-gated, so paste
@@ -132,6 +153,12 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
 
     const fit = new FitAddon();
     term.loadAddon(fit);
+    const searchAddon = new SearchAddon();
+    term.loadAddon(searchAddon);
+    searchAddonRef.current = searchAddon;
+    searchAddon.onDidChangeResults((ev) => {
+      setSearchState({ index: ev.resultIndex, count: ev.resultCount });
+    });
     term.open(host);
 
     // tiles hidden while another is zoomed have no box — fit would compute
@@ -202,6 +229,11 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
+        if (e.code === 'KeyF') {
+          // open the search overlay (Ctrl+Shift+F, terminal convention)
+          setSearchState({ open: true });
+          return false;
+        }
         if (e.code === 'KeyC') {
           copyRef.current();
           return false;
@@ -235,6 +267,7 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
       (window as unknown as { __fraktTerms?: Map<string, Xterm> }).__fraktTerms?.delete(`${sessionId}:${tileId}`);
       term.dispose();
       termRef.current = null;
+      searchAddonRef.current = null;
     };
     // only tileId/cwd — the durable identity of the PTY — may remount
   }, [tileId, cwd]);
@@ -292,6 +325,88 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
             </button>
           </div>
         </>
+      )}
+      {search.open && (
+        <div
+          className="term-search"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              setSearchState({ open: false });
+              termRef.current?.focus();
+              return;
+            }
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              e.stopPropagation();
+              const addon = searchAddonRef.current;
+              const query = searchRef.current.query;
+              if (!addon || query.length === 0) return;
+              if (e.shiftKey) addon.findPrevious(query);
+              else addon.findNext(query);
+              return;
+            }
+            e.stopPropagation();
+          }}
+        >
+          <input
+            ref={searchInputRef}
+            className="term-search-input"
+            value={search.query}
+            placeholder="find in scrollback"
+            spellCheck={false}
+            autoFocus
+            onChange={(e) => {
+              const query = e.target.value;
+              setSearchState({ query });
+              const addon = searchAddonRef.current;
+              if (addon) {
+                if (query.length === 0) addon.clearDecorations();
+                else addon.findNext(query);
+              }
+            }}
+            onBlur={() => searchAddonRef.current?.clearActiveDecoration()}
+          />
+          <span className="term-search-count">
+            {search.query.length === 0 || search.count === 0 ? '0/0' : `${search.index + 1}/${search.count}`}
+          </span>
+          <button
+            type="button"
+            className="term-search-btn"
+            disabled={search.query.length === 0 || search.count === 0}
+            onClick={() => {
+              const addon = searchAddonRef.current;
+              if (addon && search.query.length > 0) addon.findPrevious(search.query);
+            }}
+            title="previous (Shift+Enter)"
+          >
+            prev
+          </button>
+          <button
+            type="button"
+            className="term-search-btn"
+            disabled={search.query.length === 0 || search.count === 0}
+            onClick={() => {
+              const addon = searchAddonRef.current;
+              if (addon && search.query.length > 0) addon.findNext(search.query);
+            }}
+            title="next (Enter)"
+          >
+            next
+          </button>
+          <button
+            type="button"
+            className="term-search-btn"
+            onClick={() => {
+              setSearchState({ open: false });
+              termRef.current?.focus();
+            }}
+            title="close (Esc)"
+          >
+            close
+          </button>
+        </div>
       )}
     </>
   );

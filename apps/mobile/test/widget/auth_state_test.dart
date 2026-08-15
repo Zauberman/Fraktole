@@ -112,6 +112,44 @@ void main() {
     expect(g.connectCount, greaterThanOrEqualTo(1));
   });
 
+  testWidgets('a new message badges the Orchestrator tab and clears on view',
+      (tester) async {
+    final stored = StoredConnection(
+      host: '192.168.1.20',
+      port: 8833,
+      token: 'a' * 64,
+      deviceId: 'device-9',
+      fingerprint: 'b' * 64,
+      deviceName: 'Pixel 8',
+    );
+    final kv = InMemoryKeyValueStore();
+    await ConnectionStore(kv: kv).write(stored);
+    final g = FakeRemoteGateway();
+    final controller = AppController(store: ConnectionStore(kv: kv), gateway: g);
+    await tester.pumpWidget(FraktoleRemoteApp(controller: controller));
+    await tester.pumpAndSettle();
+    expect(find.byType(HomeShell), findsOneWidget);
+
+    // Sessions tab is default; no badge yet
+    expect(find.text('Orchestrator 1'), findsNothing);
+
+    // a result message arrives while on another tab
+    g.emitMessageNew({'kind': 'result', 'from': 'agent-1', 'to': 'orchestrator', 'body': 'done', 'ts': 1});
+    // let the stream delivery + notifyListeners propagate, then rebuild
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(controller.unreadCount, 1, reason: 'controller should have bumped unread');
+    expect(find.text('Orchestrator 1'), findsOneWidget);
+
+    // tapping the Orchestrator tab clears the badge (the AppBar title also
+    // reads 'Orchestrator', so only assert the badge itself is gone)
+    await tester.tap(find.text('Orchestrator 1'));
+    await tester.pumpAndSettle();
+    expect(controller.unreadCount, 0, reason: 'viewing the tab clears unread');
+    expect(find.text('Orchestrator 1'), findsNothing);
+    expect(find.text('Orchestrator'), findsWidgets);
+  });
+
   testWidgets('disconnect drops to the connect screen with saved credentials kept',
       (tester) async {
     final stored = StoredConnection(

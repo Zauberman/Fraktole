@@ -82,6 +82,8 @@ const api = {
   addProject: (path: string): Promise<Project> => ipcRenderer.invoke(IPC.projectsAdd, path),
   removeProject: (path: string): Promise<boolean> => ipcRenderer.invoke(IPC.projectsRemove, path),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke(IPC.pickFolder),
+  listProjectFiles: (root: string): Promise<Array<{ name: string; path: string }>> =>
+    ipcRenderer.invoke(IPC.projectsFiles, root),
   getSettings: (): Promise<Settings> => ipcRenderer.invoke(IPC.settingsGet),
   setSettings: (patch: Partial<Settings>): Promise<Settings> => ipcRenderer.invoke(IPC.settingsSet, patch),
 
