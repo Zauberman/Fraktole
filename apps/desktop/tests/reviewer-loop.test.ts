@@ -1841,6 +1841,38 @@ describe('ReviewerHost', () => {
       expect(events.some((e) => e.startsWith('recap:'))).toBe(true);
     });
 
+    it('summarizeSession wipes the history into a big compact that keeps only the system prompt + recap', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-bigcompact-${process.pid}-${++hostSeq}`));
+      const recorder = new TileRecorder();
+      const { host } = makeHost([
+        { text: 'first work', toolCalls: [] },
+        { text: 'second work', toolCalls: [] },
+        { text: 'RECAP: everything is now one summary', toolCalls: [] },
+      ], recorder, { dir });
+      await host.start();
+      await host.setGoal('keep the goal across the big compact');
+      await settle(30);
+      await host.prompt('do work');
+      await settle(40);
+      host.summarizeSession();
+      await settle(80);
+      // the conversation file is memory + the big-compact summary turn only.
+      // The system prompt is memory-only (never persisted), so the on-disk
+      // file holds exactly the summary turn — all prior history wiped.
+      const lines = (await readFile(join(dir, 'conversation.jsonl'), 'utf8'))
+        .split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
+      expect(lines.length).toBe(1); // just the big-compact summary
+      expect(lines[0]!.role).toBe('user');
+      expect(lines[0]!.content).toContain('[big compact]');
+      expect(lines[0]!.content).toContain('RECAP: everything is now one summary');
+      // the summary turn still carries the goal/ledger state block
+      expect(lines[0]!.content).toContain('[goal');
+      // and the in-memory conversation still holds the system prompt first
+      const mem = host as unknown as { messages: Array<{ role: string; content: string }> };
+      expect(mem.messages[0]!.role).toBe('system');
+      expect(mem.messages.length).toBe(2); // [system, summary]
+    });
+
     it('summarizeSession refuses when the reviewer is stopped', async () => {
       const dir = await mkdtemp(join(tmpdir(), `frak-sumstop-${process.pid}-${++hostSeq}`));
       const recorder = new TileRecorder();

@@ -943,8 +943,12 @@ export class ReviewerHost {
             this.state.recap = { text: reply, at: Date.now() };
             await persistState(this.stateFile, this.state, this.opts.logger);
             this.opts.emit.recap?.(this.state.recap);
+            // big compact: after the model produced the recap, wipe the
+            // ENTIRE conversation and make the recap the new context start.
+            // The system prompt (base doctrine + autonomy plugin block) is
+            // preserved at messages[0] — only the history is dropped.
+            await this.bigCompact(reply);
           }
-          await this.compactIfNeeded(true, true);
         }
         await this.compactIfNeeded(false, true);
       }
@@ -1045,6 +1049,32 @@ export class ReviewerHost {
         this.drainQueue();
       }
     }
+  }
+
+  /** Big compact (the /summarize path): resets the conversation to just the
+   *  system prompt plus one user turn embedding the freshly produced recap.
+   *  The system prompt (base doctrine + autonomy plugin block) is preserved
+   *  at messages[0]; every historical exchange is dropped and the recap
+   *  becomes the new context start. Token accounting is reset and the wipe
+   *  is made durable by rewriting the conversation file. */
+  private async bigCompact(recap: string): Promise<void> {
+    const system = this.messages.find((m) => m.role === 'system');
+    const summary: ProviderMsg = {
+      role: 'user',
+      content: this.withStateBlock(
+        `[big compact] A summary of all prior work is below — it is now the entire context. Treat it as the starting point. Continue from here; your goal and task ledger are unchanged.\n\n${recap}`,
+      ),
+    };
+    if (system) {
+      this.messages = [system, summary];
+    } else {
+      // no system prompt (should not happen after start) — still reset to the
+      // summary so /summarize always collapses to a single user turn
+      this.messages = [summary];
+    }
+    this.turnTokens = [];
+    this.persistedCount = this.messages.length;
+    await this.rewriteConversation();
   }
 
   /** Rewrites the conversation file to exactly the in-memory messages (the
