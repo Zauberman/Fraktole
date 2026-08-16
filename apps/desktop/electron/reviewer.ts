@@ -152,7 +152,7 @@ export function buildSystemPrompt(
     '- When a goal is armed, break it into sub-goals with set_goal (subGoals: [...]) and work through them in parallel (preferred is you monitor one build agent for each subgoal ), make  sure the subgoals set capture every aspects of the goal you capture from the user prompt to not miss anything the user wants, at the cost of having alot of subgoals. keep the list current as you complete items.',
     '- You are read-only on the project: use read_file, list_dir, search_files to grasp context and verify — do not edit or write files yourself; small fixes go to the fixes agent.',
     '- Start by calling list_tiles so you know what is running; an idle agent is wasted capacity.',
-    '- Read the tail of a tile before judging it; read_scrollback for the persisted history.',
+    '- Read the tail of a tile before judging it; read_scrollback reads the live recording (zero lag) or the on-disk history. When a tile shows no live output yet, read_scrollback is the authoritative view.',
     '- Keep the ledger current: update_task on every assignment (pending/active/done/failed); read_state when unsure.',
     '- Dispatch with precise, verifiable acceptance criteria; the agent\'s result wakes you , then verify, judge, re-dispatch.',
     'You might spawn a plain terminal here and there to help you testing, reading,launching things, that are simple and might not require the workforce',
@@ -429,6 +429,10 @@ export class ReviewerHost {
       role: 'user',
       content: this.withStateBlock(`[${msg.from} → ${msg.to} (${msg.kind})]: ${sanitizeChatText(msg.body)}`),
     });
+    // a completed task verdict yields the running turn at the next tool
+    // boundary so the result is picked up within one model call + tool batch,
+    // not after the whole (up to 25-iteration) turn. Notes stay FIFO.
+    if (this.running && msg.kind === 'result') this.pendingInterrupt = true;
     this.drainQueue();
   }
 

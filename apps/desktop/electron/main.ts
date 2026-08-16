@@ -20,6 +20,7 @@ import { exportSessionBundle, importSessionBundle, type BundleResult } from './s
 import { SessionRegistry, SessionRuntime } from './session-runtime.js';
 import { SessionStore } from './sessions.js';
 import { SettingsStore } from './settings.js';
+import { ScrollbackPersist } from './scrollback-persist.js';
 import { TileRecorder } from './tile-recorder.js';
 import {
   IPC,
@@ -94,7 +95,7 @@ let testSeq = 0;
 
 /** Per-session live infra the remote bridge reads: the PTY recorder and the
  *  set of live tile ids (fed by the ptyData/tileExit send hook). */
-const sessionInfra = new Map<string, { recorder: TileRecorder; alive: Set<string> }>();
+const sessionInfra = new Map<string, { recorder: TileRecorder; alive: Set<string>; persist: ScrollbackPersist }>();
 /** Durable agentId → tile kind ('agent' launcher vs plain 'shell'). */
 const agentKinds = new Map<string, 'agent' | 'shell' | 'reviewer'>();
 
@@ -304,7 +305,23 @@ if (!app.requestSingleInstanceLock()) {
         let rt: SessionRuntime | null = null;
         const recorder = new TileRecorder();
         const alive = new Set<string>();
-        sessionInfra.set(session.id, { recorder, alive });
+        const tileOfAgent = (agentId: string): string | null =>
+          agentId === ORCHESTRATOR_ID ? null : (rt?.agentToTile.get(agentId) ?? null);
+        const agentOfTile = (tileId: string): string | null => {
+          for (const [agentId, tid] of rt?.agentToTile ?? []) {
+            if (tid === tileId) return agentId;
+          }
+          return null;
+        };
+        // durable scrollback writer: keeps each agent's scrollback file fresh
+        // on the hot path so read_scrollback's disk fallback and remote/restore
+        // views are never more than ~1s stale (vs up to 30s at save time)
+        const persist = new ScrollbackPersist({
+          sessionDir: join(sessionsRoot, session.id),
+          agentOfTile,
+          linesOf: (tileId) => recorder.full(tileId),
+        });
+        sessionInfra.set(session.id, { recorder, alive, persist });
         // ptyData chunks are coalesced per tile per tick: one IPC send and
         // one remote publish per tick instead of per chunk
         const pendingChunks = new Map<string, { sessionId: string; tileId: string; chunks: string[] }>();
@@ -316,6 +333,7 @@ if (!app.requestSingleInstanceLock()) {
           const data = entry.chunks.join('');
           entry.chunks.length = 0;
           recorder.record(entry.tileId, data);
+          persist.note(entry.tileId);
           alive.add(entry.tileId);
           remote?.publish({
             type: 'tile.output',
@@ -351,6 +369,10 @@ if (!app.requestSingleInstanceLock()) {
               // the exit event that closes the tile
               flushTile(`${session.id}\u0000${tileId}`);
               alive.delete(tileId);
+              // persist the final lines before the recorder drops them — the
+              // exit flush must capture everything, even if the debounce had
+              // not fired yet
+              void persist.flushTile(tileId, recorder.full(tileId));
               const lines = recorder.summary(tileId).lines;
               recorder.drop(tileId);
               for (const [agentId, tid] of [...(rt?.agentToTile ?? [])]) {
@@ -371,14 +393,6 @@ if (!app.requestSingleInstanceLock()) {
             }
           },
         });
-        const tileOfAgent = (agentId: string): string | null =>
-          agentId === ORCHESTRATOR_ID ? null : (rt?.agentToTile.get(agentId) ?? null);
-        const agentOfTile = (tileId: string): string | null => {
-          for (const [agentId, tid] of rt?.agentToTile ?? []) {
-            if (tid === tileId) return agentId;
-          }
-          return null;
-        };
         const cwdOfAgent = (agentId: string): string | null =>
           rt?.session.tiles.find((t) => t.agentId === agentId)?.cwd ?? null;
         const router = new MailboxRouter({
@@ -736,6 +750,7 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle(IPC.sessionOpen, (_e, id: string) => openSession(id));
     ipcMain.handle(IPC.sessionDelete, async (_e, id: string) => {
       registry?.teardown(id);
+      sessionInfra.get(id)?.persist.dispose();
       sessionInfra.delete(id);
       await sessions.delete(id);
       refreshMenu();

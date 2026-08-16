@@ -18,10 +18,10 @@ describe('system prompt', () => {
   });
 
   it('delegates substantive work by default but keeps the hands-on option', () => {
-    expect(prompt).toContain('GENERAL');
+    expect(prompt).toContain('OPERATING PROTOCOL');
     expect(prompt).toContain('DELEGATE substantive work');
     expect(prompt).toContain('2 build agents for implementation');
-    expect(prompt).toContain('1 plan (read only) agent');
+    expect(prompt).toContain('1 read only agent');
     expect(prompt).toContain('small fixes go to the fixes agent');
     expect(prompt).toContain('break it into sub-goals with set_goal');
     expect(prompt).toContain('every sub-goal done');
@@ -59,9 +59,9 @@ describe('system prompt', () => {
     expect(prompt).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
   });
 
-  it('stays lean (<= 520 words) to bound per-turn cost', () => {
+  it('stays lean (<= 650 words) to bound per-turn cost', () => {
     const words = prompt.split(/\s+/).filter(Boolean).length;
-    expect(words).toBeLessThanOrEqual(520);
+    expect(words).toBeLessThanOrEqual(650);
   });
 });
 

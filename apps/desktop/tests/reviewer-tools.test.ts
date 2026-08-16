@@ -101,6 +101,18 @@ describe('search_files', () => {
     const out = await tools.run('search_files', { pattern: '([' }, ctxFor(root));
     expect(out).toContain('error: bad regex');
   });
+
+  it('searches a single file given as the path', async () => {
+    const root = await makeTree();
+    const out = await tools.run('search_files', { pattern: 'TODO', path: 'src/app.ts' }, ctxFor(root));
+    expect(out).toBe('src/app.ts:2: // TODO: fix this');
+  });
+
+  it('errors loudly on a missing path instead of a false no-match', async () => {
+    const root = await makeTree();
+    const out = await tools.run('search_files', { pattern: 'TODO', path: 'src/nope.ts' }, ctxFor(root));
+    expect(out).toBe('error: path not found: src/nope.ts');
+  });
 });
 
 describe('send_keystroke + type_into_tile', () => {
@@ -176,6 +188,44 @@ describe('read_tile', () => {
     expect(out).toContain('line-0');
     expect(out).toContain('[truncated]');
   });
+
+  it('resolves an agent id passed in the tileId field', async () => {
+    const root = await makeTree();
+    const recorder = new TileRecorder();
+    recorder.record('tile-9', 'from tile 9');
+    const ctx: ReviewerToolContext = {
+      ...ctxFor(root),
+      recorder,
+      agentOfTile: (id) => (id === 'agent-9' ? 'tile-9' : null),
+    };
+    const out = await tools.run('read_tile', { tileId: 'agent-9', full: true }, ctx);
+    expect(out).toBe('from tile 9');
+  });
+
+  it('errors on an unknown tile instead of a silent (empty)', async () => {
+    const root = await makeTree();
+    const ctx: ReviewerToolContext = {
+      ...ctxFor(root),
+      tileOfAgent: () => null,
+      agentOfTile: () => null,
+    };
+    const out = await tools.run('read_tile', { tileId: 'ghost', full: true }, ctx);
+    expect(out).toContain('error: unknown tile or agent');
+  });
+
+  it('steers to read_scrollback when a resolved tile has no live data', async () => {
+    const root = await makeTree();
+    const recorder = new TileRecorder();
+    const ctx: ReviewerToolContext = {
+      ...ctxFor(root),
+      recorder,
+      tileOfAgent: (id) => (id === 'agent-1' ? 'tile-1' : null),
+    };
+    const full = await tools.run('read_tile', { agentId: 'agent-1', full: true }, ctx);
+    expect(full).toBe('no live recording yet — use read_scrollback for the persisted history');
+    const tail = await tools.run('read_tile', { agentId: 'agent-1', tail: 10 }, ctx);
+    expect(tail).toBe('no live recording yet — use read_scrollback for the persisted history');
+  });
 });
 
 describe('read_scrollback + list_messages', () => {
@@ -189,6 +239,38 @@ describe('read_scrollback + list_messages', () => {
     const out = await tools.run('read_scrollback', { agentId: 'agent-1', tail: 5000 }, ctx);
     expect(out!.split('\n').length).toBe(1200);
     expect(out!.startsWith('sb-0'));
+  });
+
+  it('read_scrollback prefers the live recording over a stale on-disk file', async () => {
+    const root = await makeTree();
+    const sessionDir = join(root, 'sessions', 's1');
+    await mkdir(join(sessionDir, 'scrollback'), { recursive: true });
+    // the on-disk file is stale: only "old" lines
+    await writeFile(join(sessionDir, 'scrollback', 'agent-1.json'), JSON.stringify({ lines: ['old-1', 'old-2'] }));
+    const recorder = new TileRecorder();
+    recorder.record('tile-1', 'new-a\nnew-b');
+    const ctx: ReviewerToolContext = {
+      ...ctxFor(root),
+      sessionDir,
+      recorder,
+      tileOfAgent: (id) => (id === 'agent-1' ? 'tile-1' : null),
+    };
+    const out = await tools.run('read_scrollback', { agentId: 'agent-1' }, ctx);
+    expect(out).toBe('new-a\nnew-b');
+  });
+
+  it('read_scrollback falls back to the on-disk file when there is no live data', async () => {
+    const root = await makeTree();
+    const sessionDir = join(root, 'sessions', 's1');
+    await mkdir(join(sessionDir, 'scrollback'), { recursive: true });
+    await writeFile(join(sessionDir, 'scrollback', 'agent-1.json'), JSON.stringify({ lines: ['disk-1', 'disk-2'] }));
+    const ctx: ReviewerToolContext = {
+      ...ctxFor(root),
+      sessionDir,
+      tileOfAgent: (id) => (id === 'agent-1' ? 'tile-1' : null),
+    };
+    const out = await tools.run('read_scrollback', { agentId: 'agent-1' }, ctx);
+    expect(out).toBe('disk-1\ndisk-2');
   });
 
   it('list_messages guides the model when the mailbox log is empty', async () => {

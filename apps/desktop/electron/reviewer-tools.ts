@@ -91,6 +91,12 @@ export function capResult(text: string): string {
   return `${text.slice(0, TOOL_RESULT_CAP)}\n...[truncated]`;
 }
 
+/** Shown when a resolved tile has no live recording yet (e.g. the recorder
+ *  started empty after a restart) — never a silent "(empty)". */
+function noLiveHint(): string {
+  return 'no live recording yet — use read_scrollback for the persisted history';
+}
+
 const TOOLS: ReviewerTool[] = [
   {
     name: 'list_tiles',
@@ -115,7 +121,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'read_tile',
     description:
-      'Read the live recording of an agent tile: the last `tail` lines, lines matching `grep`, or the ENTIRE recording with `full`. Prefer a small tail (5-40); use full when you need the complete output of a finished step. The recording is transient — use read_scrollback for the persisted full history.',
+      'Read the live recording of an agent tile: the last `tail` lines, lines matching `grep`, or the ENTIRE recording with `full`. Put the agent id in `agentId` (a tile id in `tileId` also works). Unknown tiles error; when no live output is recorded yet (e.g. right after a restart) use read_scrollback for the persisted history.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -128,9 +134,14 @@ const TOOLS: ReviewerTool[] = [
     },
     async run(args, ctx) {
       const tileId = resolveTile(args, ctx);
-      if (!tileId) return 'error: unknown tile — call list_tiles first';
+      if (!tileId) return 'error: unknown tile or agent — call list_tiles first';
+      // a resolved tile with no live data yet (e.g. the recorder started empty
+      // after an app restart) must never read as a silent "(empty)" — steer
+      // the model to the persisted history instead
       if (args.full === true) {
-        return capResult(ctx.recorder.full(tileId).join('\n') || '(empty)');
+        const lines = ctx.recorder.full(tileId);
+        if (lines.length === 0) return noLiveHint();
+        return capResult(lines.join('\n'));
       }
       if (typeof args.grep === 'string' && args.grep.length > 0) {
         if (RE_UNSAFE.test(args.grep)) return 'error: bad grep regex: unsafe pattern (nested quantifiers)';
@@ -140,15 +151,18 @@ const TOOLS: ReviewerTool[] = [
         } catch (err) {
           return `error: bad grep regex: ${String(err)}`;
         }
+        if (!ctx.recorder.has(tileId)) return noLiveHint();
         return capResult(ctx.recorder.search(tileId, re).join('\n') || '(no matches)');
       }
       const n = clampInt(args.tail, 40, 1, 500);
-      return capResult(ctx.recorder.tail(tileId, n).join('\n') || '(empty)');
+      const lines = ctx.recorder.tail(tileId, n);
+      if (lines.length === 0) return noLiveHint();
+      return capResult(lines.join('\n'));
     },
   },
   {
     name: 'read_scrollback',
-    description: "Read the persisted scrollback of an agent (full history captured at save time, up to 5000 lines). Use it when read_tile's live tail is not enough to judge a completed piece of work.",
+    description: "Read an agent's full output history — the zero-lag complement to read_tile when its tail is not enough. While the agent runs, this reads its live recording; otherwise it reads the on-disk capture (fresh within ~1s). Up to 5000 lines. Use it to judge a completed piece of work.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -159,6 +173,14 @@ const TOOLS: ReviewerTool[] = [
     async run(args, ctx) {
       const agentId = typeof args.agentId === 'string' ? args.agentId : '';
       if (!agentId) return 'error: agentId required';
+      const n = clampInt(args.tail, 200, 1, 5000);
+      // while the agent runs, its live recording is the freshest view (zero
+      // lag) — use it directly and never fall back to a save-time snapshot
+      const tileId = ctx.tileOfAgent(agentId);
+      if (tileId && ctx.recorder.has(tileId)) {
+        const lines = ctx.recorder.tail(tileId, n);
+        return capResult(lines.join('\n') || noLiveHint());
+      }
       // never let a model-supplied id escape the session's scrollback dir
       // (read_file allows absolute paths on purpose — this tool does not)
       const scrollbackRoot = join(ctx.sessionDir, 'scrollback');
@@ -179,14 +201,13 @@ const TOOLS: ReviewerTool[] = [
       } catch {
         return 'error: corrupt scrollback file';
       }
-      const n = clampInt(args.tail, 200, 1, 5000);
       return capResult(lines.slice(-n).join('\n') || '(empty)');
     },
   },
   {
     name: 'send_message',
     description:
-      'Send a task or note to an agent. Tasks get results back through the mailboxes and wake you; notes are informational. This is the PRIMARY way substantive work gets done — dispatch implementation to agents instead of doing it yourself; always state precise, verifiable acceptance criteria in the body. Prefer it over doing the work yourself when an agent owns the area.',
+      'Send a task or note to an agent. Tasks get results back through the mailboxes and wake you; notes are informational. This is the PRIMARY way substantive work gets done — dispatch implementation to agents instead of doing it yourself; always state precise, verifiable acceptance criteria in the body. Prefer it over doing the work yourself when an agent owns the area. The body is echoed into the agent\'s terminal and stored in its inbox: only send to a tile that is running its harness at its prompt (not a bare shell) — a body typed into a bare shell executes as shell commands.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -416,12 +437,12 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'search_files',
     description:
-      'Search the project for lines matching a regex (e.g. stubs, TODOs, wrong symbols) — returns path:line: text, capped. Use freely to understand and verify the codebase yourself: confirm an agent actually implemented something and did not leave placeholders.',
+      'Search for lines matching a regex (e.g. stubs, TODOs, wrong symbols) — returns path:line: text, capped. `path` may be a single FILE or a directory to walk; a missing path errors. Use freely to verify an agent actually implemented something and did not leave placeholders.',
     inputSchema: {
       type: 'object',
       properties: {
         pattern: { type: 'string', description: 'regular expression to match against each line' },
-        path: { type: 'string', description: 'directory to search (defaults to the project root)' },
+        path: { type: 'string', description: 'a file to search, or a directory to walk (defaults to the project root)' },
         glob: { type: 'string', description: 'file-name filter, e.g. "*.tsx" or "*.{ts,tsx}" (* wildcard only)' },
         maxMatches: { type: 'number', description: 'maximum hits (default 100)' },
       },
@@ -434,7 +455,7 @@ const TOOLS: ReviewerTool[] = [
       const abs = path.startsWith('/') ? path : join(ctx.cwd, path);
       const glob = typeof args.glob === 'string' && args.glob.trim().length > 0 ? args.glob.trim() : undefined;
       const maxMatches = clampInt(args.maxMatches, 100, 1, 500);
-      return searchFiles(pattern, abs, glob, maxMatches);
+      return searchFiles(pattern, abs, glob, maxMatches, path);
     },
   },
   {
@@ -611,7 +632,13 @@ export class ReviewerTools {
 }
 
 function resolveTile(args: Record<string, unknown>, ctx: ReviewerToolContext): string | null {
-  if (typeof args.tileId === 'string' && args.tileId.length > 0) return args.tileId;
+  if (typeof args.tileId === 'string' && args.tileId.length > 0) {
+    // the model may pass an AGENT id in the tileId field (list_tiles shows
+    // both) — never silently resolve to an unknown key; fall back to the
+    // agent→tile mapping before giving up
+    if (ctx.recorder.has(args.tileId)) return args.tileId;
+    return ctx.agentOfTile(args.tileId);
+  }
   if (typeof args.agentId === 'string' && args.agentId.length > 0) return ctx.tileOfAgent(args.agentId);
   return null;
 }
@@ -685,6 +712,7 @@ async function searchFiles(
   abs: string,
   glob: string | undefined,
   maxMatches: number,
+  display: string,
 ): Promise<string> {
   if (RE_UNSAFE.test(pattern)) return 'error: bad regex: unsafe pattern (nested quantifiers)';
   let re: RegExp;
@@ -693,6 +721,17 @@ async function searchFiles(
   } catch (err) {
     return `error: bad regex: ${String(err)}`;
   }
+  // stat first: a FILE path must search that single file (never silently
+  // match nothing), and a missing path must error loudly instead of reading
+  // as a false "(no matches)"
+  let st;
+  try {
+    st = await stat(abs);
+  } catch {
+    return `error: path not found: ${display}`;
+  }
+  if (st.isFile()) return searchSingleFile(re, abs, display, maxMatches);
+  if (!st.isDirectory()) return `error: path is not a file or directory: ${display}`;
   const fileRe = glob !== undefined ? new RegExp(globToRe(glob)) : null;
   const hits: string[] = [];
   let scanned = 0;
@@ -737,6 +776,33 @@ async function searchFiles(
   if (hits.length === 0) return '(no matches)';
   const note = scanned >= SEARCH_SCAN_CAP ? '\n…[scan cap reached]' : '';
   return `${capResult(hits.join('\n'))}${note}`;
+}
+
+/** Searches a single file (search_files given a file path). Hits are prefixed
+ *  with the caller's `display` path so the model can map them back. */
+async function searchSingleFile(
+  re: RegExp,
+  file: string,
+  display: string,
+  maxMatches: number,
+): Promise<string> {
+  try {
+    const st = await stat(file);
+    if (st.size > 2 * 1024 * 1024) return 'error: file larger than 2 MiB — use read_file';
+    const content = await readFile(file, 'utf8');
+    const lines = content.split('\n');
+    const hits: string[] = [];
+    for (let i = 0; i < lines.length && hits.length < maxMatches; i++) {
+      const line = lines[i]!;
+      if (re.test(line.slice(0, SEARCH_LINE_TEST_CAP))) {
+        hits.push(`${display}:${i + 1}: ${line.slice(0, SEARCH_LINE_CAP)}`);
+      }
+    }
+    if (hits.length === 0) return '(no matches)';
+    return capResult(hits.join('\n'));
+  } catch (err) {
+    return `error: ${(err as NodeJS.ErrnoException).message}`;
+  }
 }
 
 function globToRe(glob: string): string {

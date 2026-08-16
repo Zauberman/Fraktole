@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { ReviewerHost, type ReviewerConfig } from '../electron/reviewer.js';
 import type { ReviewerToolContext } from '../electron/reviewer-tools.js';
 import type { ReviewerState } from '../src/shared/ipc.js';
+import type { FraktoleMessage } from '../src/shared/ipc.js';
 import { TileRecorder } from '../electron/tile-recorder.js';
 import type { ProviderClient, ProviderMsg } from '../electron/reviewer/providers.js';
 
@@ -1928,6 +1929,65 @@ describe('ReviewerHost', () => {
       expect(before.filter((e) => e.role === 'assistant')).toHaveLength(1);
       expect(before.some((e) => e.toolCallId === 'c1')).toBe(true);
       expect(before.some((e) => e.toolCallId === 'c2')).toBe(false);
+    });
+  });
+
+  describe('result preemption', () => {
+    function resultMsg(body: string, kind: FraktoleMessage['kind'] = 'result'): FraktoleMessage {
+      return { id: `m-${Math.random()}`, from: 'agent-27', to: 'orchestrator', kind, body, at: Date.now() };
+    }
+
+    it('a task result yields the current turn at the tool boundary', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-resinterrupt-${process.pid}-${++hostSeq}`));
+      const recorder = recorderWith('line');
+      const { host } = makeHost(
+        [
+          { text: '', toolCalls: [{ id: 'c1', name: 'read_tile', args: { tileId: 'tile-1' } }], delay: 120 },
+          { text: '', toolCalls: [{ id: 'c2', name: 'read_tile', args: { tileId: 'tile-1' } }] },
+          { text: 'done', toolCalls: [] },
+        ],
+        recorder,
+        { dir },
+      );
+      await host.start();
+      await host.prompt('work'); // turn A starts; its first complete() is delayed
+      await settle(30); // enter the in-flight complete()
+      await host.onAgentMessage(resultMsg('verified')); // result queued mid-turn → pendingInterrupt
+      await settle(120); // delayed complete resolves, tool runs, next boundary breaks
+      const idx = host.conversation.findIndex((e) => (e.content ?? '').includes('(result)]: verified'));
+      expect(idx).toBeGreaterThan(-1);
+      const before = host.conversation.slice(0, idx);
+      // turn A yielded after ONE iteration: only c1, never c2
+      expect(before.filter((e) => e.role === 'assistant')).toHaveLength(1);
+      expect(before.some((e) => e.toolCallId === 'c1')).toBe(true);
+      expect(before.some((e) => e.toolCallId === 'c2')).toBe(false);
+    });
+
+    it('a note does NOT yield the current turn (stays FIFO)', async () => {
+      const dir = await mkdtemp(join(tmpdir(), `frak-note-${process.pid}-${++hostSeq}`));
+      const recorder = recorderWith('line');
+      const { host } = makeHost(
+        [
+          { text: '', toolCalls: [{ id: 'c1', name: 'read_tile', args: { tileId: 'tile-1' } }], delay: 120 },
+          { text: '', toolCalls: [{ id: 'c2', name: 'read_tile', args: { tileId: 'tile-1' } }] },
+          { text: 'done', toolCalls: [] },
+        ],
+        recorder,
+        { dir },
+      );
+      await host.start();
+      await host.prompt('work'); // turn A starts
+      await settle(30); // enter the in-flight complete()
+      await host.onAgentMessage(resultMsg('heads up', 'note')); // note → NO preempt
+      await settle(250); // turn A runs to completion (c1, c2, done), then the note
+      const idx = host.conversation.findIndex((e) => (e.content ?? '').includes('(note)]: heads up'));
+      expect(idx).toBeGreaterThan(-1);
+      const before = host.conversation.slice(0, idx);
+      // turn A ran to full completion (c1, c2, and its final answer) before
+      // the note was processed — the note did NOT preempt
+      expect(before.filter((e) => e.role === 'assistant')).toHaveLength(3);
+      expect(before.some((e) => e.toolCallId === 'c1')).toBe(true);
+      expect(before.some((e) => e.toolCallId === 'c2')).toBe(true);
     });
   });
 });
