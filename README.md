@@ -234,8 +234,7 @@ Fraktole/
 │   │   └── tests/                # Test suite for runtime, mailboxes, recorder, and harness
 │   └── mobile/                   # Flutter Android remote client
 │       ├── lib/                  # Screens, transport gateway, tile buffer, protocol models
-│       └── integration_test/     # On-device pairing and control integration tests
-├── docs/                         # Protocol specs and interface screenshots
+│   └── integration_test/     # On-device pairing and control integration tests
 └── package.json                  # Root monorepo workspace manifest
 ```
 
