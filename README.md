@@ -145,6 +145,21 @@ The companion Android application connects securely to your desktop workstation 
 
 ---
 
+## Download
+
+Prebuilt **AppImage** (x86_64, Linux) binaries are published automatically to [GitHub Releases](https://github.com/Zauberman/Fraktole/releases) whenever a version tag (`v*`) is pushed. Download the latest `Fraktole-*.AppImage`, make it executable, and run it — no installation required:
+
+```bash
+chmod +x Fraktole-*.AppImage
+./Fraktole-*.AppImage
+```
+
+> The AppImage requires [FUSE](https://github.com/AppImage/AppImageKit/wiki/FUSE) (`libfuse2`) on the host system.
+
+To build the AppImage yourself, see [Build Portable AppImage](#build-portable-appimage) below.
+
+---
+
 ## Quickstart & Installation
 
 ### Prerequisites
@@ -155,7 +170,7 @@ The companion Android application connects securely to your desktop workstation 
 ### Build Self-Contained Installer
 ```bash
 # Clone repository
-git clone https://github.com/Nusoidal/Fraktole.git
+git clone https://github.com/Zauberman/Fraktole.git
 cd Fraktole
 
 # Install dependencies
