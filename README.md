@@ -2,7 +2,7 @@
 
 > **A Linux-native tiling command center for orchestrating autonomous AI coding agents, Allowing UI easiness for Loops , with a set of premaid loops (Auto compose).**
 
-Fraktole pairs real terminal multiplexing with a supervising **Reviewer model** that acts as an autonomous general: it dispatches substantive work to an agent workforce running in live PTY tiles, verifies code and runtime state itself, and manages goals through to completion.
+Fraktole pairs terminal multiplexing with a supervising **Reviewer model** that has the role of an autonomous general: it dispatches substantive work to an agent workforce running in live PTY tiles, verifies code and runtime state itself, and manages goals through to completion.
 
 The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter Android remote companion (`apps/mobile`) with its local TLS pairing bridge.
 
@@ -55,13 +55,13 @@ Auto Compose runs structured, autonomous development loops. Each run launches in
 
 | Preset | Mission | Loop Workflow |
 |---|---|---|
-| 🛡️ **Cyber** | Vulnerability hunting | Spawns research counsel to identify injection, auth flaws, secret leakage, and unsafe dependencies; dispatches fixes; verifies before sign-off. |
-| 🎨 **Frontend** | Visual & UX polish | Audits layout, responsive behavior, typography, and UX flow; tests live rendered pages in the Test tab. |
-| 🐛 **Bugs** | Bug eradication | Discovers crashes, race conditions, edge cases, and unexpected errors; writes reproduction steps and tests. |
-| ✨ **Feature** | High-value additions | Finds UX gaps and missing affordances, crafts implementation plans, and dispatches build agents. |
-| 🧪 **Tests** | Test suite expansion | Audits test coverage, eliminates flaky tests, and verifies that the suite passes cleanly. |
-| 📖 **Readability** | Refactoring & clarity | Reorganizes monolithic files, extracts modules, and cleans dead code while strictly preserving existing behavior. |
-| ⚙️ **Custom** | User-defined missions | Execute any custom autonomous prompt sequence. |
+| **Cyber** | Vulnerability hunting | Spawns research counsel to identify injection, auth flaws, secret leakage, and unsafe dependencies; dispatches fixes; verifies before sign-off. |
+| **Frontend** | Visual & UX polish | Audits layout, responsive behavior, typography, and UX flow; tests live rendered pages in the Test tab. |
+| **Bugs** | Bug eradication | Discovers crashes, race conditions, edge cases, and unexpected errors; writes reproduction steps and tests. |
+| **Feature** | High-value additions | Finds UX gaps and missing affordances, crafts implementation plans, and dispatches build agents. |
+| **Tests** | Test suite expansion | Audits test coverage, eliminates flaky tests, and verifies that the suite passes cleanly. |
+| **Readability** | Refactoring & clarity | Reorganizes monolithic files, extracts modules, and cleans dead code while strictly preserving existing behavior. |
+| **Custom** | User-defined missions | Execute any custom autonomous prompt sequence. |
 
 ---
 
@@ -101,27 +101,11 @@ Fraktole organizes workflow into 4 synchronized views accessible via `Alt+1..4`:
 
 - **File Editor (`Alt+1`)**: Multi-tab code editor powered by CodeMirror 6 with syntax highlighting for TypeScript, JavaScript, Python, HTML, CSS, JSON, and Markdown.
 - **Node Matrix & Reviewer (`Alt+2`)**: The central hub displaying the active PTY tile tree alongside the Reviewer dialogue and state ledger.
-- **Test Browser (`Alt+3`)**: An embedded webview allowing real-time preview of frontend applications and dev servers.
-- **Remote Bridge (`Alt+4`)**: TLS certificate status, active remote connections, and QR/code pairing for the mobile client.
+- **Test Browser (`Alt+3`)**: An embedded webview allowing real-time preview of frontend applications.
+- **Remote Bridge (`Alt+4`)**: TLS certificate status, active remote connections, and pairing for the mobile client.
 
 ---
 
-## Keyboard Shortcuts
-
-| Shortcut | Context | Action |
-|---|---|---|
-| `Alt + 1` | Global | Switch to **File Editor** tab |
-| `Alt + 2` | Global | Switch to **Node Workspace** tab |
-| `Alt + 3` | Global | Switch to **Test Browser** tab |
-| `Alt + 4` | Global | Switch to **Remote Bridge** tab |
-| `Ctrl + P` | Global | **Quick Open** file fuzzy finder |
-| `Ctrl + Shift + T` | Node | Open **New Tile** dialog |
-| `Ctrl + Shift + W` | Node | Close the currently focused tile |
-| `Ctrl + Shift + Enter` | Node | **Zoom / Unzoom** focused tile |
-| `Ctrl + Shift + Arrows` | Node | Cycle focus between adjacent tiles |
-| `Ctrl + Shift + 1..9` | Node | Jump focus directly to Tile `1` through `9` |
-| `Ctrl + Shift + 0` | Node | Focus the **Reviewer** prompt column |
-| `Ctrl + Shift + O` | Node | Open folder / add project to Explorer |
 
 ### Reviewer Prompt Commands
 
@@ -140,7 +124,7 @@ The companion Android application connects securely to your desktop workstation 
 1. Open the **Remote** tab in Fraktole (`Alt+4`).
 2. Launch **Fraktole Remote** on Android and enter the 6-character pairing code.
 3. The desktop generates a local self-signed TLS certificate and authenticates the client via an exchange token.
-4. Tokens are stored securely in Android Keystore / Flutter Secure Storage for instant reconnection.
+4. Tokens are stored  in Android Keystore / Flutter Secure Storage for instant reconnection.
 5. Monitor live tile outputs, view goal progression, and send commands from your phone.
 
 ---
