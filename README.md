@@ -1,6 +1,6 @@
 # Fraktole
 
-> **A Linux-native tiling command center for orchestrating autonomous AI coding agents.**
+> **A Linux-native tiling command center for orchestrating autonomous AI coding agents, Allowing UI easiness for Loops , with a set of premaid loops (Auto compose).**
 
 Fraktole pairs real terminal multiplexing with a supervising **Reviewer model** that acts as an autonomous general: it dispatches substantive work to an agent workforce running in live PTY tiles, verifies code and runtime state itself, and manages goals through to completion.
 
@@ -25,7 +25,7 @@ The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter A
 ```
 
 - **Tiling Matrix**: Split-pane workspace of real PTY terminals with drag dividers, keyboard focus cycle, swap, and instant zoom.
-- **Delegation Doctrine**: The Reviewer model supervises rather than edits blindly. It inspects files, searches the codebase, monitors terminal output, and delegates implementation to worker agents.
+- **Delegation Doctrine**: The Reviewer model is pushed to review and orchestrate, rather than edits blindly. It should be able to inspect files, search the codebase, monitor terminal output, and delegates implementation to worker agents.
 - **Autonomous Auto Compose**: Dedicated autonomous loops (*Bugs*, *Feature*, *Cyber*, *Frontend*, *Tests*, *Readability*, *Custom*) that operate inside isolated project forks without risking original code.
 - **Goal Watchdog & Sub-Goals**: Break large initiatives into tracked sub-goals with self-healing watchdog loops and automated progression upon reaching `GOAL-MET:`.
 - **Integrated Browser Testing**: Embedded webview Test tab that the AI can navigate, capture console errors from, screenshot, and verify after fixes.
