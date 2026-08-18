@@ -1,8 +1,8 @@
 # Fraktole
 
-> **A Linux-native tiling command center for orchestrating autonomous AI coding agents.**
+> **A Linux-native tiling command center for orchestrating autonomous AI coding agents, Allowing UI easiness for Loops , with a set of premaid loops (Auto compose).**
 
-Fraktole pairs real terminal multiplexing with a supervising **Reviewer model** that acts as an autonomous general: it dispatches substantive work to an agent workforce running in live PTY tiles, verifies code and runtime state itself, and manages goals through to completion.
+Fraktole pairs terminal multiplexing with a supervising **Reviewer model** that has the role of an autonomous general: it dispatches substantive work to an agent workforce running in live PTY tiles, verifies code and runtime state itself, and manages goals through to completion.
 
 The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter Android remote companion (`apps/mobile`) with its local TLS pairing bridge.
 
@@ -25,7 +25,7 @@ The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter A
 ```
 
 - **Tiling Matrix**: Split-pane workspace of real PTY terminals with drag dividers, keyboard focus cycle, swap, and instant zoom.
-- **Delegation Doctrine**: The Reviewer model supervises rather than edits blindly. It inspects files, searches the codebase, monitors terminal output, and delegates implementation to worker agents.
+- **Delegation Doctrine**: The Reviewer model is pushed to review and orchestrate, rather than edits blindly. It should be able to inspect files, search the codebase, monitor terminal output, and delegates implementation to worker agents.
 - **Autonomous Auto Compose**: Dedicated autonomous loops (*Bugs*, *Feature*, *Cyber*, *Frontend*, *Tests*, *Readability*, *Custom*) that operate inside isolated project forks without risking original code.
 - **Goal Watchdog & Sub-Goals**: Break large initiatives into tracked sub-goals with self-healing watchdog loops and automated progression upon reaching `GOAL-MET:`.
 - **Integrated Browser Testing**: Embedded webview Test tab that the AI can navigate, capture console errors from, screenshot, and verify after fixes.
@@ -55,13 +55,13 @@ Auto Compose runs structured, autonomous development loops. Each run launches in
 
 | Preset | Mission | Loop Workflow |
 |---|---|---|
-| 🛡️ **Cyber** | Vulnerability hunting | Spawns research counsel to identify injection, auth flaws, secret leakage, and unsafe dependencies; dispatches fixes; verifies before sign-off. |
-| 🎨 **Frontend** | Visual & UX polish | Audits layout, responsive behavior, typography, and UX flow; tests live rendered pages in the Test tab. |
-| 🐛 **Bugs** | Bug eradication | Discovers crashes, race conditions, edge cases, and unexpected errors; writes reproduction steps and tests. |
-| ✨ **Feature** | High-value additions | Finds UX gaps and missing affordances, crafts implementation plans, and dispatches build agents. |
-| 🧪 **Tests** | Test suite expansion | Audits test coverage, eliminates flaky tests, and verifies that the suite passes cleanly. |
-| 📖 **Readability** | Refactoring & clarity | Reorganizes monolithic files, extracts modules, and cleans dead code while strictly preserving existing behavior. |
-| ⚙️ **Custom** | User-defined missions | Execute any custom autonomous prompt sequence. |
+| **Cyber** | Vulnerability hunting | Spawns research counsel to identify injection, auth flaws, secret leakage, and unsafe dependencies; dispatches fixes; verifies before sign-off. |
+| **Frontend** | Visual & UX polish | Audits layout, responsive behavior, typography, and UX flow; tests live rendered pages in the Test tab. |
+| **Bugs** | Bug eradication | Discovers crashes, race conditions, edge cases, and unexpected errors; writes reproduction steps and tests. |
+| **Feature** | High-value additions | Finds UX gaps and missing affordances, crafts implementation plans, and dispatches build agents. |
+| **Tests** | Test suite expansion | Audits test coverage, eliminates flaky tests, and verifies that the suite passes cleanly. |
+| **Readability** | Refactoring & clarity | Reorganizes monolithic files, extracts modules, and cleans dead code while strictly preserving existing behavior. |
+| **Custom** | User-defined missions | Execute any custom autonomous prompt sequence. |
 
 ---
 
@@ -101,27 +101,11 @@ Fraktole organizes workflow into 4 synchronized views accessible via `Alt+1..4`:
 
 - **File Editor (`Alt+1`)**: Multi-tab code editor powered by CodeMirror 6 with syntax highlighting for TypeScript, JavaScript, Python, HTML, CSS, JSON, and Markdown.
 - **Node Matrix & Reviewer (`Alt+2`)**: The central hub displaying the active PTY tile tree alongside the Reviewer dialogue and state ledger.
-- **Test Browser (`Alt+3`)**: An embedded webview allowing real-time preview of frontend applications and dev servers.
-- **Remote Bridge (`Alt+4`)**: TLS certificate status, active remote connections, and QR/code pairing for the mobile client.
+- **Test Browser (`Alt+3`)**: An embedded webview allowing real-time preview of frontend applications.
+- **Remote Bridge (`Alt+4`)**: TLS certificate status, active remote connections, and pairing for the mobile client.
 
 ---
 
-## Keyboard Shortcuts
-
-| Shortcut | Context | Action |
-|---|---|---|
-| `Alt + 1` | Global | Switch to **File Editor** tab |
-| `Alt + 2` | Global | Switch to **Node Workspace** tab |
-| `Alt + 3` | Global | Switch to **Test Browser** tab |
-| `Alt + 4` | Global | Switch to **Remote Bridge** tab |
-| `Ctrl + P` | Global | **Quick Open** file fuzzy finder |
-| `Ctrl + Shift + T` | Node | Open **New Tile** dialog |
-| `Ctrl + Shift + W` | Node | Close the currently focused tile |
-| `Ctrl + Shift + Enter` | Node | **Zoom / Unzoom** focused tile |
-| `Ctrl + Shift + Arrows` | Node | Cycle focus between adjacent tiles |
-| `Ctrl + Shift + 1..9` | Node | Jump focus directly to Tile `1` through `9` |
-| `Ctrl + Shift + 0` | Node | Focus the **Reviewer** prompt column |
-| `Ctrl + Shift + O` | Node | Open folder / add project to Explorer |
 
 ### Reviewer Prompt Commands
 
@@ -140,23 +124,8 @@ The companion Android application connects securely to your desktop workstation 
 1. Open the **Remote** tab in Fraktole (`Alt+4`).
 2. Launch **Fraktole Remote** on Android and enter the 6-character pairing code.
 3. The desktop generates a local self-signed TLS certificate and authenticates the client via an exchange token.
-4. Tokens are stored securely in Android Keystore / Flutter Secure Storage for instant reconnection.
+4. Tokens are stored  in Android Keystore / Flutter Secure Storage for instant reconnection.
 5. Monitor live tile outputs, view goal progression, and send commands from your phone.
-
----
-
-## Download
-
-Prebuilt **AppImage** (x86_64, Linux) binaries are published automatically to [GitHub Releases](https://github.com/Zauberman/Fraktole/releases) whenever a version tag (`v*`) is pushed. Download the latest `Fraktole-*.AppImage`, make it executable, and run it — no installation required:
-
-```bash
-chmod +x Fraktole-*.AppImage
-./Fraktole-*.AppImage
-```
-
-> The AppImage requires [FUSE](https://github.com/AppImage/AppImageKit/wiki/FUSE) (`libfuse2`) on the host system.
-
-To build the AppImage yourself, see [Build Portable AppImage](#build-portable-appimage) below.
 
 ---
 
@@ -170,7 +139,7 @@ To build the AppImage yourself, see [Build Portable AppImage](#build-portable-ap
 ### Build Self-Contained Installer
 ```bash
 # Clone repository
-git clone https://github.com/Zauberman/Fraktole.git
+git clone https://github.com/Nusoidal/Fraktole.git
 cd Fraktole
 
 # Install dependencies
@@ -234,7 +203,8 @@ Fraktole/
 │   │   └── tests/                # Test suite for runtime, mailboxes, recorder, and harness
 │   └── mobile/                   # Flutter Android remote client
 │       ├── lib/                  # Screens, transport gateway, tile buffer, protocol models
-│   └── integration_test/     # On-device pairing and control integration tests
+│       └── integration_test/     # On-device pairing and control integration tests
+├── docs/                         # Protocol specs and interface screenshots
 └── package.json                  # Root monorepo workspace manifest
 ```
 
