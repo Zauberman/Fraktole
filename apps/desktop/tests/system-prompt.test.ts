@@ -19,7 +19,7 @@ describe('system prompt', () => {
 
   it('delegates substantive work by default but keeps the hands-on option', () => {
     expect(prompt).toContain('OPERATING PROTOCOL');
-    expect(prompt).toContain('DELEGATE substantive work');
+    expect(prompt).toContain('DELEGATE  work by default');
     expect(prompt).toContain('2 build agents for implementation');
     expect(prompt).toContain('1 read only agent');
     expect(prompt).toContain('small fixes go to the fixes agent');

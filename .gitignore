@@ -10,3 +10,8 @@ data/
 apps/desktop/release/
 apps/desktop/dist-electron/
 apps/desktop/dist-renderer/
+*.tsbuildinfo
+
+# autonomous test workspaces
+.fraktole-auto/
+

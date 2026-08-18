@@ -5,6 +5,7 @@
   "description": "Tiling command center for AI agents",
   "homepage": "https://fraktole.dev",
   "author": "Fraktole",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.cjs",
