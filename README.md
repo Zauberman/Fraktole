@@ -26,7 +26,7 @@ The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter A
 
 - **Tiling Matrix**: Split-pane workspace of real PTY terminals with drag dividers, keyboard focus cycle, swap, and instant zoom.
 - **Delegation Doctrine**: The Reviewer model is pushed to review and orchestrate, rather than edits blindly. It should be able to inspect files, search the codebase, monitor terminal output, and delegates implementation to worker agents.
-- **Autonomous Auto Compose**: Dedicated autonomous loops (*Bugs*, *Feature*, *Cyber*, *Frontend*, *Tests*, *Readability*, *Custom*) that operate inside isolated project forks without risking original code.
+- **Autonomous Auto Compose**: Dedicated autonomous loops (*Bugs*, *Feature*, *Cyber*, *Frontend*, *Tests*, *Readability*, *Custom*) that operate inside  project forks.
 - **Goal Watchdog & Sub-Goals**: Break large initiatives into tracked sub-goals with self-healing watchdog loops and automated progression upon reaching `GOAL-MET:`.
 - **Integrated Browser Testing**: Embedded webview Test tab that the AI can navigate, capture console errors from, screenshot, and verify after fixes.
 - **Mobile Remote Companion**: Flutter Android client connecting over end-to-end local TLS/WSS to monitor agents, stream tiles, and review tasks on the go.
