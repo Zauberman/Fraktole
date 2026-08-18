@@ -30,7 +30,6 @@ The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter A
 - **Goal Watchdog & Sub-Goals**: Break large initiatives into tracked sub-goals with self-healing watchdog loops and automated progression upon reaching `GOAL-MET:`.
 - **Integrated Browser Testing**: Embedded webview Test tab that the AI can navigate, capture console errors from, screenshot, and verify after fixes.
 - **Mobile Remote Companion**: Flutter Android client connecting over end-to-end local TLS/WSS to monitor agents, stream tiles, and review tasks on the go.
-- **13 Contrast-Tested Themes**: Built in the `oklch` color space with a curated 4-font typographic design system.
 
 ---
 
@@ -43,7 +42,7 @@ The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter A
 - **Session Bundles**: Export and import complete session arrangements, histories, and reviewer states.
 
 ### 2. The Reviewer Supervising Harness
-The built-in Reviewer is an autonomous control loop supporting **OpenAI-compatible endpoints**, **Anthropic** (Claude 3.5/3.7 with extended thinking), **Ollama** (DeepSeek-R1, Qwen2.5-Coder, Llama), **DeepSeek**, and **Moonshot/Kimi**.
+The built-in Reviewer is an autonomous control loop that is designed to  support **OpenAI-compatible endpoints**, **Anthropic** (Claude 3.5/3.7 with extended thinking), **Ollama** (DeepSeek-R1, Qwen2.5-Coder, Llama), **DeepSeek**, and **Moonshot/Kimi**.
 
 - **Resilient Execution**: Failed tool calls do not abort the turn; the model reads the error and adjusts. Stalled streams (120s timeout) auto-retry.
 - **Token-Aware Compaction**: Compaction preserves system prompts, durable task ledgers, and the latest turns while safely trimming older context to ~80% of model limits.
@@ -97,12 +96,12 @@ The Reviewer has access to a comprehensive suite of inspection, driving, delegat
 
 ## Workspace Navigation & Tabs
 
-Fraktole organizes workflow into 4 synchronized views accessible via `Alt+1..4`:
+Fraktole organizes workflow into 4 synchronized views:
 
-- **File Editor (`Alt+1`)**: Multi-tab code editor powered by CodeMirror 6 with syntax highlighting for TypeScript, JavaScript, Python, HTML, CSS, JSON, and Markdown.
-- **Node Matrix & Reviewer (`Alt+2`)**: The central hub displaying the active PTY tile tree alongside the Reviewer dialogue and state ledger.
-- **Test Browser (`Alt+3`)**: An embedded webview allowing real-time preview of frontend applications.
-- **Remote Bridge (`Alt+4`)**: TLS certificate status, active remote connections, and pairing for the mobile client.
+- **File Editor**: Multi-tab code editor powered by CodeMirror 6 with syntax highlighting for TypeScript, JavaScript, Python, HTML, CSS, JSON, and Markdown.
+- **Node Matrix**: The central hub displaying the active PTY tile tree alongside the Reviewer dialogue and state ledger.
+- **Test Browser**: An embedded webview allowing real-time preview of frontend applications.
+- **Remote Bridge**: TLS certificate status, active remote connections, and pairing for the mobile client.
 
 ---
 
