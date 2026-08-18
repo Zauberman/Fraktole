@@ -6,7 +6,7 @@
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
 const APP = join(import.meta.dirname, '..');
@@ -136,9 +136,9 @@ const mock = http.createServer((req, res) => {
         6: text('page opened'),
         7: tool('call-7', 'read_test_page', {}),
         8: text('test complete'),
-        9: tool('call-9', 'list_dir', { path: '/home/walid/Fraktole/apps/desktop', depth: 1 }),
+        9: tool('call-9', 'list_dir', { path: APP, depth: 1 }),
         10: text('listed'),
-        11: tool('call-11', 'search_files', { pattern: 'DRIVER-42', path: '/home/walid/Fraktole/apps/desktop/scripts' }),
+        11: tool('call-11', 'search_files', { pattern: 'DRIVER-42', path: join(APP, 'scripts') }),
         12: text('searched'),
         13: tool('call-13', 'launch_agent', { agentId: 'ghost-agent', command: 'opencode' }),
         14: tool('call-14', 'reload_test_page', {}),
@@ -179,7 +179,7 @@ console.log(`mock provider on ${MOCK_BASE}`);
 launch('pnpm', ['exec', 'vite', '--port', String(VITE_PORT), '--strictPort']);
 const userData = mkdtempSync(join(tmpdir(), 'frak-e2e-'));
 const curated = {
-  HOME: process.env.HOME ?? '/home/walid',
+  HOME: process.env.HOME ?? homedir(),
   PATH: process.env.PATH ?? '/usr/bin:/bin',
   USER: process.env.USER ?? '',
   LOGNAME: process.env.LOGNAME ?? '',
