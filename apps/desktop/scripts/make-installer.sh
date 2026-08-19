@@ -75,6 +75,8 @@ extract_payload() {
   local sanity
   sanity="$(dd if="${0}" bs=1 skip="${PAYLOAD_OFFSET}" count=8 2>/dev/null)"
   [ "${sanity}" = "$(printf '%s' "${MARKER}" | head -c 8)" ] || die "corrupt installer: payload marker missing"
+  # tail -c +K is 1-indexed: payload (gzip) starts at marker + its newline,
+  # so K = PAYLOAD_OFFSET + len(MARKER) + 1 (newline) + 1 (1-based)
   tail -c +$((PAYLOAD_OFFSET + ${#MARKER} + 2)) "${0}" | tar xz -C "${target}" || die "corrupt installer: payload extraction failed"
 }
 

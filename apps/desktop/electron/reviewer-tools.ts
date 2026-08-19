@@ -42,6 +42,9 @@ export interface ReviewerToolContext {
   listMessages?(): Promise<FraktoleMessage[]>;
   /** Write a command into an existing agent's terminal (launch_agent). */
   writeToAgent?(agentId: string, command: string): Promise<string>;
+  /** True only for tiles running a harness launcher (kind === 'agent'); a bare
+   *  shell tile is never a valid target for terminal input. */
+  isHarnessTile?(tileId: string): boolean;
   /** Reload the Test tab's guest page. */
   reloadTestPage?(): Promise<string>;
   /** Open a URL in the Test tab (the embedded mini browser). */
@@ -95,6 +98,21 @@ export function capResult(text: string): string {
  *  started empty after a restart) — never a silent "(empty)". */
 function noLiveHint(): string {
   return 'no live recording yet — use read_scrollback for the persisted history';
+}
+
+/** Terminal-input tools (type_into_tile, send_keystroke, launch_agent) may only
+ *  target a tile running a harness launcher. A bare shell tile would execute the
+ *  input as shell commands — that is the path where the orchestrator "does the
+ *  work itself" instead of delegating. Returns an error string, or null when the
+ *  target is a valid harness tile. */
+function harnessTileOrError(agentId: string, ctx: ReviewerToolContext): string | null {
+  const id = agentId.trim();
+  const tileId = ctx.tileOfAgent?.(id);
+  if (!tileId) return `error: unknown agent ${id || '(empty)'}`;
+  if (!ctx.isHarnessTile?.(tileId)) {
+    return 'error: only harness tiles (running a launcher like opencode/agy) accept terminal input — delegate work with send_message or spawn_agent, not a bare shell';
+  }
+  return null;
 }
 
 const TOOLS: ReviewerTool[] = [
@@ -504,6 +522,8 @@ const TOOLS: ReviewerTool[] = [
       const command = typeof args.command === 'string' ? args.command.trim() : '';
       if (agentId.length === 0 || command.length === 0) return 'error: agentId and command required';
       if (command.length > TERMINAL_INPUT_CAP) return `error: command too large (${command.length} chars, cap ${TERMINAL_INPUT_CAP})`;
+      const err = harnessTileOrError(agentId, ctx);
+      if (err) return err;
       return ctx.writeToAgent?.(agentId, command) ?? 'error: launch unavailable';
     },
   },
@@ -529,6 +549,8 @@ const TOOLS: ReviewerTool[] = [
       if (agentId.length === 0 || keys.length === 0) return 'error: agentId and at least one key required';
       const bytes = keys.map((k) => KEY_ESCAPES[k] ?? k).join('');
       if (bytes.length > TERMINAL_INPUT_CAP) return `error: keystrokes too large (${bytes.length} chars, cap ${TERMINAL_INPUT_CAP})`;
+      const err = harnessTileOrError(agentId, ctx);
+      if (err) return err;
       const result = await ctx.writeToAgent?.(agentId, bytes);
       return result ?? `error: unknown agent ${agentId}`;
     },
@@ -551,6 +573,8 @@ const TOOLS: ReviewerTool[] = [
       const text = typeof args.text === 'string' ? args.text : '';
       if (agentId.length === 0 || text.length === 0) return 'error: agentId and text required';
       if (text.length > TERMINAL_INPUT_CAP) return `error: text too large (${text.length} chars, cap ${TERMINAL_INPUT_CAP})`;
+      const err = harnessTileOrError(agentId, ctx);
+      if (err) return err;
       const withEnter = args.pressEnter === true ? '\r' : '';
       const result = await ctx.writeToAgent?.(agentId, `${text}${withEnter}`);
       return result ?? `error: unknown agent ${agentId}`;

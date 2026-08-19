@@ -474,6 +474,13 @@ if (!app.requestSingleInstanceLock()) {
               host.write(tileId, `${command}\n`);
               return Promise.resolve(`launched "${command}" in ${agentId}`);
             },
+            // Terminal-input tools may only target a harness tile; a bare shell
+            // would execute the input as shell commands.
+            isHarnessTile: (tileId) => {
+              const agentId = agentOfTile(tileId);
+              if (!agentId) return false;
+              return rt?.session.tiles.find((t) => t.agentId === agentId)?.kind === 'agent';
+            },
           },
           tools,
           emit: {
@@ -835,13 +842,26 @@ if (!app.requestSingleInstanceLock()) {
       rt?.updateSession(session);
       if (payload.scrollback) {
         const sessionDir = rt?.sessionDir() ?? join(sessionsRoot, session.id);
+        const infra = sessionInfra.get(session.id);
+        const persist = infra?.persist;
+        const recorder = infra?.recorder;
         await mkdir(join(sessionDir, 'scrollback'), { recursive: true });
         for (const [agentId, lines] of Object.entries(payload.scrollback)) {
-          await writeFile(
-            join(sessionDir, 'scrollback', `${agentId}.json`),
-            JSON.stringify({ lines }, null, 2),
-            'utf8',
-          );
+          // prefer the live recorder (the same source read_scrollback reads) so
+          // the on-disk fallback matches the live view; fall back to the
+          // renderer's captured lines only when the recorder has nothing.
+          const tileId = rt?.agentToTile.get(agentId) ?? null;
+          const live = recorder && tileId ? recorder.full(tileId) : [];
+          const finalLines = live.length > 0 ? live : (lines as string[]);
+          if (persist && tileId) {
+            await persist.flushTile(tileId, finalLines);
+          } else {
+            await writeFile(
+              join(sessionDir, 'scrollback', `${agentId}.json`),
+              JSON.stringify({ lines: finalLines }, null, 2),
+              'utf8',
+            );
+          }
         }
       }
       return session;

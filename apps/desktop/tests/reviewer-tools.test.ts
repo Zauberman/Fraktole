@@ -121,6 +121,7 @@ describe('send_keystroke + type_into_tile', () => {
     const ctx: ReviewerToolContext = {
       ...ctxFor('/tmp'),
       tileOfAgent: (id) => (id === 'agent-1' ? 'tile-1' : null),
+      isHarnessTile: (tileId) => tileId === 'tile-1',
       writeToAgent: async (_id, bytes) => {
         written.push(bytes);
         return 'sent';
@@ -135,6 +136,8 @@ describe('send_keystroke + type_into_tile', () => {
     const written: string[] = [];
     const ctx: ReviewerToolContext = {
       ...ctxFor('/tmp'),
+      tileOfAgent: (id) => (id === 'agent-1' ? 'tile-1' : null),
+      isHarnessTile: (tileId) => tileId === 'tile-1',
       writeToAgent: async (_id, bytes) => {
         written.push(bytes);
         return 'sent';
@@ -149,12 +152,55 @@ describe('send_keystroke + type_into_tile', () => {
     const ctx: ReviewerToolContext = {
       ...ctxFor('/tmp'),
       tileOfAgent: (id) => (id === 'agent-1' ? 'tile-1' : null),
+      isHarnessTile: (tileId) => tileId === 'tile-1',
       writeToAgent: async (id) => (id === 'agent-1' ? 'sent' : `error: unknown agent ${id}`),
     };
     expect(await tools.run('send_keystroke', { agentId: 'ghost', keys: ['enter'] }, ctx)).toContain('error:');
     expect(await tools.run('type_into_tile', { agentId: 'ghost', text: 'hi' }, ctx)).toContain('error:');
     expect(await tools.run('send_keystroke', { agentId: 'agent-1', keys: [] }, ctx)).toContain('error:');
     expect(await tools.run('type_into_tile', { agentId: '', text: '' }, ctx)).toContain('error:');
+  });
+});
+
+describe('terminal-input gate (harness-only)', () => {
+  it('rejects terminal input to a bare shell tile across all three tools', async () => {
+    const ctx: ReviewerToolContext = {
+      ...ctxFor('/tmp'),
+      tileOfAgent: (id) => (id === 'agent-1' ? 'tile-shell' : null),
+      isHarnessTile: (tileId) => tileId === 'tile-agent', // shell tile is not a harness
+      writeToAgent: async () => 'sent',
+    };
+    const msg = 'only harness tiles';
+    expect(await tools.run('type_into_tile', { agentId: 'agent-1', text: 'rm -rf /' }, ctx)).toContain(msg);
+    expect(await tools.run('send_keystroke', { agentId: 'agent-1', keys: ['enter'] }, ctx)).toContain(msg);
+    expect(await tools.run('launch_agent', { agentId: 'agent-1', command: 'ls' }, ctx)).toContain(msg);
+  });
+
+  it('allows terminal input to a harness tile', async () => {
+    const written: string[] = [];
+    const ctx: ReviewerToolContext = {
+      ...ctxFor('/tmp'),
+      tileOfAgent: (id) => (id === 'agent-1' ? 'tile-agent' : null),
+      isHarnessTile: (tileId) => tileId === 'tile-agent',
+      writeToAgent: async (_id, bytes) => {
+        written.push(bytes);
+        return 'sent';
+      },
+    };
+    expect(await tools.run('type_into_tile', { agentId: 'agent-1', text: 'yes' }, ctx)).toBe('sent');
+    expect(await tools.run('send_keystroke', { agentId: 'agent-1', keys: ['enter'] }, ctx)).toBe('sent');
+    expect(await tools.run('launch_agent', { agentId: 'agent-1', command: 'ls' }, ctx)).toBe('sent');
+    expect(written).toEqual(['yes', '\r', 'ls']);
+  });
+
+  it('still errors on an unknown agent before the harness check', async () => {
+    const ctx: ReviewerToolContext = {
+      ...ctxFor('/tmp'),
+      tileOfAgent: () => null,
+      isHarnessTile: () => true,
+      writeToAgent: async () => 'sent',
+    };
+    expect(await tools.run('type_into_tile', { agentId: 'ghost', text: 'hi' }, ctx)).toContain('error: unknown agent');
   });
 });
 

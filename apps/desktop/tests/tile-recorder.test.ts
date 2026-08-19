@@ -97,3 +97,53 @@ describe('TileRecorder', () => {
     expect(r.tail('t2', 2)).toEqual(['two', 'three']);
   });
 });
+
+describe('TuiLineCollapser (opencode TUI fidelity)', () => {
+  it('overwrites in place on \\r instead of merging (real terminal behavior)', () => {
+    const r = new TileRecorder();
+    // old code produced 'abcdefxy' (merged); a real terminal leaves the tail
+    r.record('t1', 'abcdef\rxy\n');
+    expect(r.tail('t1', 1)).toEqual(['xycdef']);
+  });
+
+  it('repaints a model header cleanly when the line is erased first (ESC[K)', () => {
+    const r = new TileRecorder();
+    r.record('t1', 'model: sonnet');
+    r.record('t1', '\r\x1b[Kmodel: opus\n');
+    expect(r.tail('t1', 1)).toEqual(['model: opus']);
+    expect(r.full('t1').join('\n')).not.toContain('sonnet');
+  });
+
+  it('collapses a \\r progress-bar redraw into the final frame', () => {
+    const r = new TileRecorder();
+    r.record('t1', '[#.....] 10%\r[#==...] 50%\r[#=====] 100%\n');
+    expect(r.tail('t1', 1)).toEqual(['[#=====] 100%']);
+  });
+
+  it('handles cursor-up overwrites of a prior line in the live view', () => {
+    const r = new TileRecorder();
+    r.record('t1', 'line A\nline B\n');
+    r.record('t1', '\x1b[ALINEB2');
+    // the cursor-up moved up and overwrote "line B" in place (same length)
+    expect(r.tail('t1', 1)[0]).toBe('LINEB2');
+  });
+
+  it('ESC[2J clears the screen but keeps \\n-scrolled history', () => {
+    const r = new TileRecorder();
+    r.record('t1', 'hist1\nhist2\n');
+    r.record('t1', '\x1b[2Jfresh\n');
+    expect(r.full('t1')).toEqual(['hist1', 'hist2', 'fresh']);
+  });
+
+  it('still handles agy-style \\r\\n lines (regression)', () => {
+    const r = new TileRecorder();
+    r.record('t1', 'first\r\nsecond\r\n');
+    expect(r.tail('t1', 2)).toEqual(['first', 'second']);
+  });
+
+  it('keeps a long unterminated line capped with the truncation marker', () => {
+    const r = new TileRecorder({ maxLineLen: 5 });
+    r.record('t1', 'abcdefgh');
+    expect(r.tail('t1', 1)[0]).toBe('abcde\u2026[truncated]');
+  });
+});

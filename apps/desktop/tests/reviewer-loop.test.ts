@@ -58,6 +58,7 @@ function ctxFor(recorder: TileRecorder, opts: Partial<ReviewerToolContext> = {})
     },
     tileOfAgent: (agentId: string) => (agentId === 'agent-1' ? 'tile-1' : null),
     agentOfTile: (tileId: string) => (tileId === 'tile-1' ? 'agent-1' : null),
+    isHarnessTile: (tileId: string) => tileId === 'tile-1',
     cwdOfAgent: () => '/tmp/proj/agent-1',
     killAgent: vi.fn(async () => 'killed tile-1') as never,
     spawnAgent: vi.fn(async (kind: string, cwd: string) => `spawned agent a-9 (kind ${kind}, cwd ${cwd || 'root'})`) as never,
