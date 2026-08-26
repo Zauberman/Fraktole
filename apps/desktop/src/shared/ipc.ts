@@ -147,6 +147,9 @@ export interface Settings {
   /** Launcher command for reviewer-spawned agent tiles (e.g. "opencode");
    *  empty = the model asks the user which agent to spawn. */
   agentCommand?: string;
+  /** Extra launchers the reviewer may start in a shell tile (beyond the
+   *  built-in defaults); anything else is rejected by spawn/terminal gating. */
+  allowedLaunchers?: string[];
   /** Reasoning effort for models that support it (deepseek/openai).
    *  Unset = auto: 'high' on official DeepSeek/OpenAI endpoints, omitted
    *  elsewhere (custom endpoints can reject unknown params). */

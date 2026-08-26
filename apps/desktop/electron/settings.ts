@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Settings } from '../src/shared/ipc.js';
+import { sanitizeAllowedLaunchers } from '../src/shared/launchers.js';
 
 /**
  * App preferences, persisted as JSON under userData: the color theme and the
@@ -32,6 +33,7 @@ export class SettingsStore {
           model: typeof parsed.reviewer?.model === 'string' ? parsed.reviewer.model : undefined,
           baseUrl: typeof parsed.reviewer?.baseUrl === 'string' ? parsed.reviewer.baseUrl : undefined,
           agentCommand: typeof parsed.reviewer?.agentCommand === 'string' ? parsed.reviewer.agentCommand : undefined,
+          allowedLaunchers: sanitizeAllowedLaunchers(parsed.reviewer?.allowedLaunchers),
           reasoningEffort:
             parsed.reviewer?.reasoningEffort === 'low' ||
             parsed.reviewer?.reasoningEffort === 'medium' ||

@@ -268,13 +268,14 @@ export class ReviewerHost {
       tryKillAgent: (agentId) => this.tryKillAgent(agentId),
       getAgentCommand: () => this.agentCommand,
       agentCount: () => this.agentCount(),
-      spawnAgent: (kind, cwd) => this.spawnAgent(kind, cwd),
+      spawnAgent: (kind, cwd, opts) => this.spawnAgent(kind, cwd, opts?.userPicked === true),
       setGoal: (text, subGoals) => this.setGoal(text.length > 0 ? text : null, subGoals),
       openTestPage: (url) => this.opts.toolContext.openTestPage?.(url) ?? Promise.resolve('error: test tab unavailable'),
       readTestPage: () => this.opts.toolContext.readTestPage?.() ?? Promise.resolve('error: test tab unavailable'),
       screenshotTestPage: () => this.opts.toolContext.screenshotTestPage?.() ?? Promise.resolve('error: test tab unavailable'),
       listMessages: () => this.opts.toolContext.listMessages?.() ?? Promise.resolve([]),
-      writeToAgent: (agentId, command) => this.opts.toolContext.writeToAgent?.(agentId, command) ?? Promise.resolve('error: launch unavailable'),
+      writeToAgent: (agentId, command, opts) =>
+        this.opts.toolContext.writeToAgent?.(agentId, command, opts) ?? Promise.resolve('error: launch unavailable'),
       reloadTestPage: () => this.opts.toolContext.reloadTestPage?.() ?? Promise.resolve('error: test tab unavailable'),
     };
   }
@@ -676,9 +677,12 @@ export class ReviewerHost {
 
   /** Routes a reviewer spawn to main (which allocates the agent id and asks
    *  the renderer to mount the tile). On success the chosen kind becomes
-   *  the durable default so the next spawn can skip the question. */
-  private async spawnAgent(kind: string, cwd: string): Promise<string> {
-    const result = (await this.opts.toolContext.spawnAgent?.(kind, cwd)) ?? 'error: spawn unavailable';
+   *  the durable default so the next spawn can skip the question. The
+   *  userPicked flag (user-authorized launcher) flows to the host gate. */
+  private async spawnAgent(kind: string, cwd: string, userPickedFromTool: boolean): Promise<string> {
+    const userPicked = userPickedFromTool || (kind.length > 0 && kind === this.state.lastAgentKind);
+    const result =
+      (await this.opts.toolContext.spawnAgent?.(kind, cwd, { userPicked })) ?? 'error: spawn unavailable';
     if (!result.startsWith('error:') && kind.length > 0 && this.state.lastAgentKind !== kind) {
       this.state.lastAgentKind = kind;
       await persistState(this.stateFile, this.state, this.opts.logger);

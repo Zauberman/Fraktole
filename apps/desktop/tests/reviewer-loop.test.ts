@@ -425,7 +425,7 @@ describe('ReviewerHost', () => {
     expect(provider.complete).toHaveBeenCalledTimes(2); // the [goal armed] tool loop
     expect(host.conversation.some((e) => e.content.includes('[goal: watch the build (active)]'))).toBe(true);
 
-    recorder.record('tile-1', 'boot\nnew output');
+    recorder.record('tile-1', 'boot\r\nnew output');
     host.pollNow();
     await settle(100);
     expect(provider.complete).toHaveBeenCalledTimes(3); // activity delta woke the model
@@ -604,6 +604,29 @@ describe('ReviewerHost', () => {
     expect(host.status).toBe('running');
   });
 
+  it('kill_agent refuses to kill the orchestrator', async () => {
+    const recorder = new TileRecorder();
+    const ctx = ctxFor(recorder);
+    const provider = new FakeProvider([
+      { text: '', toolCalls: [{ id: 'c1', name: 'kill_agent', args: { agentId: 'orchestrator' } }] },
+      { text: 'cannot kill the orchestrator', toolCalls: [] },
+    ]);
+    const host = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
+      sessionId: 's1',
+      sessionDir: '/tmp/sessions/s1',
+      cwd: '/tmp/proj',
+      recorder,
+      toolContext: ctx,
+      createProvider: () => provider,
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
+    });
+    await host.start();
+    await host.prompt('kill');
+    await settle(80);
+    expect(ctx.killAgent).not.toHaveBeenCalled();
+  });
+
   it('a tool error mid-turn does not stop the reviewer (no final reply is lost)', async () => {
     const recorder = new TileRecorder();
     const ctx = ctxFor(recorder);
@@ -698,7 +721,7 @@ describe('ReviewerHost', () => {
     await host.start();
     await host.prompt('spin one up');
     await settle(100);
-    expect(ctx.spawnAgent).toHaveBeenCalledWith('opencode', '');
+    expect(ctx.spawnAgent).toHaveBeenCalledWith('opencode', '', { userPicked: false });
     expect(host.conversation.some((e) => e.content.includes('spawned agent a-9'))).toBe(true);
     const state = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')) as ReviewerState;
     expect(state.lastAgentKind).toBe('opencode');
@@ -736,7 +759,7 @@ describe('ReviewerHost', () => {
     await host.start();
     await host.prompt('spin one up');
     await settle(100);
-    expect(ctx.spawnAgent).toHaveBeenCalledWith('opencode', '');
+    expect(ctx.spawnAgent).toHaveBeenCalledWith('opencode', '', { userPicked: true });
     expect(host.conversation.some((e) => e.content.includes('spawned agent a-9'))).toBe(true);
     const state = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')) as ReviewerState;
     expect(state.lastAgentKind).toBe('opencode');

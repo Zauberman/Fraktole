@@ -9,6 +9,7 @@ import {
   type DetectedProvider,
 } from '../shared/reviewer-detect.js';
 import { sanitizeChatText } from '../shared/sanitize.js';
+import { sanitizeAllowedLaunchers } from '../shared/launchers.js';
 import { CustomPluginDialog } from './CustomPluginDialog.js';
 import { ReviewerToolCard } from './ReviewerToolCard.js';
 
@@ -88,7 +89,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '', agentCommand: '', reasoningEffort: '' });
+  const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '', agentCommand: '', allowedLaunchers: '', reasoningEffort: '' });
   const [liveModels, setLiveModels] = useState<string[] | null>(null);
   /** Transient inline note when a prompt could not be accepted — the text
    *  stays in the box, never silently dropped. */
@@ -133,6 +134,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         model: s.reviewer.model ?? '',
         baseUrl: s.reviewer.baseUrl ?? '',
         agentCommand: s.reviewer.agentCommand ?? '',
+        allowedLaunchers: s.reviewer.allowedLaunchers?.join(', ') ?? '',
         reasoningEffort: s.reviewer.reasoningEffort ?? '',
       });
     });
@@ -421,6 +423,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         model: draft.model.trim() || undefined,
         baseUrl: draft.baseUrl.trim() || undefined,
         agentCommand: draft.agentCommand.trim() || undefined,
+        allowedLaunchers: sanitizeAllowedLaunchers(draft.allowedLaunchers),
         reasoningEffort: (draft.reasoningEffort || undefined) as Settings['reviewer']['reasoningEffort'],
         customAutonomy: settings.reviewer.customAutonomy,
       },
@@ -571,6 +574,10 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               <label>
                 agent launcher (optional)
                 <input value={draft.agentCommand ?? ''} onChange={(e) => setDraft((d) => ({ ...d, agentCommand: e.target.value }))} placeholder="e.g. opencode — spawned agents run it" />
+              </label>
+              <label>
+                allowed launchers (optional)
+                <input value={draft.allowedLaunchers} onChange={(e) => setDraft((d) => ({ ...d, allowedLaunchers: e.target.value }))} placeholder="extra launchers the reviewer may start — comma separated" />
               </label>
               <label>
                 reasoning effort

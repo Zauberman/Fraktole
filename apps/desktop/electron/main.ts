@@ -15,7 +15,8 @@ import { RemoteStore } from './remote/store.js';
 import { ReviewerHost, type ReviewerToolCallEvent } from './reviewer.js';
 import { AUTONOMY_VARIANTS, type AutonomyVariant } from './reviewer-plugins.js';
 import { forkProject } from './fork.js';
-import { ReviewerTools } from './reviewer-tools.js';
+import { ReviewerTools, validateLauncherKind } from './reviewer-tools.js';
+import { commandIsPlainLaunch } from '../src/shared/launchers.js';
 import { exportSessionBundle, importSessionBundle, type BundleResult } from './session-bundle.js';
 import { SessionRegistry, SessionRuntime } from './session-runtime.js';
 import { SessionStore } from './sessions.js';
@@ -441,9 +442,9 @@ if (!app.requestSingleInstanceLock()) {
               return `killed ${tileId}`;
             },
             agentCount: () => rt?.session.tiles.length ?? 0,
-            spawnAgent: async (kind, cwd) => {
+            spawnAgent: async (kind, cwd, opts) => {
               if (!rt) return 'error: no runtime for session';
-              const res = await spawnAgentInSession(rt, kind, cwd);
+              const res = await spawnAgentInSession(rt, kind, cwd, opts?.userPicked === true);
               return res.ok ? `spawned agent ${res.agentId}` : res.error;
             },
             openTestPage: async (url) => {
@@ -467,11 +468,11 @@ if (!app.requestSingleInstanceLock()) {
               return Promise.resolve('reload sent to the Test tab');
             },
             listMessages: () => router.listMessages(session.id),
-            writeToAgent: (agentId, command) => {
+            writeToAgent: (agentId, command, opts) => {
               if (agentId === ORCHESTRATOR_ID) return Promise.resolve('error: the orchestrator is not an agent tile');
               const tileId = tileOfAgent(agentId);
               if (!tileId) return Promise.resolve(`error: unknown agent ${agentId}`);
-              host.write(tileId, `${command}\n`);
+              host.write(tileId, opts?.raw === true ? command : `${command}\n`);
               return Promise.resolve(`launched "${command}" in ${agentId}`);
             },
             // Terminal-input tools may only target a harness tile; a bare shell
@@ -481,6 +482,8 @@ if (!app.requestSingleInstanceLock()) {
               if (!agentId) return false;
               return rt?.session.tiles.find((t) => t.agentId === agentId)?.kind === 'agent';
             },
+            getAllowedLaunchers: async () => (await settings.get()).reviewer.allowedLaunchers ?? [],
+            listAgents: () => rt?.session.tiles.map((t) => ({ agentId: t.agentId, cwd: t.cwd })) ?? [],
           },
           tools,
           emit: {
@@ -535,8 +538,25 @@ if (!app.requestSingleInstanceLock()) {
       rt: SessionRuntime,
       kind: string | undefined,
       cwd: string,
+      userPicked = false,
     ): Promise<{ ok: true; agentId: string } | { ok: false; error: string }> => {
       const target = cwd.length > 0 ? cwd : judgeCwdFor(rt.session);
+      // the kind is typed into a fresh shell as a command — re-validate here
+      // even though spawn_agent already did: the remote agent.spawn RPC
+      // funnels through this host path too (defense in depth). A launcher
+      // the USER picked is authorized by consent: skip the allowlist, never
+      // the plain-command check.
+      if (kind !== undefined) {
+        const plain = kind === 'shell' || commandIsPlainLaunch(kind);
+        if (!plain) return { ok: false, error: 'error: launcher command is not a plain invocation (no shell metacharacters)' };
+        if (!userPicked) {
+          const gateErr = await validateLauncherKind(kind, {
+            getAllowedLaunchers: async () => (await settings.get()).reviewer.allowedLaunchers ?? [],
+            getAgentCommand: async () => (await settings.get()).reviewer.agentCommand ?? '',
+          });
+          if (gateErr) return { ok: false, error: gateErr };
+        }
+      }
       // cwd arrives from the phone via agent.spawn — refuse anything that is
       // not an existing directory instead of spawning a shell elsewhere
       if (cwd.length > 0) {
@@ -670,6 +690,7 @@ if (!app.requestSingleInstanceLock()) {
       const env = buildAgentEnv(session.id, agentId, 'agent', rt.sessionDir());
       try {
         rt.host.spawn(args.tileId, { cwd: args.cwd, cols: args.cols, rows: args.rows, envExt: env });
+        sessionInfra.get(session.id)?.recorder.resize(args.tileId, args.cols, args.rows);
         if (args.command && args.command.trim().length > 0) {
           rt.host.write(args.tileId, `${args.command.trim()}\n`);
         }
@@ -703,6 +724,9 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.on(IPC.ptyResize, (_e, sessionId: string, tileId: string, cols: number, rows: number) => {
       if (typeof cols !== 'number' || typeof rows !== 'number' || !Number.isFinite(cols) || !Number.isFinite(rows)) return;
       registry?.get(sessionId)?.host.resize(tileId, cols, rows);
+      // keep the recording's emulator in sync so scrollback wraps at the
+      // real tile width (and alt-frame diffs track the real rows)
+      sessionInfra.get(sessionId)?.recorder.resize(tileId, Math.floor(cols), Math.floor(rows));
     });
     ipcMain.on(IPC.ptyKill, (_e, sessionId: string, tileId: string) => {
       if (typeof sessionId !== 'string' || typeof tileId !== 'string') return;
