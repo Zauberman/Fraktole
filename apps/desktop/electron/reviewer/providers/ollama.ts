@@ -23,8 +23,21 @@ function toMessages(messages: ProviderMsg[]): unknown[] {
         // never send an empty tool_calls array (same contract as openai)
         if (m.toolCalls && m.toolCalls.length > 0) {
           msg.tool_calls = m.toolCalls.map((c) => ({
-            function: { name: c.name, arguments: JSON.stringify(c.args) },
+            // Ollama 0.22+ speaks object-form `arguments` on the wire BOTH
+            // ways: it rejects the stringified form in request history with
+            // 400 "Value looks like object, but can't find closing '}'".
+            // The args are already normalized objects (parseArgs) — send them
+            // as-is so the tool-call history replays without a 400.
+            function: { name: c.name, arguments: c.args },
           }));
+        }
+        // The `thinking` message field round-trips: templates and renderers
+        // expose the message's Thinking content to the model's prompt, so a
+        // reasoning model continues from its own prior chain-of-thought
+        // instead of starting fresh after every tool result. Non-thinking
+        // models ignore the field (no 400 — the API schema accepts it).
+        if (m.thinking && m.thinking.length > 0) {
+          msg.thinking = m.thinking;
         }
         return msg;
       }
@@ -86,7 +99,11 @@ export class OllamaProvider implements ProviderClient {
       const errField = (payload as { error?: string }).error;
       if (errField) throw new Error(`ollama API error: ${errField}`);
       const msg = (payload as {
-        message?: { content?: string; thinking?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> };
+        message?: {
+          content?: string;
+          thinking?: string;
+          tool_calls?: Array<{ function?: { name?: string; arguments?: string | Record<string, unknown> | null } }>;
+        };
         done?: boolean;
         prompt_eval_count?: number;
         eval_count?: number;
@@ -125,7 +142,14 @@ export class OllamaProvider implements ProviderClient {
   }
 }
 
-function parseArgs(raw: string): Record<string, unknown> {
+/** Tool-call arguments arrive in two shapes across Ollama versions: a JSON
+ *  string ('{"a":4}') or, on newer builds, an already-parsed JSON object
+ *  ({"a":4}). parseArgs is total over the union — and null/undefined map to
+ *  an empty object, so nobody downstream ever calls .trim() on a non-string. */
+function parseArgs(raw: string | Record<string, unknown> | null | undefined): Record<string, unknown> {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string') return { _raw: raw };
   if (raw.trim().length === 0) return {};
   try {
     return JSON.parse(raw) as Record<string, unknown>;

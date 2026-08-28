@@ -7,6 +7,7 @@ import {
   type ProviderResult,
   type ProviderUsage,
   type ReviewerToolCall,
+  type WireContentBlock,
 } from '../providers.js';
 
 const DEFAULT_BASE = 'https://api.anthropic.com';
@@ -29,6 +30,22 @@ function toMessages(messages: ProviderMsg[]): { system: string; messages: unknow
         out.push({ role: 'user', content: [{ type: 'text', text: m.content }] });
         break;
       case 'assistant': {
+        // Verbatim replay is REQUIRED when a thinking-enabled turn is
+        // continued with tool results: the thinking blocks (with their
+        // signatures) must accompany the tool_use blocks exactly as the
+        // model generated them — the API rejects modified or rebuilt
+        // thinking blocks with a 400. The captured blocks are already in
+        // wire shape, so they are emitted untouched.
+        const blocks = m.contentBlocks && m.contentBlocks.length > 0 ? m.contentBlocks : null;
+        if (blocks && !hasUnsignedThinking(blocks)) {
+          out.push({ role: 'assistant', content: blocks });
+          break;
+        }
+        // Safeguard fallback: a thinking block captured WITHOUT its
+        // signature (older builds, truncated stream) must not go back on
+        // the wire — unsigned thinking blocks are rejected. Rebuild the
+        // assistant from text/tool_use only; thinking continuity degrades
+        // but the request stays valid.
         const content: unknown[] = [];
         if (m.content.length > 0) content.push({ type: 'text', text: m.content });
         for (const c of m.toolCalls ?? []) {
@@ -62,7 +79,9 @@ function toMessages(messages: ProviderMsg[]): { system: string; messages: unknow
 
 /** Anthropic Messages API with SSE event streaming. Tool calls arrive as
  *  content blocks (start → input_json_delta → stop); extended thinking is
- *  enabled and its `thinking` blocks are captured into `thinking`. */
+ *  enabled and its `thinking` blocks are captured into `thinking` — and
+ *  captured VERBATIM (with signatures) into `contentBlocks` so a
+ *  tool-use loop can echo the assistant turn back unmodified. */
 export class AnthropicProvider implements ProviderClient {
   readonly name = 'anthropic' as const;
 
@@ -102,13 +121,22 @@ export class AnthropicProvider implements ProviderClient {
     let thinking = '';
     let usage: ProviderUsage | undefined;
     const calls = new Map<string, ReviewerToolCall>();
-    let openBlock: { call: ReviewerToolCall; raw: string } | null = null;
+    /** The turn's content blocks in generation order (verbatim wire shape). */
+    const blocks: WireContentBlock[] = [];
+    /** The single currently-open content block (anthropic streams blocks
+     *  strictly sequentially: start → deltas → stop). */
+    let openBlock: {
+      block: WireContentBlock;
+      kind: 'tool' | 'text' | 'thinking';
+      raw?: string;
+      call?: ReviewerToolCall;
+    } | null = null;
 
     for await (const payload of ssePayloads(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
       const ev = payload as {
         type?: string;
         content_block?: { type?: string; id?: string; name?: string; thinking?: string };
-        delta?: { type?: string; text?: string; thinking?: string; partial_json?: string };
+        delta?: { type?: string; text?: string; thinking?: string; signature?: string; partial_json?: string };
         message?: { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
         usage?: { output_tokens?: number };
       };
@@ -126,39 +154,69 @@ export class AnthropicProvider implements ProviderClient {
         case 'message_stop':
           if (ev.usage?.output_tokens && usage) usage.outputTokens = ev.usage.output_tokens;
           break;
-        case 'content_block_start':
-          if (ev.content_block?.type === 'tool_use') {
-            // a second start while a block is open means a lost
-            // content_block_stop — fail loudly instead of dropping the
-            // first call's accumulated arguments
-            if (openBlock) throw new Error('anthropic stream error: nested tool_use block');
-            openBlock = {
-              call: { id: ev.content_block.id ?? '', name: ev.content_block.name ?? '', args: {} },
-              raw: '',
+        case 'content_block_start': {
+          const type = ev.content_block?.type;
+          // a new start while a block is open means a lost
+          // content_block_stop — fail loudly instead of silently merging
+          // (for nested tool_use) or delivering a truncated block
+          if (openBlock && (type === 'tool_use' || openBlock.kind === 'tool')) {
+            throw new Error('anthropic stream error: nested content block');
+          }
+          if (type === 'tool_use') {
+            const call: ReviewerToolCall = {
+              id: ev.content_block?.id ?? '',
+              name: ev.content_block?.name ?? '',
+              args: {},
             };
-            calls.set(openBlock.call.id, openBlock.call);
-          } else if (ev.content_block?.type === 'thinking' && ev.content_block.thinking) {
-            thinking += ev.content_block.thinking;
-            opts.onDelta('', ev.content_block.thinking);
+            const block: WireContentBlock = { type: 'tool_use', id: call.id, name: call.name, input: {} };
+            blocks.push(block);
+            openBlock = { block, kind: 'tool', raw: '', call };
+            calls.set(call.id, call);
+          } else if (type === 'text') {
+            const block: WireContentBlock = { type: 'text', text: '' };
+            blocks.push(block);
+            openBlock = { block, kind: 'text' };
+          } else if (type === 'thinking') {
+            const block: WireContentBlock = { type: 'thinking', thinking: '', signature: '' };
+            blocks.push(block);
+            openBlock = { block, kind: 'thinking' };
+            const seed = ev.content_block?.thinking;
+            if (seed && seed.length > 0) {
+              block.thinking = seed;
+              thinking += seed;
+              opts.onDelta('', seed);
+            }
           }
           break;
+        }
         case 'content_block_delta':
           if (ev.delta?.type === 'text_delta' && ev.delta.text) {
             text += ev.delta.text;
             opts.onDelta(ev.delta.text);
+            if (openBlock?.kind === 'text') openBlock.block.text = (openBlock.block.text ?? '') + ev.delta.text;
           } else if (ev.delta?.type === 'thinking_delta' && ev.delta.thinking) {
             thinking += ev.delta.thinking;
             opts.onDelta('', ev.delta.thinking);
+            if (openBlock?.kind === 'thinking') openBlock.block.thinking = (openBlock.block.thinking ?? '') + ev.delta.thinking;
+          } else if (ev.delta?.type === 'signature_delta' && ev.delta.signature) {
+            // the thinking block's signature arrives as its own delta just
+            // before content_block_stop — it must ride along with the
+            // replayed block or the API rejects the continuation
+            if (openBlock?.kind === 'thinking') openBlock.block.signature = ev.delta.signature;
           } else if (ev.delta?.type === 'input_json_delta' && ev.delta.partial_json) {
             // a delta with no open block means a lost content_block_stop —
             // fail loudly instead of running the tool with empty args
-            if (!openBlock) throw new Error('anthropic stream error: input_json_delta without an open block');
-            openBlock.raw += ev.delta.partial_json;
+            if (!openBlock || openBlock.kind !== 'tool') throw new Error('anthropic stream error: input_json_delta without an open block');
+            openBlock.raw = (openBlock.raw ?? '') + ev.delta.partial_json;
           }
           break;
         case 'content_block_stop': {
           if (openBlock) {
-            openBlock.call.args = parseArgs(openBlock.raw);
+            if (openBlock.kind === 'tool') {
+              const args = parseArgs(openBlock.raw ?? '');
+              openBlock.call!.args = args;
+              openBlock.block.input = args;
+            }
             openBlock = null;
           }
           break;
@@ -166,8 +224,22 @@ export class AnthropicProvider implements ProviderClient {
       }
     }
 
-    return { text, toolCalls: [...calls.values()], thinking, usage };
+    return {
+      text,
+      toolCalls: [...calls.values()],
+      thinking,
+      contentBlocks: blocks.length > 0 ? blocks : undefined,
+      usage,
+    };
   }
+}
+
+/** True when the captured blocks contain a thinking block without its
+ *  signature — such blocks may NOT be replayed (the API rejects unsigned
+ *  thinking blocks), so the caller must degrade to the text/tool_use-only
+ *  rebuild. */
+function hasUnsignedThinking(blocks: WireContentBlock[]): boolean {
+  return blocks.some((b) => b.type === 'thinking' && !b.signature);
 }
 
 function parseArgs(raw: string): Record<string, unknown> {

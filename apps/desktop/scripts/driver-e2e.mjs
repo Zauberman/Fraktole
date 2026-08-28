@@ -28,6 +28,9 @@ let failNext = 0;
 let mockViolations = 0;
 let MOCK_BASE = '';
 let lastReqBody = null;
+/** every /chat/completions request body, in order (drive assertions read
+ *  specific requests — e.g. the replayed history of the first turn) */
+const reqBodies = [];
 const mock = http.createServer((req, res) => {
   const path = req.url?.split('?')[0] ?? '';
   const isCompletions = path.endsWith('/chat/completions');
@@ -65,6 +68,7 @@ const mock = http.createServer((req, res) => {
       let violation = '';
       try {
         const j = JSON.parse(body);
+        reqBodies.push(j);
         const last = j.messages?.[j.messages.length - 1];
         console.log(`  mock hit #${callCount}: last msg role=${last?.role} toolCalls=${last?.toolCalls ? last.toolCalls.length : 0}`);
         // the contract guard: OpenAI rejects "tool_calls": [] — a request
@@ -73,6 +77,19 @@ const mock = http.createServer((req, res) => {
           if (Array.isArray(m.tool_calls) && m.tool_calls.length === 0) {
             violation = `${m.role ?? '?'} message carries an empty tool_calls array`;
             break;
+          }
+        }
+        // the thinking-replay gate: prior reasoning may only be replayed to
+        // the OFFICIAL deepseek hostname (api.deepseek.com) via
+        // reasoning_content — real OpenAI 400s on reasoning as input, and a
+        // custom endpoint must never see it. This mock is not deepseek, so
+        // any occurrence is a leak of the hostname gate.
+        if (!violation) {
+          for (const m of j.messages ?? []) {
+            if ('reasoning_content' in m) {
+              violation = `${m.role ?? '?'} message carries reasoning_content on a non-deepseek endpoint`;
+              break;
+            }
           }
         }
         // tool-precedence guard: every tool response must sit behind an
@@ -349,6 +366,33 @@ const main = async () => {
   );
   if (!final) fail('final answer missing');
   else ok('model answered (DRIVER-42 in transcript)');
+
+  // thinking-replay wire checks: the first turn round-tripped a reasoning
+  // answer (chunk 1: reasoning_content + read_tile call) and replayed the
+  // assistant turn for the tool-error continuation (request 2). The replay
+  // must keep assistant content EMPTY (thinking never smuggled into
+  // content), keep the tool call intact, and never leak reasoning_content
+  // to this custom endpoint (the deepseek hostname gate).
+  try {
+    const req2 = reqBodies[1];
+    if (!req2) fail(`no second request captured to validate thinking replay (got ${reqBodies.length})`);
+    else {
+      const asst = (req2.messages ?? []).filter((m) => m.role === 'assistant');
+      const prev = asst[0] ?? null;
+      if (!prev) fail('replayed request has no assistant history');
+      else {
+        if (prev.content !== '') fail(`assistant history content polluted by thinking: "${String(prev.content).slice(0, 60)}"`);
+        else ok('assistant history replays thinking-free content');
+        const calls = prev.tool_calls ?? [];
+        if (calls.length !== 1 || calls[0].id !== 'call-1') fail(`tool-call history not intact across the thinking round-trip: ${JSON.stringify(calls)}`);
+        else ok('assistant tool-call history intact across the thinking round-trip');
+      }
+      if ((req2.messages ?? []).some((m) => 'reasoning_content' in m)) fail('reasoning_content leaked to the custom endpoint');
+      else ok('no reasoning_content on the custom endpoint (deepseek hostname gate)');
+    }
+  } catch (err) {
+    fail(`thinking-replay wire assertion error: ${err.message}`);
+  }
 
   // the transcript stays pinned to the bottom while content streams, and a
   // deliberate scroll-up is never yanked back
@@ -666,8 +710,8 @@ const main = async () => {
   if (!contextKept) fail('conversation wiped after revive');
   else ok('conversation retained after revive');
 
-  if (mockViolations > 0) fail(`${mockViolations} request(s) carried an empty tool_calls array`);
-  else ok('no request ever carried an empty tool_calls array');
+  if (mockViolations > 0) fail(`${mockViolations} request(s) violated the wire contract (empty tool_calls / reasoning_content leak — see mock logs)`);
+  else ok('no request ever violated the wire contract (empty tool_calls / reasoning_content leak)');
 
   // the two new driving tools: keystrokes (shift-tab) and typing answers
   // into a tile; against an unknown agent they must error cleanly. Each

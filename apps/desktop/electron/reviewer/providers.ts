@@ -16,6 +16,21 @@ export interface ReviewerToolCall {
   args: Record<string, unknown>;
 }
 
+/** A verbatim wire content block captured from an assistant turn
+ *  (anthropic thinking/text/tool_use blocks, signature included). Replayed
+ *  exactly as received so provider-side continuity rules hold (anthropic
+ *  requires thinking blocks to accompany tool_use blocks unmodified).
+ *  Never interpreted by the harness itself. */
+export interface WireContentBlock {
+  type: 'thinking' | 'text' | 'tool_use' | string;
+  thinking?: string;
+  signature?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+  text?: string;
+}
+
 /** The harness's normalized conversation message. */
 export interface ProviderMsg {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -31,8 +46,14 @@ export interface ProviderMsg {
   /** assistant only: the model's reasoning output, captured from the
    *  provider's thinking field (deepseek reasoning_content, ollama
    *  thinking, anthropic thinking blocks, ...). Persisted with the
-   *  message; never re-sent to the model. */
+   *  message and re-sent by the adapters whose providers require or
+   *  support it (deepseek reasoning_content on official hosts, ollama
+   *  `thinking`, anthropic thinking blocks with signature). */
   thinking?: string;
+  /** assistant only: the provider's verbatim content blocks of this turn
+   *  (anthropic capture; ignored by the other adapters). Replayed as-is
+   *  for thinking/tool-use continuity. */
+  contentBlocks?: WireContentBlock[];
 }
 
 export interface CompleteOpts {
@@ -63,6 +84,10 @@ export interface ProviderResult {
   toolCalls: ReviewerToolCall[];
   /** Full reasoning output of the turn ('' when the provider sent none). */
   thinking: string;
+  /** The provider's verbatim content blocks of this turn (anthropic
+   *  capture; undefined elsewhere). Replayed as-is for thinking
+   *  continuity in tool loops. */
+  contentBlocks?: WireContentBlock[];
   /** Token usage when the provider reports it (streamed or final). */
   usage?: ProviderUsage;
 }

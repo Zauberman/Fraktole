@@ -23,7 +23,22 @@ function isOfficialHost(base: string): boolean {
   }
 }
 
-function toMessages(messages: ProviderMsg[]): unknown[] {
+/** Exact DeepSeek host — the only host that must receive prior
+ *  reasoning_content back. With the `tools` parameter present (always true
+ *  for the reviewer harness) DeepSeek's thinking mode REQUIRES the
+ *  reasoning_content of every previous turn in subsequent requests
+ *  ("If your code does not correctly pass back reasoning_content, the API
+ *  will return a 400 error"). OpenAI's reasoning models REJECT reasoning
+ *  as input, so this stays an exact hostname gate. */
+function isDeepseekHost(base: string): boolean {
+  try {
+    return new URL(base).hostname === 'api.deepseek.com';
+  } catch {
+    return false;
+  }
+}
+
+function toMessages(messages: ProviderMsg[], baseUrl: string): unknown[] {
   const out = messages.map((m) => {
     switch (m.role) {
       case 'system':
@@ -40,6 +55,12 @@ function toMessages(messages: ProviderMsg[]): unknown[] {
             type: 'function',
             function: { name: c.name, arguments: JSON.stringify(c.args) },
           }));
+        }
+        // prior reasoning is only understood on the official deepseek
+        // endpoint — never on openai.com (reasoning input is a 400) nor on
+        // custom gateways (unknown fields risk a 400)
+        if (m.thinking && m.thinking.length > 0 && isDeepseekHost(baseUrl)) {
+          msg.reasoning_content = m.thinking;
         }
         return msg;
       }
@@ -91,7 +112,7 @@ export class OpenAIProvider implements ProviderClient {
         model: opts.model,
         stream: true,
         max_tokens: 4096,
-        messages: toMessages(opts.messages),
+        messages: toMessages(opts.messages, base),
         tools: toTools(opts.tools),
         ...(official ? { stream_options: { include_usage: true } } : {}),
         ...(opts.reasoningEffort !== undefined ? { reasoning_effort: opts.reasoningEffort } : {}),

@@ -1618,6 +1618,67 @@ describe('ReviewerHost', () => {
     expect(host.conversation[0]?.content).not.toContain('AUTONOMOUS MODE');
   });
 
+  it('persists the system prompt as line one and restores it verbatim on reload', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-syspersist-${process.pid}-${++hostSeq}`);
+    const { mkdir, readFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const recorder = new TileRecorder();
+    const { host } = makeHost(
+      [{ text: 'ok', toolCalls: [] }, { text: 'ok', toolCalls: [] }],
+      recorder,
+      {
+        dir,
+        config: {
+          provider: 'ollama',
+          model: 'm',
+          customAutonomy: { name: 'My Loop', prompt: 'AUTONOMOUS MODE: MY LOOP\n- my directive line' },
+        },
+      },
+    );
+    await host.start();
+    await host.setVariant('custom');
+    await host.prompt('hi');
+    await settle(60);
+    const lines = (await readFile(join(dir, 'conversation.jsonl'), 'utf8'))
+      .split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
+    expect(lines[0]!.role).toBe('system');
+    expect(lines[0]!.content).toContain('AUTONOMOUS MODE: MY LOOP');
+    // a second host reloading the same session restores the SAME doctrine
+    // verbatim — even though its config no longer carries the saved custom
+    // prompt, so identity to the persisted line is the only way it can
+    // contain MY LOOP (a rebuild would produce the CUSTOM placeholder)
+    const { host: host2 } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir });
+    await host2.start();
+    const mem = host2 as unknown as { messages: Array<{ role: string; content: string }> };
+    expect(mem.messages[0]!.role).toBe('system');
+    expect(mem.messages[0]!.content).toBe(lines[0]!.content);
+    expect(mem.messages[0]!.content).toContain('my directive line');
+  });
+
+  it('setVariant rewrites the persisted system line so reloads see the new doctrine', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-variantpersist-${process.pid}-${++hostSeq}`);
+    const { mkdir, readFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const recorder = new TileRecorder();
+    const { host } = makeHost(
+      [{ text: 'ok', toolCalls: [] }, { text: 'ok', toolCalls: [] }],
+      recorder,
+      { dir },
+    );
+    await host.start();
+    await host.setVariant('feature');
+    await settle(30);
+    const lines = (await readFile(join(dir, 'conversation.jsonl'), 'utf8'))
+      .split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
+    expect(lines[0]!.role).toBe('system');
+    expect(lines[0]!.content).toContain('AUTONOMOUS MODE: FEATURES');
+    // the swapped doctrine survives a restart without calling setVariant
+    const { host: host2 } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir });
+    await host2.start();
+    const mem = host2 as unknown as { messages: Array<{ role: string; content: string }> };
+    expect(mem.messages[0]!.content).toContain('AUTONOMOUS MODE: FEATURES');
+  });
+
   it('custom variant uses the saved directive and arms a name-derived mission', async () => {
     const dir = join(tmpdir(), `fraktole-reviewer-custom-${process.pid}-${++hostSeq}`);
     const { mkdir } = await import('node:fs/promises');
@@ -1881,17 +1942,19 @@ describe('ReviewerHost', () => {
       await settle(40);
       host.summarizeSession();
       await settle(80);
-      // the conversation file is memory + the big-compact summary turn only.
-      // The system prompt is memory-only (never persisted), so the on-disk
-      // file holds exactly the summary turn — all prior history wiped.
+      // the conversation file is the system prompt + the big-compact summary
+      // turn only. The system prompt is persisted (it is part of the
+      // transcript) and restored verbatim on reload — the on-disk file holds
+      // exactly [system, summary], all prior history wiped.
       const lines = (await readFile(join(dir, 'conversation.jsonl'), 'utf8'))
         .split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
-      expect(lines.length).toBe(1); // just the big-compact summary
-      expect(lines[0]!.role).toBe('user');
-      expect(lines[0]!.content).toContain('[big compact]');
-      expect(lines[0]!.content).toContain('RECAP: everything is now one summary');
+      expect(lines.length).toBe(2); // system line + big-compact summary
+      expect(lines[0]!.role).toBe('system');
+      expect(lines[1]!.role).toBe('user');
+      expect(lines[1]!.content).toContain('[big compact]');
+      expect(lines[1]!.content).toContain('RECAP: everything is now one summary');
       // the summary turn still carries the goal/ledger state block
-      expect(lines[0]!.content).toContain('[goal');
+      expect(lines[1]!.content).toContain('[goal');
       // and the in-memory conversation still holds the system prompt first
       const mem = host as unknown as { messages: Array<{ role: string; content: string }> };
       expect(mem.messages[0]!.role).toBe('system');

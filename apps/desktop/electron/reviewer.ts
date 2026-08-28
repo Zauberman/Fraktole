@@ -323,18 +323,23 @@ export class ReviewerHost {
     this.state = await loadState(this.stateFile);
     this.variant = this.state.variant;
     await this.load();
-    // The system prompt is memory-only (never persisted), so a reloaded
-    // conversation must get it back explicitly — otherwise the model runs
-    // without its operating protocol after every relaunch.
-    const system: ProviderMsg = {
-      role: 'system',
-      content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd, this.variant, this.customPromptOf(cfg)),
-    };
-    if (this.messages[0]?.role === 'system') {
-      this.messages[0] = system;
-    } else {
-      this.messages.unshift(system);
+    // The system prompt lives in the transcript now: it is persisted as the
+    // first line and restored verbatim on load, so a session replays exactly
+    // the doctrine (base + autonomy plugin block) it ran under. Only
+    // conversations that predate system persistence (no system line) get a
+    // fresh build here; variant/custom-prompt changes update the line in
+    // place via setVariant.
+    if (this.messages[0]?.role !== 'system') {
+      this.messages.unshift({
+        role: 'system',
+        content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd, this.variant, this.customPromptOf(cfg)),
+      });
       this.persistedCount += 1; // every persisted line shifts by one
+      // materialize the system line so the transcript is self-contained —
+      // next restarts restore it verbatim instead of rebuilding
+      if (await this.rewriteConversation()) {
+        this.persistedCount = this.messages.length;
+      }
     }
     this.pollsSinceWake = 0;
     this.startWatch();
@@ -492,6 +497,11 @@ export class ReviewerHost {
         role: 'system',
         content: buildSystemPrompt(this.opts.sessionId, this.opts.cwd, variant, this.customPromptOf(cfg)),
       };
+      // the system line is persisted — a swap must land on disk too, or the
+      // next reload would restore the pre-switch doctrine
+      if (await this.rewriteConversation()) {
+        this.persistedCount = this.messages.length;
+      }
     }
     this.setStatus(this.status);
   }
@@ -869,6 +879,10 @@ export class ReviewerHost {
             thinking: response.thinking.length > 0 ? response.thinking : undefined,
           };
           if (response.toolCalls.length > 0) assistant.toolCalls = response.toolCalls;
+          // provider-faithful content blocks (anthropic thinking blocks with
+          // signatures) — replayed verbatim on the next call for thinking
+          // continuity in tool loops
+          if (response.contentBlocks && response.contentBlocks.length > 0) assistant.contentBlocks = response.contentBlocks;
           this.messages.push(assistant);
           if (response.usage) {
             const total = response.usage.inputTokens + response.usage.cachedTokens + response.usage.outputTokens;
@@ -1087,19 +1101,24 @@ export class ReviewerHost {
     await this.rewriteConversation();
   }
 
-  /** Rewrites the conversation file to exactly the in-memory messages (the
-   *  system prompt is memory-only). Atomic via tmp + rename; failures are
+  /** Rewrites the conversation file to exactly the in-memory messages —
+   *  the system prompt included (it is part of the transcript; a reloaded
+   *  session restores it verbatim). Atomic via tmp + rename; failures are
    *  logged and the old file is left in place (a reload then simply sees
-   *  the pre-compaction history). */
-  private async rewriteConversation(): Promise<void> {
+   *  the pre-compaction history). Returns whether the rewrite succeeded —
+   *  callers that reset the write cursor on top of it must only do so on
+   *  success. */
+  private async rewriteConversation(): Promise<boolean> {
     try {
       await mkdir(dirname(this.conversationFile), { recursive: true });
-      const lines = this.messages.filter((m) => m.role !== 'system').map((m) => JSON.stringify(m));
+      const lines = this.messages.map((m) => JSON.stringify(m));
       const tmp = `${this.conversationFile}.tmp`;
       await writeFile(tmp, lines.length > 0 ? `${lines.join('\n')}\n` : '', 'utf8');
       await rename(tmp, this.conversationFile);
+      return true;
     } catch (err) {
       this.opts.logger?.(`reviewer: conversation rewrite failed (${(err as Error).message})`);
+      return false;
     }
   }
 
@@ -1176,21 +1195,20 @@ export class ReviewerHost {
 
   /** Appends every not-yet-persisted message (never just the last one — a
    *  multi-call turn's tool results must all survive a restart). The system
-   *  prompt is memory-only, as before. The write cursor advances only after
-   *  a successful write — a failed append is retried on the next persist
-   *  instead of silently losing the lines. */
+   *  prompt is persisted like any other line (it is part of the
+   *  transcript). The write cursor advances only after a successful write —
+   *  a failed append is retried on the next persist instead of silently
+   *  losing the lines. */
   private async persist(): Promise<void> {
     if (this.persistedCount >= this.messages.length) return;
     const fresh = this.messages.slice(this.persistedCount);
-    const lines = fresh
-      .filter((m) => m.role !== 'system')
-      .map((m) => {
-        const { announced: _announced, ...rest } = m;
-        return JSON.stringify(rest);
-      });
+    const lines = fresh.map((m) => {
+      const { announced: _announced, ...rest } = m;
+      return JSON.stringify(rest);
+    });
     if (lines.length === 0) {
-      // nothing to write (the memory-only system prompt); the cursor still
-      // advances so the next persist starts at the right line
+      // nothing to write; the cursor still advances so the next persist
+      // starts at the right line
       this.persistedCount = this.messages.length;
       return;
     }
