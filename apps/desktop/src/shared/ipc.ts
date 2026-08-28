@@ -127,6 +127,35 @@ export interface Project {
   sessionId?: string;
 }
 
+/** Model-tuning knobs for the reviewer harness. Every field optional:
+ *  unset = provider default (the field is not sent on the wire). Range
+ *  validation lives in the settings whitelist (electron/settings.ts) —
+ *  invalid values are dropped at load, never coerced. */
+export interface SamplerKnobs {
+  /** Context window in tokens. Wire: ollama options.num_ctx; budget: the
+   *  harness compaction target for every provider (80% of this). */
+  contextTokens?: number;
+  /** Output cap in tokens — max_tokens (openai/anthropic) or ollama
+   *  options.num_predict. */
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+  /** ollama only (not a chat.completions field) */
+  topK?: number;
+  /** ollama only */
+  minP?: number;
+  seed?: number;
+  /** ollama only */
+  repeatPenalty?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+  /** ollama only — body.keep_alive (e.g. "5m", "0" = unload) */
+  keepAlive?: string;
+  /** ollama only — body.think (force/disable thinking; false is safe on
+   *  any model, true only on thinking-capable ones) */
+  think?: boolean;
+}
+
 export interface Settings {
   theme: string;
   /** The reviewer harness model config. Everything except the key is
@@ -157,6 +186,9 @@ export interface Settings {
    *  Unset = auto: 'high' on official DeepSeek/OpenAI endpoints, omitted
    *  elsewhere (custom endpoints can reject unknown params). */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /** Model-tuning knobs; every field validated and optional (see
+   *  SamplerKnobs). Unset = provider default, nothing sent on the wire. */
+  knobs?: SamplerKnobs;
   /** The user's custom autonomous loop: name + full directive. When the
    *  custom variant is picked, this prompt replaces the placeholder. */
   customAutonomy?: { name?: string; prompt?: string };

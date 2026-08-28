@@ -88,6 +88,13 @@ export class AnthropicProvider implements ProviderClient {
   async complete(opts: CompleteOpts): Promise<ProviderResult> {
     const { system, messages } = toMessages(opts.messages);
     const url = joinBase(opts.baseUrl || DEFAULT_BASE, '/v1/messages');
+    // extended-thinking tokens count against max_tokens, so the cap must
+    // stay strictly larger than the thinking budget — a user-set cap below
+    // the current floor is clamped (silently lowering it would 400)
+    const maxTokens = Math.max(opts.knobs?.maxOutputTokens ?? 8192, 8192);
+    if (opts.knobs?.maxOutputTokens !== undefined && opts.knobs.maxOutputTokens < 8192) {
+      console.log(`anthropic adapter: maxOutputTokens ${opts.knobs.maxOutputTokens} clamped to 8192 (extended-thinking budget)`);
+    }
     const res = await fetch(url, {
       method: 'POST',
       signal: opts.signal,
@@ -98,10 +105,7 @@ export class AnthropicProvider implements ProviderClient {
       },
       body: JSON.stringify({
         model: opts.model,
-        // strictly larger than the thinking budget: extended-thinking
-        // tokens count against max_tokens, so a fully-used budget must
-        // still leave room for the actual reply
-        max_tokens: 8192,
+        max_tokens: maxTokens,
         system: system.length > 0 ? system : undefined,
         messages,
         tools: opts.tools.map((t) => ({
@@ -109,6 +113,9 @@ export class AnthropicProvider implements ProviderClient {
           description: t.description,
           input_schema: t.inputSchema,
         })),
+        // anthropic sampler fields only — no seed/penalties/keep_alive/think
+        ...(opts.knobs?.temperature !== undefined ? { temperature: opts.knobs.temperature } : {}),
+        ...(opts.knobs?.topP !== undefined ? { top_p: opts.knobs.topP } : {}),
         stream: true,
         thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET_TOKENS },
       }),

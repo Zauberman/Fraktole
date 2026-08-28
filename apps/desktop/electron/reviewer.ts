@@ -20,7 +20,7 @@ import { ReviewerTools, type ReviewerToolContext } from './reviewer-tools.js';
 import { AUTONOMY_MISSIONS, AUTONOMY_PLUGINS, type AutonomyVariant } from './reviewer-plugins.js';
 import { forkExists, type ForkResult } from './fork.js';
 import { emptyState, isGoalMet, loadState, persistState } from './reviewer-state.js';
-import { createProvider, type ProviderClient, type ProviderMsg, type ProviderResult } from './reviewer/providers.js';
+import { createProvider, type ProviderClient, type ProviderMsg, type ProviderResult, type SamplerKnobs } from './reviewer/providers.js';
 import type { TileRecorder } from './tile-recorder.js';
 
 export type { ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../src/shared/ipc.js';
@@ -42,6 +42,9 @@ export interface ReviewerConfig {
   agentCommand?: string;
   /** Reasoning effort (deepseek/openai); empty = auto. */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /** Model-tuning knobs (context window, output cap, samplers); unset =
+   *  provider defaults. Captured at start(); applies on restart. */
+  knobs?: SamplerKnobs;
   /** The user's custom autonomous loop (name + full directive). */
   customAutonomy?: { name?: string; prompt?: string };
 }
@@ -207,6 +210,9 @@ export class ReviewerHost {
   private readonly stateFile: string;
   private agentCommand = '';
   private reasoningEffort: ReviewerConfig['reasoningEffort'] = undefined;
+  /** Model-tuning knobs (context window, output cap, samplers) captured at
+   *  start(); unset = provider defaults, nothing extra on the wire. */
+  private knobs: SamplerKnobs | undefined = undefined;
   /** Durable goal + task ledger (survives compaction and restarts). */
   private state: ReviewerState = emptyState();
   private watchTimer: NodeJS.Timeout | null = null;
@@ -319,6 +325,7 @@ export class ReviewerHost {
     this.apiKey = key;
     this.agentCommand = cfg.agentCommand?.trim() ?? '';
     this.reasoningEffort = cfg.reasoningEffort;
+    this.knobs = cfg.knobs;
     this.provider = (this.opts.createProvider ?? createProvider)(res.adapter);
     this.state = await loadState(this.stateFile);
     this.variant = this.state.variant;
@@ -862,6 +869,7 @@ export class ReviewerHost {
               tools: this.tools.definitions(),
               signal,
               reasoningEffort: this.reasoningEffort ?? defaultReasoningEffort(res),
+              knobs: this.knobs,
               onDelta: (delta, thinking) => {
                 onActivity();
                 this.opts.emit.stream({
@@ -1035,7 +1043,9 @@ export class ReviewerHost {
     }
     const doForce = force || this.pendingCompact;
     this.pendingCompact = false;
-    const budget = Math.floor(contextBudgetTokens(this.resolved?.model ?? '', this.opts.contextBudgetTokens) * 0.8);
+    // the user's context knob drives the budget (80% of the window); the
+    // per-model guesses stay as the fallback for knob-less configs
+    const budget = Math.floor(contextBudgetTokens(this.resolved?.model ?? '', this.knobs?.contextTokens ?? this.opts.contextBudgetTokens) * 0.8);
     let dropped = 0;
     let userIdx: number[] = [];
     for (;;) {

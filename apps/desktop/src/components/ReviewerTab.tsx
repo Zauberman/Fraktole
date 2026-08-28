@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReviewerEntry, ReviewerGoal, ReviewerQuestion, ReviewerStatus, ReviewerToolCallEvent, SubGoal } from '../ipc.js';
-import { bridge, type Settings } from '../ipc.js';
+import { bridge, type SamplerKnobs, type Settings } from '../ipc.js';
 import { AUTONOMY_NAMES, AUTONOMY_VARIANTS, type AutonomyVariant } from '../shared/autonomy.js';
 import {
   DEFAULT_MODELS,
@@ -18,6 +18,135 @@ import { sanitizeChatText } from '../shared/sanitize.js';
 import { sanitizeAllowedLaunchers } from '../shared/launchers.js';
 import { CustomPluginDialog } from './CustomPluginDialog.js';
 import { ReviewerToolCard } from './ReviewerToolCard.js';
+
+// ---- advanced model parameters -------------------------------------------
+
+/** The config-dialog knob drafts (inputs are strings; '' = unset). */
+interface KnobDraft {
+  contextTokens: string;
+  maxOutputTokens: string;
+  temperature: string;
+  topP: string;
+  topK: string;
+  minP: string;
+  seed: string;
+  repeatPenalty: string;
+  presencePenalty: string;
+  frequencyPenalty: string;
+  keepAlive: string;
+  think: string;
+}
+
+/** number → input string ('' for unset). */
+function numStr(v: number | undefined): string {
+  return v === undefined ? '' : String(v);
+}
+
+/** input string → number ('' and junk → undefined; the settings whitelist
+ *  range-validates on top, so no error surface is needed here). */
+function numOf(s: string): number | undefined {
+  const t = s.trim();
+  if (t.length === 0) return undefined;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** The numeric-only knob keys (the rest are keepAlive/think — handled
+ *  separately below). */
+type NumKnobKey =
+  | 'contextTokens'
+  | 'maxOutputTokens'
+  | 'temperature'
+  | 'topP'
+  | 'topK'
+  | 'minP'
+  | 'seed'
+  | 'repeatPenalty'
+  | 'presencePenalty'
+  | 'frequencyPenalty';
+
+/** Draft → effective SamplerKnobs (unset fields omitted entirely). */
+function knobsFromDraft(d: KnobDraft): SamplerKnobs | undefined {
+  const k: SamplerKnobs = {};
+  const nums: Array<[NumKnobKey, string]> = [
+    ['contextTokens', d.contextTokens],
+    ['maxOutputTokens', d.maxOutputTokens],
+    ['temperature', d.temperature],
+    ['topP', d.topP],
+    ['topK', d.topK],
+    ['minP', d.minP],
+    ['seed', d.seed],
+    ['repeatPenalty', d.repeatPenalty],
+    ['presencePenalty', d.presencePenalty],
+    ['frequencyPenalty', d.frequencyPenalty],
+  ];
+  for (const [field, raw] of nums) {
+    const v = numOf(raw);
+    if (v !== undefined) k[field] = v;
+  }
+  const ka = d.keepAlive.trim();
+  if (ka.length > 0) k.keepAlive = ka;
+  if (d.think === 'on') k.think = true;
+  else if (d.think === 'off') k.think = false;
+  return Object.keys(k).length > 0 ? k : undefined;
+}
+
+type KnobAdapter = 'ollama' | 'openai' | 'anthropic';
+
+/** The advanced knob registry: which fields render for which adapter, and
+ *  each field's input metadata. ollama maps onto engine options; openai
+ *  (incl. deepseek) and anthropic only accept their standard fields. */
+const ADVANCED_KNOBS: Array<{
+  key: keyof KnobDraft;
+  label: string;
+  kind: 'number' | 'text' | 'select';
+  adapters: KnobAdapter[];
+  placeholder?: string;
+  hint?: string;
+  options?: Array<{ v: string; label: string }>;
+}> = [
+  {
+    key: 'contextTokens',
+    label: 'context window (tokens)',
+    kind: 'number',
+    adapters: ['ollama', 'openai', 'anthropic'],
+    hint: 'ollama: options.num_ctx (grows KV cache memory) · remote: compaction budget only',
+  },
+  {
+    key: 'maxOutputTokens',
+    label: 'max output tokens',
+    kind: 'number',
+    adapters: ['ollama', 'openai', 'anthropic'],
+    hint: 'ollama num_predict ≥512 · anthropic clamped ≥8192 (thinking budget)',
+  },
+  { key: 'temperature', label: 'temperature', kind: 'number', adapters: ['ollama', 'openai', 'anthropic'], placeholder: 'model default' },
+  { key: 'topP', label: 'top_p', kind: 'number', adapters: ['ollama', 'openai', 'anthropic'], placeholder: 'model default' },
+  { key: 'topK', label: 'top_k', kind: 'number', adapters: ['ollama'], placeholder: 'model default' },
+  { key: 'minP', label: 'min_p', kind: 'number', adapters: ['ollama'], placeholder: 'model default' },
+  { key: 'seed', label: 'seed', kind: 'number', adapters: ['ollama', 'openai'], placeholder: '-1 = random' },
+  { key: 'repeatPenalty', label: 'repeat_penalty', kind: 'number', adapters: ['ollama'], placeholder: 'model default' },
+  { key: 'presencePenalty', label: 'presence_penalty', kind: 'number', adapters: ['ollama', 'openai'], placeholder: 'model default' },
+  { key: 'frequencyPenalty', label: 'frequency_penalty', kind: 'number', adapters: ['ollama', 'openai'], placeholder: 'model default' },
+  {
+    key: 'keepAlive',
+    label: 'keep_alive',
+    kind: 'text',
+    adapters: ['ollama'],
+    placeholder: 'e.g. 5m · 0 = unload after the turn',
+  },
+  {
+    key: 'think',
+    label: 'thinking (ollama)',
+    kind: 'select',
+    adapters: ['ollama'],
+    hint: 'true only on thinking-capable models (qwen3, llama4…); non-thinking models 400 on it',
+    options: [
+      { v: 'auto', label: 'auto (model default)' },
+      { v: 'on', label: 'on' },
+      { v: 'off', label: 'off' },
+    ],
+  },
+];
 
 /** One row of the unified transcript timeline: a message or a tool call.
  *  Events arrive over IPC in order, so the renderer's monotonic `seq` is
@@ -101,7 +230,31 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [draft, setDraft] = useState({ apiKey: '', providerId: '', provider: '', model: '', baseUrl: '', agentCommand: '', allowedLaunchers: '', reasoningEffort: '' });
+  /** Knob drafts as strings (numeric inputs); '' = unset (provider default). */
+  const [draft, setDraft] = useState({
+    apiKey: '',
+    providerId: '',
+    provider: '',
+    model: '',
+    baseUrl: '',
+    agentCommand: '',
+    allowedLaunchers: '',
+    reasoningEffort: '',
+    knobs: {
+      contextTokens: '',
+      maxOutputTokens: '',
+      temperature: '',
+      topP: '',
+      topK: '',
+      minP: '',
+      seed: '',
+      repeatPenalty: '',
+      presencePenalty: '',
+      frequencyPenalty: '',
+      keepAlive: '',
+      think: 'auto',
+    },
+  });
   const [liveModels, setLiveModels] = useState<string[] | null>(null);
   const [providerFilter, setProviderFilter] = useState('');
   const filterRef = useRef<HTMLInputElement | null>(null);
@@ -142,6 +295,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     loadTranscript();
     void bridge.getSettings().then((s) => {
       setSettings(s);
+      const k = s.reviewer.knobs ?? {};
       setDraft({
         apiKey: s.reviewer.apiKey ?? '',
         providerId: s.reviewer.providerId ?? '',
@@ -151,6 +305,20 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         agentCommand: s.reviewer.agentCommand ?? '',
         allowedLaunchers: s.reviewer.allowedLaunchers?.join(', ') ?? '',
         reasoningEffort: s.reviewer.reasoningEffort ?? '',
+        knobs: {
+          contextTokens: numStr(k.contextTokens),
+          maxOutputTokens: numStr(k.maxOutputTokens),
+          temperature: numStr(k.temperature),
+          topP: numStr(k.topP),
+          topK: numStr(k.topK),
+          minP: numStr(k.minP),
+          seed: numStr(k.seed),
+          repeatPenalty: numStr(k.repeatPenalty),
+          presencePenalty: numStr(k.presencePenalty),
+          frequencyPenalty: numStr(k.frequencyPenalty),
+          keepAlive: k.keepAlive ?? '',
+          think: k.think === undefined ? 'auto' : k.think ? 'on' : 'off',
+        },
       });
     });
   }, [sessionId, loadTranscript]);
@@ -468,6 +636,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         agentCommand: draft.agentCommand.trim() || undefined,
         allowedLaunchers: sanitizeAllowedLaunchers(draft.allowedLaunchers),
         reasoningEffort: (draft.reasoningEffort || undefined) as Settings['reviewer']['reasoningEffort'],
+        knobs: knobsFromDraft(draft.knobs),
         customAutonomy: settings.reviewer.customAutonomy,
       },
     };
@@ -659,6 +828,42 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
                   <option value="low">low</option>
                 </select>
               </label>
+              <details className="reviewer-advanced">
+                <summary>advanced model parameters</summary>
+                <div className="reviewer-advanced-grid">
+                  {ADVANCED_KNOBS.filter((f) => f.adapters.includes(config.adapter as KnobAdapter)).map((f) => (
+                    <label key={f.key}>
+                      {f.label}
+                      {f.kind === 'select' ? (
+                        <select
+                          value={draft.knobs[f.key]}
+                          onChange={(e) =>
+                            setDraft((d) => ({ ...d, knobs: { ...d.knobs, [f.key]: e.target.value } }))
+                          }
+                        >
+                          {f.options?.map((o) => (
+                            <option key={o.v} value={o.v}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type={f.kind === 'number' ? 'number' : 'text'}
+                          inputMode={f.kind === 'number' ? 'decimal' : undefined}
+                          value={draft.knobs[f.key]}
+                          placeholder={f.placeholder ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({ ...d, knobs: { ...d.knobs, [f.key]: e.target.value } }))
+                          }
+                          autoComplete="off"
+                        />
+                      )}
+                      {f.hint && <span className="reviewer-config-hint">{f.hint}</span>}
+                    </label>
+                  ))}
+                </div>
+              </details>
               <div className="reviewer-config-provider">
                 <span className="orch-judge-status orch-judge-running">{derived}</span>
                 {config.model && <span className="reviewer-model-label">{config.model}</span>}

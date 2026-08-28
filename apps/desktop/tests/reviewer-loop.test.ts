@@ -365,6 +365,47 @@ describe('ReviewerHost', () => {
     expect(users).toContain('third');
   });
 
+  it('flows the model knobs into every provider complete call', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: {
+        provider: 'ollama',
+        model: 'm',
+        knobs: { contextTokens: 16384, maxOutputTokens: 2048, temperature: 0.2, think: true },
+      },
+    });
+    await host.start();
+    await host.prompt('hi');
+    await settle(60);
+    const call = provider.complete.mock.calls[0]![0] as { knobs?: unknown };
+    expect(call.knobs).toEqual({ contextTokens: 16384, maxOutputTokens: 2048, temperature: 0.2, think: true });
+  });
+
+  it('knobs.contextTokens drives the compaction budget (config wins over the model guess)', async () => {
+    const recorder = recorderWith('x'.repeat(3000));
+    const script: ScriptEntry[] = [];
+    for (let i = 0; i < 6; i++) {
+      script.push({ text: '', toolCalls: [{ id: `c${i}`, name: 'read_tile', args: { agentId: 'agent-1', tail: 2000 } }] });
+    }
+    script.push({ text: 'done', toolCalls: [] });
+    script.push({ text: 'again', toolCalls: [] });
+    script.push({ text: 'third', toolCalls: [] });
+    const { host } = makeHost(script, recorder, {
+      config: { provider: 'ollama', model: 'm', knobs: { contextTokens: 500 } },
+    });
+    await host.start();
+    await host.prompt('dig');
+    await settle(400);
+    await host.prompt('again');
+    await settle(60);
+    await host.prompt('third');
+    await settle(60);
+    const conv = host.conversation;
+    expect(conv.some((e) => e.content.includes('context compacted'))).toBe(true);
+    const users = conv.filter((e) => e.role === 'user').map((e) => e.content);
+    expect(users).toContain('third');
+  });
+
   it('setGoal persists the ledger; read_state and update_task work through the real tools', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fraktole-reviewer-'));
     const recorder = new TileRecorder();

@@ -111,11 +111,21 @@ export class OpenAIProvider implements ProviderClient {
       body: JSON.stringify({
         model: opts.model,
         stream: true,
-        max_tokens: 4096,
+        max_tokens: opts.knobs?.maxOutputTokens ?? 4096,
         messages: toMessages(opts.messages, base),
         tools: toTools(opts.tools),
         ...(official ? { stream_options: { include_usage: true } } : {}),
         ...(opts.reasoningEffort !== undefined ? { reasoning_effort: opts.reasoningEffort } : {}),
+        // standard chat/completions sampler fields — safe on every
+        // OpenAI-compatible endpoint, so no hostname gate (unlike
+        // reasoning_effort/stream_options). Top_k/min_p/repeat_penalty/
+        // keep_alive/think are NOT chat.completions fields and are never
+        // sent here.
+        ...(opts.knobs?.temperature !== undefined ? { temperature: opts.knobs.temperature } : {}),
+        ...(opts.knobs?.topP !== undefined ? { top_p: opts.knobs.topP } : {}),
+        ...(opts.knobs?.seed !== undefined ? { seed: opts.knobs.seed } : {}),
+        ...(opts.knobs?.presencePenalty !== undefined ? { presence_penalty: opts.knobs.presencePenalty } : {}),
+        ...(opts.knobs?.frequencyPenalty !== undefined ? { frequency_penalty: opts.knobs.frequencyPenalty } : {}),
       }),
     });
     if (!res.ok || !res.body) {

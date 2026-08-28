@@ -29,6 +29,7 @@ import type {
   SessionSummary,
   SessionSnapshot,
   Settings,
+  SamplerKnobs,
 } from './shared/ipc.js';
 
 export type {
@@ -62,6 +63,7 @@ export type {
   SessionSummary,
   SessionSnapshot,
   Settings,
+  SamplerKnobs,
 };
 export type SessionStatus = 'running' | 'idle' | 'stopped';
 

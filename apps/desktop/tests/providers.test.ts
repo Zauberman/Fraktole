@@ -273,6 +273,34 @@ describe('OpenAIProvider', () => {
     expect(body2.reasoning_effort).toBeUndefined();
   });
 
+  it('applies the standard sampler knobs (max_tokens, temperature, top_p, seed, penalties)', async () => {
+    stubFetch(sseStream(['{"choices":[{"delta":{"content":"x"}}]}', '[DONE]']));
+    await new OpenAIProvider().complete({
+      ...baseOpts(),
+      knobs: { maxOutputTokens: 1024, temperature: 0.4, topP: 0.9, seed: 7, presencePenalty: 0.5, frequencyPenalty: -0.5 },
+    });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as Record<string, unknown>;
+    expect(body.max_tokens).toBe(1024);
+    expect(body.temperature).toBe(0.4);
+    expect(body.top_p).toBe(0.9);
+    expect(body.seed).toBe(7);
+    expect(body.presence_penalty).toBe(0.5);
+    expect(body.frequency_penalty).toBe(-0.5);
+  });
+
+  it('never sends ollama-only knob fields (top_k/min_p/repeat_penalty/keep_alive/think/options)', async () => {
+    stubFetch(sseStream(['{"choices":[{"delta":{"content":"x"}}]}', '[DONE]']));
+    await new OpenAIProvider().complete({
+      ...baseOpts(),
+      knobs: { contextTokens: 32768, topK: 20, minP: 0.1, repeatPenalty: 1.2, keepAlive: '5m', think: true },
+    });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as Record<string, unknown>;
+    expect(body.max_tokens).toBe(4096); // no maxOutputTokens → today's default
+    for (const f of ['temperature', 'top_p', 'seed', 'top_k', 'min_p', 'repeat_penalty', 'keep_alive', 'think', 'options']) {
+      expect(f in body).toBe(false);
+    }
+  });
+
   it('never sends an empty tool_calls array for a text-only assistant message', async () => {
     stubFetch(sseStream(['{"choices":[{"delta":{"content":"ok"}}]}', '[DONE]']));
     await new OpenAIProvider().complete({
@@ -526,6 +554,35 @@ describe('AnthropicProvider', () => {
     expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 4096 });
   });
 
+  it('applies max output (clamped to the thinking floor), temperature and top_p', async () => {
+    // 4000 is below the 8192 floor the extended-thinking budget requires —
+    // the adapter clamps up instead of letting the API 400
+    stubFetch(sseStream(['{"type":"message_stop"}']));
+    await new AnthropicProvider().complete({ ...baseOpts(), knobs: { maxOutputTokens: 4000, temperature: 0.5, topP: 0.8 } });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as Record<string, unknown>;
+    expect(body.max_tokens).toBe(8192);
+    expect(body.temperature).toBe(0.5);
+    expect(body.top_p).toBe(0.8);
+
+    stubFetch(sseStream(['{"type":"message_stop"}']));
+    await new AnthropicProvider().complete({ ...baseOpts(), knobs: { maxOutputTokens: 16384 } });
+    const body2 = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as Record<string, unknown>;
+    expect(body2.max_tokens).toBe(16384);
+  });
+
+  it('never sends fields anthropic does not accept (seed, penalties, keep_alive, think, options)', async () => {
+    stubFetch(sseStream(['{"type":"message_stop"}']));
+    await new AnthropicProvider().complete({
+      ...baseOpts(),
+      knobs: { seed: 7, presencePenalty: 1, frequencyPenalty: 1, topK: 20, minP: 0.1, repeatPenalty: 1.1, keepAlive: '5m', think: true },
+    });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as Record<string, unknown>;
+    for (const f of ['seed', 'presence_penalty', 'frequency_penalty', 'top_k', 'min_p', 'repeat_penalty', 'keep_alive', 'think', 'options']) {
+      expect(f in body).toBe(false);
+    }
+    expect(body.max_tokens).toBe(8192); // default preserved
+  });
+
   it('never sends an empty content array for a reasoning-only assistant message', async () => {
     stubFetch(sseStream(['{"type":"message_stop"}']));
     await new AnthropicProvider().complete({
@@ -671,6 +728,69 @@ describe('OllamaProvider', () => {
     const args = assistant?.tool_calls?.[0]?.function?.arguments;
     expect(args).toEqual({ to: 'agent-1', kind: 'task' });
     expect(typeof args).toBe('object');
+  });
+
+  it('builds the options map plus keep_alive/think from the knobs', async () => {
+    stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"done"},"done":true}']));
+    await new OllamaProvider().complete({
+      ...baseOpts(),
+      knobs: {
+        contextTokens: 65536,
+        maxOutputTokens: 1024,
+        temperature: 0.3,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        seed: 9,
+        repeatPenalty: 1.1,
+        presencePenalty: 0.5,
+        frequencyPenalty: -0.5,
+        keepAlive: '2h',
+        think: true,
+      },
+    });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as {
+      options?: Record<string, unknown>;
+      keep_alive?: string;
+      think?: boolean;
+    };
+    expect(body.options).toEqual({
+      num_ctx: 65536,
+      num_predict: 1024,
+      temperature: 0.3,
+      top_p: 0.9,
+      top_k: 40,
+      min_p: 0.05,
+      seed: 9,
+      repeat_penalty: 1.1,
+      presence_penalty: 0.5,
+      frequency_penalty: -0.5,
+    });
+    expect(body.keep_alive).toBe('2h');
+    expect(body.think).toBe(true);
+  });
+
+  it('clamps num_predict to the 512 floor (truncated tool JSON would break the loop)', async () => {
+    stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"done"},"done":true}']));
+    await new OllamaProvider().complete({ ...baseOpts(), knobs: { maxOutputTokens: 10 } });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { options?: Record<string, unknown> };
+    expect(body.options).toEqual({ num_predict: 512 });
+  });
+
+  it('omits options entirely when no sampler knob is set (byte-identical to knob-less config)', async () => {
+    stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"done"},"done":true}']));
+    await new OllamaProvider().complete({ ...baseOpts(), knobs: { think: false } });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as Record<string, unknown>;
+    expect(body.options).toBeUndefined();
+    expect(body.think).toBe(false);
+
+    stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"done"},"done":true}']));
+    await new OllamaProvider().complete(baseOpts());
+    // stubFetch replaces the fetch mock — the knob-less request is calls[0]
+    const body2 = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as Record<string, unknown>;
+    expect('options' in body2).toBe(false);
+    expect('think' in body2).toBe(false);
+    expect('keep_alive' in body2).toBe(false);
   });
 
   it('parses eval counts from the final done chunk', async () => {

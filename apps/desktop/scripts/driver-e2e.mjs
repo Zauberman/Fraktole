@@ -3,7 +3,7 @@
 // the reviewer column in the Node tab, the Test tab, the tile/reviewer focus
 // cycle, the thinking toggles, the tool families and the 13-theme walk
 // (via applyTheme), against a scripted mock provider. Run: node scripts/driver-e2e.mjs
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import http from 'node:http';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -178,6 +178,38 @@ const mock = http.createServer((req, res) => {
   res.end();
 });
 
+// ---------- mock provider #2: ollama-shaped (/api/chat, NDJSON) ----------
+let ollamaHits = 0;
+let lastOllamaReq = null;
+const ollamaMock = http.createServer((req, res) => {
+  const path = req.url?.split('?')[0] ?? '';
+  if (req.method === 'GET' && path === '/api/tags') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ models: [{ name: 'mock-ollama' }] }));
+    return;
+  }
+  if (req.method === 'POST' && path === '/api/chat') {
+    let body = '';
+    req.on('data', (d) => (body += d));
+    req.on('end', () => {
+      ollamaHits += 1;
+      lastOllamaReq = body;
+      console.log(`  ollama mock hit #${ollamaHits}`);
+      res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+      res.write('{"message":{"role":"assistant","content":"local "},"done":false}\n');
+      res.write('{"message":{"role":"assistant","content":"answer"},"done":true,"prompt_eval_count":77,"eval_count":11}\n');
+      res.end();
+    });
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+// main.cjs must be CURRENT or the drive tests the last build, not the tree —
+// electron loads package.json "main" from dist-electron
+execFileSync('pnpm', ['build:main'], { cwd: APP, stdio: 'ignore' });
+
 // ---------- launch ----------
 const children = [];
 const launch = (cmd, args, env = null) => {
@@ -192,6 +224,13 @@ const mockPort = await new Promise((resolve, reject) => {
 });
 MOCK_BASE = `http://127.0.0.1:${mockPort}`;
 console.log(`mock provider on ${MOCK_BASE}`);
+
+const ollamaMockPort = await new Promise((resolve, reject) => {
+  ollamaMock.once('error', reject);
+  ollamaMock.listen(0, '127.0.0.1', () => resolve(ollamaMock.address().port));
+});
+const OLLAMA_MOCK_BASE = `http://127.0.0.1:${ollamaMockPort}`;
+console.log(`ollama mock provider on ${OLLAMA_MOCK_BASE}`);
 
 launch('pnpm', ['exec', 'vite', '--port', String(VITE_PORT), '--strictPort']);
 const userData = mkdtempSync(join(tmpdir(), 'frak-e2e-'));
@@ -815,11 +854,59 @@ const main = async () => {
   const keyDisabled = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-config-wide input[type="password"]')?.disabled ?? false`);
   if (!keyDisabled) fail('api key field is not disabled for the keyless ollama provider');
   else ok('keyless local provider disables the api key field');
+  // the advanced knobs section exposes the ollama knob fields in the dialog
+  await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-advanced summary')?.click(); true`);
+  await sleep(300);
+  const advLabels = await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-advanced label')].map((l) => l.textContent)`);
+  if (advLabels.length === 0) fail('advanced knobs section has no fields');
+  else {
+    const has = (p) => advLabels.some((t) => t.includes(p));
+    if (!has('context window') || !has('keep_alive') || !has('thinking (ollama)')) fail(`advanced fields missing ollama knobs: ${advLabels.join(' | ')}`);
+    else ok(`advanced knobs render for ollama (${advLabels.length} fields)`);
+  }
   await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-config-actions button')].find((b) => b.textContent.includes('save'))?.click(); true`);
   await waitFor(`document.querySelector('.pane-reviewer-column .dialog') === null`, 10000, 'dialog closed after ollama save');
   const persistedLocal = await evalJs(`window.fraktole.getSettings().then((s) => s.reviewer.providerId ?? '')`);
   if (persistedLocal !== 'ollama') fail(`ollama providerId not persisted: ${persistedLocal}`);
   else ok('keyless local provider pick persisted (providerId=ollama)');
+
+  // 6) local wire: the model knobs ride the /api/chat payload end-to-end —
+  //    options.num_ctx / num_predict / temperature, top-level think, and
+  //    the system prompt as history line 1 — against the ollama-shaped mock
+  await evalJs(`window.fraktole.setSettings({ reviewer: { providerId: 'ollama', model: 'mock-ollama', baseUrl: '${OLLAMA_MOCK_BASE}', knobs: { contextTokens: 16384, maxOutputTokens: 2048, temperature: 0.4, think: true } } })`);
+  const sid3 = await evalJs(`window.fraktole.listSessions().then((s) => s[0]?.id ?? '')`);
+  await evalJs(`window.fraktole.restartReviewer('${sid3}')`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .orch-judge-status')?.textContent === 'running'`, 25000, 'reviewer running against the ollama mock');
+  const beforeO = ollamaHits;
+  await prompt('ollama ping');
+  const localAnswer = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('local answer'))`,
+    25000,
+    'ollama mock answer',
+  );
+  if (!localAnswer) fail('ollama mock answer did not land in the transcript');
+  else ok('ollama mock answered (local wire path)');
+  if (ollamaHits <= beforeO) fail('ollama mock not hit during the local turn');
+  else {
+    try {
+      const req = JSON.parse(lastOllamaReq);
+      if (req.model !== 'mock-ollama') fail(`ollama wire model: ${req.model}`);
+      else ok('ollama wire carries the configured model');
+      const o = req.options ?? {};
+      if (o.num_ctx !== 16384) fail(`options.num_ctx missing/off: ${JSON.stringify(o)}`);
+      else ok('ollama wire carries options.num_ctx=16384');
+      if (o.num_predict !== 2048) fail(`options.num_predict missing/off: ${JSON.stringify(o)}`);
+      else ok('ollama wire carries options.num_predict=2048');
+      if (o.temperature !== 0.4) fail(`options.temperature missing/off: ${JSON.stringify(o)}`);
+      else ok('ollama wire carries options.temperature=0.4');
+      if (req.think !== true) fail(`think missing/off: ${JSON.stringify(req.think)}`);
+      else ok('ollama wire carries think=true');
+      if (!Array.isArray(req.messages) || req.messages[0]?.role !== 'system') fail('ollama history missing the system prompt as line 1');
+      else ok('ollama history replays the system prompt as line 1');
+    } catch (err) {
+      fail(`ollama wire assertion error: ${err.message}`);
+    }
+  }
 
   console.log(`\nmock provider calls: ${callCount}`);
   console.log(failures === 0 ? 'DRIVER-E2E OK' : `DRIVER-E2E FAILED (${failures})`);
@@ -846,5 +933,6 @@ main()
       }
     }
     mock.close();
+    ollamaMock.close();
     process.exit(failures === 0 ? 0 : 1);
   });

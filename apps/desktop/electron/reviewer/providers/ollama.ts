@@ -7,6 +7,7 @@ import {
   type ProviderResult,
   type ProviderUsage,
   type ReviewerToolCall,
+  type SamplerKnobs,
 } from '../providers.js';
 
 const DEFAULT_BASE = 'http://localhost:11434';
@@ -64,6 +65,26 @@ function toTools(tools: CompleteOpts['tools']): unknown[] {
   }));
 }
 
+/** Builds the /api/chat `options` map from the sampler knobs. Undefined
+ *  when no knob is set — the request body then stays byte-identical to a
+ *  knob-less config. Fields are exactly the Ollama engine options; nothing
+ *  else may ever leak into the map. */
+function buildOllamaOptions(knobs: SamplerKnobs | undefined): Record<string, unknown> | undefined {
+  if (!knobs) return undefined;
+  const o: Record<string, unknown> = {};
+  if (knobs.contextTokens !== undefined) o.num_ctx = knobs.contextTokens;
+  if (knobs.maxOutputTokens !== undefined) o.num_predict = Math.max(knobs.maxOutputTokens, 512);
+  if (knobs.temperature !== undefined) o.temperature = knobs.temperature;
+  if (knobs.topP !== undefined) o.top_p = knobs.topP;
+  if (knobs.topK !== undefined) o.top_k = knobs.topK;
+  if (knobs.minP !== undefined) o.min_p = knobs.minP;
+  if (knobs.seed !== undefined) o.seed = knobs.seed;
+  if (knobs.repeatPenalty !== undefined) o.repeat_penalty = knobs.repeatPenalty;
+  if (knobs.presencePenalty !== undefined) o.presence_penalty = knobs.presencePenalty;
+  if (knobs.frequencyPenalty !== undefined) o.frequency_penalty = knobs.frequencyPenalty;
+  return Object.keys(o).length > 0 ? o : undefined;
+}
+
 /** Ollama /api/chat with NDJSON streaming. Tool calls arrive in a single
  *  non-streaming chunk carrying a `function.arguments` JSON string. Reasoning
  *  models stream `message.thinking` — captured into `thinking`. */
@@ -72,6 +93,8 @@ export class OllamaProvider implements ProviderClient {
 
   async complete(opts: CompleteOpts): Promise<ProviderResult> {
     const url = joinBase(opts.baseUrl || DEFAULT_BASE, '/api/chat');
+    const knobs = opts.knobs;
+    const ollamaOptions = buildOllamaOptions(knobs);
     const res = await fetch(url, {
       method: 'POST',
       signal: opts.signal,
@@ -81,6 +104,10 @@ export class OllamaProvider implements ProviderClient {
         stream: true,
         messages: toMessages(opts.messages),
         tools: toTools(opts.tools),
+        ...(ollamaOptions ? { options: ollamaOptions } : {}),
+        // keep_alive and think are top-level ChatRequest fields, not options
+        ...(knobs?.keepAlive ? { keep_alive: knobs.keepAlive } : {}),
+        ...(knobs?.think !== undefined ? { think: knobs.think } : {}),
       }),
     });
     if (!res.ok || !res.body) {

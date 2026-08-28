@@ -2,6 +2,9 @@
  *  The harness talks to models over plain HTTP streaming — no SDKs, so the
  *  whole provider surface is testable with stubbed fetch + fixtures. */
 
+export type { SamplerKnobs } from '../../src/shared/ipc.js';
+import type { SamplerKnobs } from '../../src/shared/ipc.js';
+
 export type ProviderName = 'openai' | 'anthropic' | 'ollama';
 
 export interface ReviewerTool {
@@ -66,6 +69,10 @@ export interface CompleteOpts {
   signal: AbortSignal;
   /** Reasoning effort for models that support it; undefined = provider default. */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /** Model-tuning knobs; each adapter applies only the fields its wire
+   *  format accepts (ollama options.*, openai/anthropic standard fields).
+   *  Undefined = provider defaults, nothing extra sent. */
+  knobs?: SamplerKnobs;
   /** Streamed deltas, delivered as they arrive: content text and/or a
    *  thinking delta (the provider's reasoning output). */
   onDelta: (text: string, thinking?: string) => void;
