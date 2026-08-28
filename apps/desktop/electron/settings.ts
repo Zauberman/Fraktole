@@ -26,6 +26,10 @@ export class SettingsStore {
         reviewer: {
           apiKey: typeof parsed.reviewer?.apiKey === 'string' ? parsed.reviewer.apiKey : undefined,
           apiKeyEnv: typeof parsed.reviewer?.apiKeyEnv === 'string' ? parsed.reviewer.apiKeyEnv : undefined,
+          providerId:
+            typeof parsed.reviewer?.providerId === 'string' && parsed.reviewer.providerId.trim().length > 0
+              ? parsed.reviewer.providerId
+              : undefined,
           provider:
             provider === 'openai' || provider === 'anthropic' || provider === 'ollama' || provider === 'deepseek'
               ? provider

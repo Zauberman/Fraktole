@@ -13,7 +13,7 @@ import type {
   ReviewerToolCallEvent,
   ReviewerUsageEvent,
 } from '../src/shared/ipc.js';
-import { resolveProvider, type ProviderResolution } from '../src/shared/reviewer-detect.js';
+import { resolveReviewerConfig, type ProviderResolution } from '../src/shared/reviewer-detect.js';
 import { sanitizeChatText } from '../src/shared/sanitize.js';
 import { ORCHESTRATOR_ID } from './mailbox.js';
 import { ReviewerTools, type ReviewerToolContext } from './reviewer-tools.js';
@@ -30,6 +30,8 @@ export interface ReviewerConfig {
   apiKey?: string;
   /** Env-var fallback when apiKey is empty. */
   apiKeyEnv?: string;
+  /** The manual provider pick (provider-catalog.ts id) — wins when set. */
+  providerId?: string;
   /** Explicit pick for ambiguous sk- keys. */
   provider?: 'openai' | 'anthropic' | 'ollama' | 'deepseek';
   /** User's model pick; empty → per-provider default. */
@@ -304,12 +306,12 @@ export class ReviewerHost {
     const cfg = await this.opts.getConfig();
     // `||` (not `??`): an empty pasted key must fall back to the env var too
     const key = (cfg.apiKey?.trim() || (cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] ?? '' : '')).trim();
-    const res = resolveProvider(key, {
-      baseUrl: cfg.baseUrl,
-      providerHint: cfg.provider,
-      modelHint: cfg.model,
-    });
-    if (res.adapter !== 'ollama' && key.length === 0) {
+    const res = resolveReviewerConfig({ ...cfg, apiKey: key });
+    // A key is required only when the resolved adapter is not keyless local
+    // (Ollama / local servers). The manual provider pick wins, so a keyless
+    // local provider may start with no key.
+    const keyless = res.adapter === 'ollama' || res.entry?.auth === 'none';
+    if (!keyless && key.length === 0) {
       this.setStatus('unconfigured', 'no API key — paste one in the reviewer config');
       return false;
     }

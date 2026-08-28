@@ -5,9 +5,15 @@ import { AUTONOMY_NAMES, AUTONOMY_VARIANTS, type AutonomyVariant } from '../shar
 import {
   DEFAULT_MODELS,
   REVIEWER_MODEL_SUGGESTIONS,
-  resolveProvider,
+  resolveReviewerConfig,
   type DetectedProvider,
 } from '../shared/reviewer-detect.js';
+import {
+  PROVIDER_GROUPS,
+  getProvider,
+  requiresKey,
+  type ProviderCatalogEntry,
+} from '../shared/provider-catalog.js';
 import { sanitizeChatText } from '../shared/sanitize.js';
 import { sanitizeAllowedLaunchers } from '../shared/launchers.js';
 import { CustomPluginDialog } from './CustomPluginDialog.js';
@@ -44,6 +50,12 @@ function timeOf(at: number): string {
 /** Compact token formatting: 12500 → '12.5k'. */
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+/** Key-field placeholder when no provider is explicitly picked. */
+function skHint(key: string): string {
+  if (key.trim().length === 0) return 'sk-… (provider detected from the key)';
+  return 'paste the provider API key';
 }
 
 function roleLabel(role?: string): string {
@@ -89,8 +101,10 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '', agentCommand: '', allowedLaunchers: '', reasoningEffort: '' });
+  const [draft, setDraft] = useState({ apiKey: '', providerId: '', provider: '', model: '', baseUrl: '', agentCommand: '', allowedLaunchers: '', reasoningEffort: '' });
   const [liveModels, setLiveModels] = useState<string[] | null>(null);
+  const [providerFilter, setProviderFilter] = useState('');
+  const filterRef = useRef<HTMLInputElement | null>(null);
   /** Transient inline note when a prompt could not be accepted — the text
    *  stays in the box, never silently dropped. */
   const [composeError, setComposeError] = useState<string | null>(null);
@@ -130,6 +144,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       setSettings(s);
       setDraft({
         apiKey: s.reviewer.apiKey ?? '',
+        providerId: s.reviewer.providerId ?? '',
         provider: s.reviewer.provider ?? '',
         model: s.reviewer.model ?? '',
         baseUrl: s.reviewer.baseUrl ?? '',
@@ -383,35 +398,62 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     setQuestion(null);
   };
 
-  // live provider resolution from the pasted key (same logic the harness uses)
-  const det = resolveProvider(draft.apiKey, {
-    baseUrl: draft.baseUrl.trim() || undefined,
-    providerHint: draft.provider || undefined,
-    modelHint: draft.model.trim() || undefined,
+  // effective resolution: the manual provider pick wins, else key detection
+  const config = resolveReviewerConfig({
+    apiKey: draft.apiKey,
+    providerId: draft.providerId || undefined,
+    provider: (draft.provider || undefined) as 'openai' | 'anthropic' | 'ollama' | 'deepseek' | undefined,
+    model: draft.model,
+    baseUrl: draft.baseUrl,
   });
+  const selEntry = getProvider(draft.providerId || undefined);
+  const keyRequired = requiresKey(config.entry);
   const derived: DetectedProvider =
-    det.adapter === 'openai' && (det.baseUrl.includes('deepseek') || draft.provider === 'deepseek')
-      ? 'deepseek'
-      : det.adapter;
+    config.entry?.adapter ?? (config.adapter === 'openai' && config.baseUrl.includes('deepseek') ? 'deepseek' : config.adapter);
+
+  // suggestions: live list wins, then the selected provider's offline list,
+  // then the detection-derived list
+  const suggestions = liveModels ?? selEntry?.models ?? REVIEWER_MODEL_SUGGESTIONS[derived] ?? [];
+
+  // provider list filtered by the search box (matches id too, so short ids
+  // like "noel" still surface; empty query shows every group)
+  const q = providerFilter.trim().toLowerCase();
+  const filteredGroups = q
+    ? PROVIDER_GROUPS.map((g) => ({
+        ...g,
+        entries: g.entries.filter((p) => p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)),
+      }))
+    : PROVIDER_GROUPS;
 
   // fetch the live model list from the provider API (debounced); null = fall
   // back to the offline suggestions; [] = the API had nothing to say
   useEffect(() => {
     if (!configOpen) return;
     const key = draft.apiKey.trim();
-    if (derived !== 'ollama' && key.length === 0) {
+    if (config.entry?.auth !== 'none' && derived !== 'ollama' && key.length === 0) {
       setLiveModels(null);
       return;
     }
-    const adapter = derived === 'deepseek' ? 'openai' : derived;
+    const adapter = config.adapter;
     const timer = window.setTimeout(() => {
       void bridge
-        .listReviewerModels({ adapter, apiKey: key, baseUrl: det.baseUrl })
+        .listReviewerModels({ adapter, apiKey: key, baseUrl: config.baseUrl })
         .then((models) => setLiveModels(models.length > 0 ? models : null))
         .catch(() => setLiveModels(null));
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [configOpen, draft.apiKey, draft.baseUrl, draft.provider, det.baseUrl, derived]);
+  }, [configOpen, draft.apiKey, draft.baseUrl, draft.providerId, config.baseUrl, config.adapter, derived]);
+
+  /** Fill the model + baseUrl from the picked provider (only when the user
+   *  hasn't already customized them). */
+  const applyProviderDefaults = (entry: ProviderCatalogEntry): void => {
+    setDraft((d) => ({
+      ...d,
+      providerId: entry.id,
+      baseUrl: d.baseUrl.trim().length === 0 ? entry.baseUrl : d.baseUrl,
+      model: d.model.trim().length === 0 ? entry.defaultModel : d.model,
+    }));
+  };
 
   const saveConfig = (): void => {
     if (!settings) return;
@@ -419,6 +461,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       ...settings,
       reviewer: {
         apiKey: draft.apiKey.trim() || undefined,
+        providerId: draft.providerId || undefined,
         provider: (draft.provider || undefined) as Settings['reviewer']['provider'],
         model: draft.model.trim() || undefined,
         baseUrl: draft.baseUrl.trim() || undefined,
@@ -544,12 +587,40 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             <div className="dialog-title">reviewer config</div>
             <div className="reviewer-config">
               <label className="reviewer-config-wide">
-                api key
+                provider
+                <input
+                  ref={filterRef}
+                  type="text"
+                  value={providerFilter}
+                  onChange={(e) => setProviderFilter(e.target.value)}
+                  placeholder="search providers… (150+)"
+                  autoComplete="off"
+                />
+                <select value={draft.providerId} onChange={(e) => {
+                  setProviderFilter('');
+                  const entry = getProvider(e.target.value || undefined);
+                  if (entry) applyProviderDefaults(entry);
+                  else setDraft((d) => ({ ...d, providerId: '' }));
+                }}>
+                  <option value="">{providerFilter.trim() ? 'matched provider…' : 'auto-detect from the key'}</option>
+                  {filteredGroups.map((g) => g.entries.length > 0 && (
+                    <optgroup key={g.group} label={`${g.label} (${g.entries.length})`}>
+                      {g.entries.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                {selEntry?.notes && <span className="reviewer-config-hint">{selEntry.notes}</span>}
+              </label>
+              <label className="reviewer-config-wide">
+                api key{keyRequired ? '' : ' (optional / none for local)'}
                 <input
                   type="password"
                   value={draft.apiKey}
+                  disabled={config.entry?.auth === 'none'}
                   onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
-                  placeholder="sk-…  (provider detected from the key)"
+                  placeholder={selEntry?.keyHint ?? skHint(draft.apiKey)}
                   autoComplete="off"
                 />
               </label>
@@ -562,14 +633,14 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
                   placeholder={DEFAULT_MODELS[derived]}
                 />
                 <datalist id={`reviewer-models-${sessionId}`}>
-                  {(liveModels ?? REVIEWER_MODEL_SUGGESTIONS[derived]).map((m) => (
+                  {suggestions.map((m) => (
                     <option key={m} value={m} />
                   ))}
                 </datalist>
               </label>
               <label>
                 baseUrl (optional)
-                <input value={draft.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))} placeholder="(provider default)" />
+                <input value={draft.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))} placeholder={selEntry?.baseUrl || '(provider default)'} />
               </label>
               <label>
                 agent launcher (optional)
@@ -590,13 +661,12 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               </label>
               <div className="reviewer-config-provider">
                 <span className="orch-judge-status orch-judge-running">{derived}</span>
-                {det.model && <span className="reviewer-model-label">{det.model}</span>}
-                {det.ambiguous && (
-                  <select value={draft.provider} onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value }))}>
-                    <option value="">openai (default)</option>
-                    <option value="deepseek">deepseek</option>
-                  </select>
-                )}
+                {config.model && <span className="reviewer-model-label">{config.model}</span>}
+                {typeof draft.apiKey === 'string' &&
+                  draft.apiKey.trim().length === 0 &&
+                  keyRequired && (
+                    <span className="reviewer-model-label">paste an api key to enable</span>
+                  )}
               </div>
               <div className="reviewer-config-actions">
                 <button type="button" className="btn btn-sm btn-primary" onClick={saveConfig}>

@@ -1,7 +1,7 @@
 {
   "name": "@fraktole/desktop",
   "desktopName": "Fraktole",
-  "version": "0.12.11",
+  "version": "0.12.12",
   "description": "Tiling command center for AI agents",
   "homepage": "https://fraktole.dev",
   "author": "Fraktole",
@@ -15,6 +15,7 @@
     "build:main": "node scripts/build-main.mjs",
     "build": "pnpm build:main && pnpm build:renderer",
     "test": "vitest run --passWithNoTests",
+    "test:e2e": "node scripts/driver-e2e.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint electron src tests --no-error-on-unmatched-pattern",
     "postinstall": "electron-rebuild -f -w node-pty",

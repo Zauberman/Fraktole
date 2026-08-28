@@ -137,8 +137,11 @@ export interface Settings {
     apiKey?: string;
     /** Env-var fallback when apiKey is empty. */
     apiKeyEnv?: string;
+    /** The manual provider pick (provider-catalog.ts id) — wins over the
+     *  key-prefix detection when set. */
+    providerId?: string;
     /** Explicit pick for ambiguous sk- keys ('deepseek' routes through the
-     *  OpenAI adapter to api.deepseek.com). */
+     *  OpenAI adapter to api.deepseek.com). Superseded by providerId. */
     provider?: 'openai' | 'anthropic' | 'ollama' | 'deepseek';
     /** User's model pick; empty → per-provider default. */
     model?: string;

@@ -164,7 +164,7 @@ const mock = http.createServer((req, res) => {
 // ---------- launch ----------
 const children = [];
 const launch = (cmd, args, env = null) => {
-  const child = spawn(cmd, args, { cwd: APP, env: env ?? process.env, stdio: 'ignore' });
+  const child = spawn(cmd, args, { cwd: APP, env: env ?? process.env, stdio: 'ignore', detached: true });
   children.push(child);
   return child;
 };
@@ -695,6 +695,88 @@ const main = async () => {
   if (!typed) fail('type_into_tile turn did not complete');
   else ok('type_into_tile turn completed (safe-yolo tool wired)');
 
+  // ---- manual provider picker (search + grouped select + keyless local) ----
+  // open the config dialog (a real user click path)
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'config')?.click(); true`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') !== null`, 10000, 'config dialog for picker');
+
+  // 1) catalog breadth: the provider <select> renders the whole catalog
+  const optionCount = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-config-wide select')?.options.length ?? 0`);
+  // 100 providers + the empty "auto-detect" default option
+  if (optionCount < 101) fail(`provider <select> has only ${optionCount} options`);
+  else ok(`provider <select> lists ${optionCount - 1} catalog providers`);
+
+  // 2) search filter narrows the options (find the provider label's search input)
+  const setReactValue = (el, v) =>
+    `(() => { const e = ${el}; const proto = e.tagName === 'SELECT' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype; const set = Object.getOwnPropertyDescriptor(proto, 'value').set; set.call(e, '${v}'); e.dispatchEvent(new Event(e.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); return true; })()`;
+  const searchBox = `document.querySelector('.pane-reviewer-column .reviewer-config-wide input[placeholder^="search providers"]')`;
+  const providerSel = `document.querySelector('.pane-reviewer-column .reviewer-config-wide select')`;
+  await evalJs(setReactValue(searchBox, 'gro'));
+  await sleep(400);
+  const afterFilter = await evalJs(`([...document.querySelectorAll('.pane-reviewer-column .reviewer-config-wide select option')].map((o) => o.value))`);
+  if (!afterFilter.includes('groq')) fail(`search 'gro' lost the groq option: ${afterFilter.join(',')}`);
+  else ok(`search 'gro' keeps Groq`);
+  if (afterFilter.includes('openai')) fail(`search 'gro' kept the unfiltered openai option`);
+  else ok('search filter removes unrelated providers');
+  await evalJs(setReactValue(searchBox, ''));
+  await sleep(300);
+
+  // 3) manual pick drives resolution + autofill, then persists on save
+  await evalJs(setReactValue(providerSel, 'deepseek'));
+  await sleep(300);
+  // the pick's keyHint lands in the api key field placeholder
+  const keyHint = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-config-wide input[type="password"]')?.placeholder ?? ''`);
+  if (keyHint !== 'sk-… (DeepSeek key)') fail(`key hint after picking deepseek: "${keyHint}"`);
+  else ok('provider pick autofills the api key hint');
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-config-actions button')].find((b) => b.textContent.includes('save'))?.click(); true`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') === null`, 10000, 'dialog closed after provider save');
+  await sleep(1500);
+  const persisted = await evalJs(`window.fraktole.getSettings().then((s) => s.reviewer.providerId ?? '')`);
+  if (persisted !== 'deepseek') fail(`providerId not persisted after UI pick: ${persisted}`);
+  else ok('manual provider pick persisted (providerId=deepseek)');
+
+  // 4) resolution + harness path: route the picked provider to the mock and
+  //    confirm the outgoing request carries the catalog default model
+  const sid2 = await evalJs(`window.fraktole.listSessions().then((s) => s[0]?.id ?? '')`);
+  await evalJs(`window.fraktole.setSettings({ reviewer: { providerId: 'deepseek', model: 'deepseek-chat', baseUrl: '${MOCK_BASE}', apiKey: 'sk-mock-42' } })`);
+  await evalJs(`window.fraktole.restartReviewer('${sid2}')`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .orch-judge-status')?.textContent === 'running'`, 25000, 'reviewer running after provider restart');
+  const before = callCount;
+  await prompt('provider ping');
+  await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.trim().length > 0)`,
+    25000,
+    'answer after provider pick',
+  );
+  const after2 = callCount;
+  if (after2 <= before) fail(`mock not hit during the manual-provider turn (was ${before}, now ${after2})`);
+  else {
+    let m = '';
+    try {
+      m = JSON.parse(lastReqBody).model ?? '';
+    } catch {
+      /* ignore */
+    }
+    if (m === 'deepseek-chat') ok('manual provider resolution flowed to the harness (model deepseek-chat)');
+    else fail(`outgoing request model was "${m}", expected deepseek-chat`);
+  }
+
+  // 5) keyless local provider: picking ollama disables the api key field
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'config')?.click(); true`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') !== null`, 10000, 'config dialog for ollama');
+  await evalJs(setReactValue(searchBox, 'ollama'));
+  await sleep(300);
+  await evalJs(setReactValue(providerSel, 'ollama'));
+  await sleep(300);
+  const keyDisabled = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-config-wide input[type="password"]')?.disabled ?? false`);
+  if (!keyDisabled) fail('api key field is not disabled for the keyless ollama provider');
+  else ok('keyless local provider disables the api key field');
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-config-actions button')].find((b) => b.textContent.includes('save'))?.click(); true`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') === null`, 10000, 'dialog closed after ollama save');
+  const persistedLocal = await evalJs(`window.fraktole.getSettings().then((s) => s.reviewer.providerId ?? '')`);
+  if (persistedLocal !== 'ollama') fail(`ollama providerId not persisted: ${persistedLocal}`);
+  else ok('keyless local provider pick persisted (providerId=ollama)');
+
   console.log(`\nmock provider calls: ${callCount}`);
   console.log(failures === 0 ? 'DRIVER-E2E OK' : `DRIVER-E2E FAILED (${failures})`);
 };
@@ -708,9 +790,15 @@ main()
     await sleep(300);
     for (const c of children) {
       try {
-        c.kill('SIGKILL');
+        // detached: kill the whole process group so shell wrappers (the
+        // electron .bin) cannot orphan the real binary on the CDP port
+        process.kill(-c.pid, 'SIGKILL');
       } catch {
-        /* gone */
+        try {
+          c.kill('SIGKILL');
+        } catch {
+          /* gone */
+        }
       }
     }
     mock.close();
