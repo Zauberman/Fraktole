@@ -314,9 +314,11 @@ export class ReviewerHost {
     const key = (cfg.apiKey?.trim() || (cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] ?? '' : '')).trim();
     const res = resolveReviewerConfig({ ...cfg, apiKey: key });
     // A key is required only when the resolved adapter is not keyless local
-    // (Ollama / local servers). The manual provider pick wins, so a keyless
-    // local provider may start with no key.
-    const keyless = res.adapter === 'ollama' || res.entry?.auth === 'none';
+    // (Ollama / local servers) AND the picked provider demands one. Local
+    // servers (auth 'none' or 'optional' — llama.cpp, LM Studio, vLLM…)
+    // start with an empty key; the detection path has no entry so it stays
+    // adapter-driven (ollama is keyless, everything else needs a key).
+    const keyless = res.adapter === 'ollama' || (res.entry !== undefined && res.entry.auth !== 'key');
     if (!keyless && key.length === 0) {
       this.setStatus('unconfigured', 'no API key — paste one in the reviewer config');
       return false;

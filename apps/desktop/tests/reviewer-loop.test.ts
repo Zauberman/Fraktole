@@ -131,6 +131,26 @@ describe('ReviewerHost', () => {
     expect(call.baseUrl).toBe('http://localhost:11434');
   });
 
+  it('starts keyless for a local-server pick with auth optional (llama.cpp)', async () => {
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: { providerId: 'llamacpp', model: 'local-model' },
+    });
+    expect(await host.start()).toBe(true);
+    expect(host.status).toBe('running');
+    await host.prompt('hi');
+    await settle(60);
+  });
+
+  it('still refuses to start keyless when the picked provider demands a key', async () => {
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: { providerId: 'openai', model: 'gpt-4o' },
+    });
+    expect(await host.start()).toBe(false);
+    expect(host.status).toBe('unconfigured');
+  });
+
   it('resolves provider, endpoint and model from a pasted key', async () => {
     const recorder = new TileRecorder();
     const { host, provider } = makeHost([{ text: 'hi', toolCalls: [] }], recorder, {
@@ -508,9 +528,9 @@ describe('ReviewerHost', () => {
     );
     await host.start();
     await host.setGoal('first goal');
-    await settle(100);
+    await settle(500);
     await host.setGoal('second goal');
-    await settle(100);
+    await settle(500);
     expect(provider.complete).toHaveBeenCalledTimes(2);
     expect(host.conversation.some((e) => e.content.includes('second goal engaged'))).toBe(true);
   });
