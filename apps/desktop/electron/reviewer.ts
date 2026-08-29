@@ -90,7 +90,7 @@ export interface ReviewerHostOpts {
   recorder: TileRecorder;
   toolContext: ReviewerToolContext;
   emit: ReviewerEmitter;
-  /** Watchdog poll interval; injectable for tests. */
+  /** Loop carrier poll interval; injectable for tests. */
   pollIntervalMs?: number;
   /** Ask user timeout: how long to wait for a user answer before timing out
    *  (default 10 minutes). Injectable for tests. */
@@ -124,17 +124,17 @@ export interface ReviewerHostOpts {
 
 const MAX_TOOL_ITERATIONS = 25;
 const TOOL_RESULT_CHARS = 20_000;
-/** Watchdog poll cadence: cheap line-count checks every 15s. */
+/** Loop carrier poll cadence: cheap line-count checks every 15s. */
 const POLL_INTERVAL_MS_DEFAULT = 15_000;
 const MAX_COMPLETE_RETRIES = 1;
 const COMPLETE_RETRY_DELAY_MS = 2_000;
 /** A provider stream that produces NO output (deltas or thinking) for this
  *  long is considered stalled — the call is aborted and retried, then the
- *  harness surfaces it and the watchdog heals the loop. */
+ *  harness surfaces it and the loop carrier heals the loop. */
 const STALL_TIMEOUT_MS = 120_000;
 /** While a local server is still loading its model (503 "Loading model"),
  *  wait patiently instead of erroring: 10 tries × 15s ≈ 2.5 minutes for a
- *  multi-GB cold load (a 25GB MoE from NTFS takes ~6 min — the watchdog
+ *  multi-GB cold load (a 25GB MoE from NTFS takes ~6 min — the loop carrier
  *  revives after that, and the stall path stays error-free meanwhile). */
 const LOADING_RETRY_MS = 15_000;
 const LOADING_MAX_ATTEMPTS = 10;
@@ -147,7 +147,7 @@ const MAX_TOKENS_RESERVE = 512;
 /** Bounded auto-heal: how many "continue where you left off" prompts a
  *  single queued turn may spend. */
 const HEAL_PROMPTS_MAX = 2;
-/** A watchdog wake that finished without touching the goal/task ledger N
+/** A loop carrier wake that finished without touching the goal/task ledger N
  *  times in a row stands down (a stalled loop must not fill the context
  *  forever with re-checks that change nothing). */
 const STALE_WAKE_LIMIT = 3;
@@ -284,9 +284,9 @@ export class ReviewerHost {
   /** 'loading' when the probe saw the server up but still loading its model
    *  (llama.cpp cold start) — first requests then take minutes, not errors. */
   private serverLoading = false;
-  /** Consecutive watchdog-recheck turns that produced no ledger change. */
+  /** Consecutive loop carrier-recheck turns that produced no ledger change. */
   private staleWakes = 0;
-  /** Fingerprint of the ledger when the last watchdog wake was enqueued. */
+  /** Fingerprint of the ledger when the last loop carrier wake was enqueued. */
   private wakeFingerprint = '';
   /** True once the stall-warning turn has been enqueued for this stall run. */
   private warnedStale = false;
@@ -295,7 +295,7 @@ export class ReviewerHost {
   /** A summarize pass requested while a turn was running or the harness was
    *  down: applied at the next quiet boundary. */
   private pendingSummarize = false;
-  /** True when the most recently processed turn was the watchdog's own
+  /** True when the most recently processed turn was the loop carrier's own
    *  compaction wake — used to never chain wakes back-to-back (an
    *  over-budget conversation would otherwise wake forever). */
   private lastTurnWasWake = false;
@@ -442,10 +442,10 @@ export class ReviewerHost {
       probed: this.serverContext,
     });
     // A reloaded session with an armed goal resumes immediately instead of
-    // waiting for the watchdog's ~90s polling window (GOAL_RECHECK_POLLS ×
+    // waiting for the loop carrier's ~90s polling window (GOAL_RECHECK_POLLS ×
     // 15s). First-ever starts and restarts() have no goal, so no wake fires.
-    // When reviving FROM an error, the watchdog drives the wake itself
-    // ([watchdog] re-check progress) — adding a second wake would double the
+    // When reviving FROM an error, the loop carrier drives the wake itself
+    // ([loop carrier] re-check progress) — adding a second wake would double the
     // turn and, in tests, exhaust a fixed mock response list.
     if (this.state.goal !== null && this.state.goal.state === 'active' && !revivedFromError) {
       this.queue.push({ role: 'user', content: this.withStateBlock('[resume] continuing the autonomous run — re-verify the fork and carry on') });
@@ -494,7 +494,7 @@ export class ReviewerHost {
     this.setStatus('stopped');
   }
 
-  /** Idle shutdown: aborts the run, stops the watchdog, keeps the
+  /** Idle shutdown: aborts the run, stops the loop carrier, keeps the
    *  conversation and ledger for later. */
   idleOut(): void {
     this.cancel();
@@ -548,7 +548,7 @@ export class ReviewerHost {
     this.drainQueue();
   }
 
-  /** Arms (text) or disarms (null) the watchdog goal — or subdivides the
+  /** Arms (text) or disarms (null) the loop carrier goal — or subdivides the
    *  CURRENT goal into sub-goals (subGoals, from the model's set_goal). A
    *  new goal text replaces the subdivision; clearing the goal clears it
    *  too. Revives the harness when down, like prompt(). */
@@ -663,7 +663,7 @@ export class ReviewerHost {
     return { resumable: active && exists, goalText: active && this.state.goal ? this.state.goal.text : null };
   }
 
-  /** Watchdog tick: cheap activity check (line counts only — no model call
+  /** Loop carrier tick: cheap activity check (line counts only — no model call
    *  unless something wakes the loop). Silent without an active goal. When
    *  a goal is armed and the harness has fallen over (error/offline), it
    *  revives itself and wakes — the loop heals without a user prompt. */
@@ -691,7 +691,7 @@ export class ReviewerHost {
             return;
           }
           this.wakeFingerprint = this.ledgerFingerprint();
-          this.queue.push({ role: 'user', content: this.withStateBlock('[watchdog] re-check progress') });
+          this.queue.push({ role: 'user', content: this.withStateBlock('[loop carrier] re-check progress') });
           this.drainQueue();
         });
       }
@@ -728,7 +728,7 @@ export class ReviewerHost {
         return;
       }
       this.wakeFingerprint = this.ledgerFingerprint();
-      this.queue.push({ role: 'user', content: this.withStateBlock('[watchdog] re-check progress') });
+      this.queue.push({ role: 'user', content: this.withStateBlock('[loop carrier] re-check progress') });
       this.drainQueue();
     }
     this.lastLines = lines;
@@ -891,7 +891,7 @@ export class ReviewerHost {
     return { ...this.knobs, maxOutputTokens: Math.max(256, Math.min(maxOut, remaining)) };
   }
 
-  /** A cheap fingerprint of the goal/task ledger: two watchdog wakes produce
+  /** A cheap fingerprint of the goal/task ledger: two loop carrier wakes produce
    *  the same fingerprint when neither touched the ledger — the stall guard
    *  then stands the re-check loop down. */
   private ledgerFingerprint(): string {
@@ -922,7 +922,7 @@ export class ReviewerHost {
    *  Each attempt also carries a stall watchdog: if the provider stream
    *  produces no output (deltas or thinking) for stallTimeoutMs, the
    *  attempt is aborted and treated like a transient failure; a stall that
-   *  survives every attempt surfaces as a clear error the watchdog can
+   *  survives every attempt surfaces as a clear error the loop carrier can
    *  heal. */
   private async callWithRetry(
     signal: AbortSignal,
@@ -1037,10 +1037,10 @@ export class ReviewerHost {
         this.pendingUsageDelta = null; // per-turn usage marginal, see below
         const turn = this.queue.shift()!;
         this.lastTurnWasWake = typeof turn.content === 'string' && turn.content.includes('context was compacted');
-        // ANY watchdog turn (re-check or compaction wake) is a loop turn: its
+        // ANY loop carrier turn (re-check or compaction wake) is a loop turn: its
         // ledger effect is measured against wakeFingerprint for the
         // stall guard
-        const isWatchdogTurn = typeof turn.content === 'string' && turn.content.includes('[watchdog]');
+        const isLoopCarrierTurn = typeof turn.content === 'string' && turn.content.includes('[loop carrier]');
         // bounded auto-heal: every fresh queued turn gets its own budget
         this.healLeft = HEAL_PROMPTS_MAX;
         this.messages.push(turn);
@@ -1226,10 +1226,10 @@ export class ReviewerHost {
           this.opts.emit.message(toEntry(note));
           this.drainQueue();
         }
-        // watchdog re-checks that change nothing are counted: three no-ops
+        // loop carrier re-checks that change nothing are counted: three no-ops
         // in a row stand the re-check loop down (context stops filling)
         // (the fingerprint is captured when the wake was enqueued)
-        if (isWatchdogTurn) {
+        if (isLoopCarrierTurn) {
           if (this.ledgerFingerprint() === this.wakeFingerprint) this.staleWakes += 1;
           else {
             this.staleWakes = 0;
@@ -1374,7 +1374,7 @@ export class ReviewerHost {
       await this.rewriteConversation();
       if (this.state.goal?.state === 'active' && !this.lastTurnWasWake) {
         this.wakeFingerprint = this.ledgerFingerprint();
-        this.queue.push({ role: 'user', content: this.withStateBlock('[watchdog] context was compacted — re-check progress') });
+        this.queue.push({ role: 'user', content: this.withStateBlock('[loop carrier] context was compacted — re-check progress') });
         this.drainQueue();
       }
     }

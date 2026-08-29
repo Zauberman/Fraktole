@@ -27,7 +27,7 @@ The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter A
 - **Tiling Matrix**: Split-pane workspace of real PTY terminals with drag dividers, keyboard focus cycle, swap, and instant zoom.
 - **Delegation Doctrine**: The Reviewer model is pushed to review and orchestrate, rather than edits blindly. It should be able to inspect files, search the codebase, monitor terminal output, and delegates implementation to worker agents.
 - **Autonomous Auto Compose**: Dedicated autonomous loops (*Bugs*, *Feature*, *Cyber*, *Frontend*, *Tests*, *Readability*, *Custom*) that operate inside isolated project forks without risking original code.
-- **Goal Watchdog & Sub-Goals**: Break large initiatives into tracked sub-goals with self-healing watchdog loops and automated progression upon reaching `GOAL-MET:`.
+- **Goal Loop Carrier & Sub-Goals**: Break large initiatives into tracked sub-goals with self-healing loop carrier re-checks and automated progression upon reaching `GOAL-MET:`.
 - **Integrated Browser Testing**: Embedded webview Test tab that the AI can navigate, capture console errors from, screenshot, and verify after fixes.
 - **Mobile Remote Companion**: Flutter Android client connecting over end-to-end local TLS/WSS to monitor agents, stream tiles, and review tasks on the go.
 - **13 Contrast-Tested Themes**: Built in the `oklch` color space with a curated 4-font typographic design system.
@@ -88,9 +88,9 @@ The Reviewer has access to a comprehensive suite of inspection, driving, delegat
 | | `read_test_page` | Inspect page title, loading state, console logs, and JavaScript errors. |
 | | `reload_test_page`| Reload the active test page to verify hot-reload and bug fixes. |
 | | `screenshot_test_page` | Capture a PNG screenshot of the webview for user verification. |
-| **Ledger & Goals** | `read_state` | Read durable watchdog goals and the task assignment ledger. |
+| **Ledger & Goals** | `read_state` | Read durable loop carrier goals and the task assignment ledger. |
 | | `update_task` | Upsert task ledger status (`pending`, `active`, `done`, `failed`). |
-| | `set_goal` | Arm, modify, or subdivide top-level watchdog goals into actionable sub-goals. |
+| | `set_goal` | Arm, modify, or subdivide top-level loop carrier goals into actionable sub-goals. |
 | | `ask_user` | Suspend execution and present interactive prompt/confirmation cards to the user. |
 
 ---
@@ -110,7 +110,7 @@ Fraktole organizes workflow into 4 synchronized views accessible via `Alt+1..4`:
 ### Reviewer Prompt Commands
 
 Enter these commands directly in the Reviewer input box:
-- `/goal <text>` — Arm or update the watchdog goal (bare `/goal` clears it).
+- `/goal <text>` — Arm or update the loop carrier goal (bare `/goal` clears it).
 - `/compact` — Trigger an immediate context compaction.
 - `/summarize` — Generate a session recap and compact older turns.
 - `/kill <id>` — Terminate running agent tile `<id>`.

@@ -1086,8 +1086,8 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle(IPC.reviewerStop, async (_e, sessionId: string): Promise<void> => {
       const rt = registry?.get(sessionId) ?? null;
       // full stop, not just cancel(): abort the provider call, stop the
-      // watchdog, clear the queue and set status 'stopped' — the loop cannot
-      // re-awaken on its own
+      // loop carrier, clear the queue and set status 'stopped' — the loop
+      // cannot re-awaken on its own
       rt?.reviewer.stop();
     });
     ipcMain.handle(IPC.reviewerRestart, async (_e, sessionId: string): Promise<boolean> => {

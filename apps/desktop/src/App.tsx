@@ -32,7 +32,7 @@ function BootOverlay({ leaving }: { leaving: boolean }): React.JSX.Element {
 
 /** Shown via Help → Reviewer commands… — the Reviewer prompt-box commands. */
 const REVIEWER_COMMANDS = `Reviewer commands — type these in the Reviewer prompt box:
-/goal <text>   arm the watchdog goal (bare /goal clears it)
+/goal <text>   arm the loop carrier goal (bare /goal clears it)
 /compact       force a context compaction now
 /summarize     ask the model for a session recap, then compact the context
 /kill <id>     kill the running agent tile <id>`;

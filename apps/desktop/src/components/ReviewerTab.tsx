@@ -931,7 +931,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           <div className="reviewer-empty">
             <div className="reviewer-empty-mark">reviewer</div>
             <div className="reviewer-empty-hint">prompt the reviewer — it observes every agent tile</div>
-            <div className="reviewer-empty-sub">/goal &lt;text&gt; arms the watchdog loop · config sets the model key</div>
+            <div className="reviewer-empty-sub">/goal &lt;text&gt; arms the loop carrier · config sets the model key</div>
           </div>
         )}
         {items.map((it) =>

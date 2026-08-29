@@ -103,7 +103,7 @@ export class TileRecorder {
 
   /** Every tile with recorded content, keyed by tileId. Tiles whose output
    *  lives only in the emulator viewport (no committed lines yet) count —
-   *  the watchdog's activity delta and list_tiles both depend on it. */
+   *  the loop carrier's activity delta and list_tiles both depend on it. */
   list(): Map<string, { lines: number; lastAt: number }> {
     const out = new Map<string, { lines: number; lastAt: number }>();
     const ids = new Set([...this.buffers.keys(), ...this.emulators.keys()]);

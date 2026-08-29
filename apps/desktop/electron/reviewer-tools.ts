@@ -39,7 +39,7 @@ export interface ReviewerToolContext {
   agentCount?(): number;
   /** The configured launcher command ('' = none). */
   getAgentCommand?(): string;
-  /** Set or clear the watchdog goal (user-authorized: always allowed). The
+  /** Set or clear the loop carrier goal (user-authorized: always allowed). The
    *  model may also subdivide the CURRENT goal into sub-goals. */
   setGoal?(text: string, subGoals?: Array<{ text: string; done: boolean }>): Promise<void>;
   /** The mailbox message log for the session. */
@@ -306,7 +306,7 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'read_state',
-    description: 'Return the current goal and task ledger (the durable watchdog state). Check it when you need to recall what was assigned, to whom, and in what state.',
+    description: 'Return the current goal and task ledger (the durable loop carrier state). Check it when you need to recall what was assigned, to whom, and in what state.',
     inputSchema: { type: 'object', properties: {} },
     async run(_args, ctx) {
       return JSON.stringify(ctx.getState?.() ?? emptyState(), null, 2);
@@ -432,7 +432,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'set_goal',
     description:
-      'Set a new watchdog goal (replaces the current one and re-arms the loop), clear it by omitting text, or subdivide the CURRENT goal into sub-goals with subGoals. You are authorized to set goals when the situation calls for it — when a big goal is armed, break it into smaller sub-goals with subGoals and keep the list current as you complete items.',
+      'Set a new loop carrier goal (replaces the current one and re-arms the loop), clear it by omitting text, or subdivide the CURRENT goal into sub-goals with subGoals. You are authorized to set goals when the situation calls for it — when a big goal is armed, break it into smaller sub-goals with subGoals and keep the list current as you complete items.',
     inputSchema: {
       type: 'object',
       properties: {

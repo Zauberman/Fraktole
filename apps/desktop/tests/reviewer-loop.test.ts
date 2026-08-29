@@ -469,7 +469,7 @@ describe('ReviewerHost', () => {
     expect(state.tasks.some((t) => t.title === 'verify the build' && t.status === 'done' && t.id.startsWith('t-'))).toBe(true);
   });
 
-  it('the watchdog poll is silent without a goal', async () => {
+  it('the loop carrier poll is silent without a goal', async () => {
     const recorder = recorderWith('boot\nlog');
     const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder);
     await host.start();
@@ -479,7 +479,7 @@ describe('ReviewerHost', () => {
     expect(provider.complete).not.toHaveBeenCalled();
   });
 
-  it('with a goal, the watchdog wakes on tile activity but stays quiet without it', async () => {
+  it('with a goal, the loop carrier wakes on tile activity but stays quiet without it', async () => {
     const recorder = new TileRecorder();
     recorder.record('tile-1', 'boot');
     const script: ScriptEntry[] = [
@@ -499,7 +499,7 @@ describe('ReviewerHost', () => {
     host.pollNow();
     await settle(100);
     expect(provider.complete).toHaveBeenCalledTimes(3); // activity delta woke the model
-    expect(host.conversation.some((e) => e.content.includes('[watchdog] re-check progress'))).toBe(true);
+    expect(host.conversation.some((e) => e.content.includes('[loop carrier] re-check progress'))).toBe(true);
 
     const beforeIdle = provider.complete.mock.calls.length;
     for (let i = 0; i < 5; i++) host.pollNow();
@@ -511,7 +511,7 @@ describe('ReviewerHost', () => {
     expect(provider.complete).toHaveBeenCalledTimes(beforeIdle + 1);
   });
 
-  it('a GOAL-MET declaration marks the goal met and silences the watchdog', async () => {
+  it('a GOAL-MET declaration marks the goal met and silences the loop carrier', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fraktole-reviewer-'));
     const recorder = new TileRecorder();
     const { host, provider, events } = makeHost([{ text: 'GOAL-MET: the widget is built, all green', toolCalls: [] }], recorder, { dir });
@@ -526,7 +526,7 @@ describe('ReviewerHost', () => {
     host.pollNow();
     await settle(60);
     expect(provider.complete).toHaveBeenCalledTimes(calls); // met goal: poll stays silent
-    expect(host.conversation.some((e) => e.content.includes('[watchdog]'))).toBe(false);
+    expect(host.conversation.some((e) => e.content.includes('[loop carrier]'))).toBe(false);
   });
 
   it('re-arming a met goal wakes the loop again', async () => {
@@ -1432,7 +1432,7 @@ describe('ReviewerHost', () => {
     await host.prompt('third');
     await settle(80);
     expect(host.status).toBe('running');
-    // goal turn + 2 prompts + the automatic watchdog wake
+    // goal turn + 2 prompts + the automatic loop carrier wake
     expect(provider.complete.mock.calls.length).toBeGreaterThanOrEqual(4);
     const last = provider.complete.mock.calls[provider.complete.mock.calls.length - 1]![0] as { messages: ProviderMsg[] };
     expect(last.messages.some((m) => (m.content ?? '').includes('context was compacted'))).toBe(true);
@@ -1563,7 +1563,7 @@ describe('ReviewerHost', () => {
     expect(raw).toContain('after repair');
   });
 
-  it('watchdog revives the harness after an error when a goal is armed', async () => {
+  it('loop carrier revives the harness after an error when a goal is armed', async () => {
     const recorder = new TileRecorder();
     // first an armed-goal turn succeeds, then two failures exhaust the retry
     const { host, provider } = makeHost([{ text: 'armed ok', toolCalls: [] }, { fail: true }, { fail: true }, { text: 'healed', toolCalls: [] }], recorder, { retryDelayMs: 1 });
@@ -1574,13 +1574,13 @@ describe('ReviewerHost', () => {
     await settle(80);
     expect(host.status).toBe('error');
     const callsBefore = provider.complete.mock.calls.length;
-    // the next watchdog tick revives the harness and wakes the loop — no
+    // the next loop carrier tick revives the harness and wakes the loop — no
     // user prompt involved
     host.pollNow();
     await settle(120);
     expect(host.status).toBe('running');
     expect(provider.complete.mock.calls.length).toBeGreaterThan(callsBefore);
-    expect(host.conversation.some((e) => (e.content ?? '').includes('[watchdog] re-check progress'))).toBe(true);
+    expect(host.conversation.some((e) => (e.content ?? '').includes('[loop carrier] re-check progress'))).toBe(true);
   });
 
   it('a stalled provider stream is aborted and retried, then surfaces as error', async () => {
@@ -2040,7 +2040,7 @@ describe('ReviewerHost', () => {
       expect(host.summarizeSession().ok).toBe(false);
     });
 
-    it('stop is a full stop: status stopped, queue cleared, watchdog cannot revive', async () => {
+    it('stop is a full stop: status stopped, queue cleared, loop carrier cannot revive', async () => {
       const recorder = new TileRecorder();
       const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {});
       await host.start();
@@ -2051,7 +2051,7 @@ describe('ReviewerHost', () => {
       host.pollNow();
       await settle(40);
       expect(host.status).toBe('stopped');
-      expect(host.conversation.some((e) => (e.content ?? '').includes('[watchdog]'))).toBe(false);
+      expect(host.conversation.some((e) => (e.content ?? '').includes('[loop carrier]'))).toBe(false);
     });
   });
 
@@ -2302,7 +2302,7 @@ describe('ReviewerHost — local-provider hardening (context, truncation, readin
     expect(events2.some((e) => e.startsWith('prevError:') && e.includes('404'))).toBe(true);
   });
 
-  it('three ledger-less watchdog re-checks stand the re-check loop down (the stall guard)', async () => {
+  it('three ledger-less loop carrier re-checks stand the re-check loop down (the stall guard)', async () => {
     const recorder = new TileRecorder();
     // 1 goal-armed turn + 3 re-checks + 1 stall-warning turn
     const script: ScriptEntry[] = Array.from({ length: 5 }, () => ({ text: 'still nothing', toolCalls: [] }));

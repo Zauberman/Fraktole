@@ -211,7 +211,7 @@ export interface TestPageState {
   console: Array<{ level: number; message: string }>;
 }
 
-/** The watchdog goal the user arms with /goal. Only the user sets it; the
+/** The loop carrier goal the user arms with /goal. Only the user sets it; the
  *  harness flips it to 'met' when the model declares GOAL-MET. */
 export interface ReviewerGoal {
   text: string;
@@ -219,7 +219,7 @@ export interface ReviewerGoal {
   state: 'active' | 'met';
 }
 
-/** One sub-goal of the armed watchdog goal, set by the model via set_goal.
+/** One sub-goal of the armed loop carrier goal, set by the model via set_goal.
  *  The model keeps the list current as it completes items; the harness
  *  marks every sub-goal done when GOAL-MET is declared. */
 export interface SubGoal {
@@ -244,7 +244,7 @@ export interface ReviewerUsage {
   outputTokens: number;
 }
 
-/** Durable watchdog state: the goal + its sub-goals + the task ledger.
+/** Durable loop carrier state: the goal + its sub-goals + the task ledger.
  *  Persisted as sessionDir/reviewer/state.json — survives compaction and
  *  restarts. */
 export interface ReviewerState {
