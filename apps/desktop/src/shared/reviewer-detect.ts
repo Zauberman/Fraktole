@@ -158,9 +158,14 @@ export interface ConfigResolution extends ProviderResolution {
   entry?: ProviderCatalogEntry;
   /** True when resolution came from the explicit provider pick. */
   manual: boolean;
+  /** True when NOTHING is configured (no key, no pick, no endpoint, no
+   *  model) — the first-run signal: the harness must NOT silently target
+   *  the localhost ollama port; it asks the user to pick a provider. */
+  empty?: boolean;
 }
 
-/** Resolve the effective provider/adapter/baseUrl/model for the reviewer.
+/**
+ *  Resolve the effective provider/adapter/baseUrl/model for the reviewer.
  *
  *  Precedence ("dropdown wins, both run"):
  *    1. A set providerId that resolves in the catalog — its adapter, baseUrl
@@ -180,6 +185,25 @@ export function resolveReviewerConfig(cfg: ReviewerConfigInput = {}): ConfigReso
       ambiguous: false,
       entry,
       manual: true,
+    };
+  }
+  // literally nothing configured (fresh install): falling through to the
+  // keyless ollama default would silently talk to localhost:11434 with a
+  // qwen2.5 the user never chose — flag it and let the harness ask instead
+  const nothingConfigured =
+    !cfg.apiKey?.trim() &&
+    !cfg.apiKeyEnv &&
+    !cfg.baseUrl &&
+    !cfg.model &&
+    !cfg.provider;
+  if (nothingConfigured) {
+    return {
+      adapter: 'ollama',
+      model: DEFAULT_MODELS.ollama,
+      baseUrl: 'http://localhost:11434',
+      ambiguous: false,
+      manual: false,
+      empty: true,
     };
   }
   const res = resolveProvider(cfg.apiKey ?? '', {

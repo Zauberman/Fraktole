@@ -126,6 +126,10 @@ export interface FraktoleBridge {
   /** Ask the model for a session recap and compact the context around it. */
   summarizeReviewer(sessionId: string): Promise<{ ok: boolean; error?: string }>;
   onReviewerRecap(sessionId: string, cb: (recap: { text: string; at: number }) => void): () => void;
+  /** The resolved context budget (server-probed ≤ knob ≤ guess) at start. */
+  onReviewerBudget(sessionId: string, cb: (info: { contextTokens: number; probed?: number }) => void): () => void;
+  /** The previous run's failure, resurfaced when a restarted harness loads. */
+  onReviewerPrevError(sessionId: string, cb: (message: string) => void): () => void;
   listReviewerModels(opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]>;
   onReviewerQuestion(sessionId: string, cb: (ev: ReviewerQuestion) => void): () => void;
   answerReviewerQuestion(sessionId: string, askId: string, answer: string): Promise<void>;

@@ -1,6 +1,6 @@
 import {
   joinBase,
-  ssePayloads,
+  sseEvents,
   type CompleteOpts,
   type ProviderClient,
   type ProviderMsg,
@@ -127,6 +127,8 @@ export class AnthropicProvider implements ProviderClient {
     let text = '';
     let thinking = '';
     let usage: ProviderUsage | undefined;
+    let stopReason: string | undefined;
+    let sawStop = false;
     const calls = new Map<string, ReviewerToolCall>();
     /** The turn's content blocks in generation order (verbatim wire shape). */
     const blocks: WireContentBlock[] = [];
@@ -139,30 +141,36 @@ export class AnthropicProvider implements ProviderClient {
       call?: ReviewerToolCall;
     } | null = null;
 
-    for await (const payload of ssePayloads(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
-      const ev = payload as {
+    for await (const ev of sseEvents(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
+      if (ev.done) break;
+      const payload = ev.payload as Record<string, unknown> | undefined;
+      if (payload === undefined) continue;
+      const p = payload as {
         type?: string;
         content_block?: { type?: string; id?: string; name?: string; thinking?: string };
-        delta?: { type?: string; text?: string; thinking?: string; signature?: string; partial_json?: string };
+        delta?: { type?: string; text?: string; thinking?: string; signature?: string; partial_json?: string; stop_reason?: string };
         message?: { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
         usage?: { output_tokens?: number };
       };
-      switch (ev.type) {
+      switch (p.type) {
         case 'message_start':
-          if (ev.message?.usage) {
+          if (p.message?.usage) {
             usage = {
-              inputTokens: ev.message.usage.input_tokens ?? 0,
-              cachedTokens: (ev.message.usage.cache_read_input_tokens ?? 0) + (ev.message.usage.cache_creation_input_tokens ?? 0),
+              inputTokens: p.message.usage.input_tokens ?? 0,
+              cachedTokens: (p.message.usage.cache_read_input_tokens ?? 0) + (p.message.usage.cache_creation_input_tokens ?? 0),
               outputTokens: 0,
             };
           }
           break;
         case 'message_delta':
+          if (p.delta?.stop_reason) stopReason = p.delta.stop_reason;
+          if (p.usage?.output_tokens && usage) usage.outputTokens = p.usage.output_tokens;
+          break;
         case 'message_stop':
-          if (ev.usage?.output_tokens && usage) usage.outputTokens = ev.usage.output_tokens;
+          sawStop = true;
           break;
         case 'content_block_start': {
-          const type = ev.content_block?.type;
+          const type = p.content_block?.type;
           // a new start while a block is open means a lost
           // content_block_stop — fail loudly instead of silently merging
           // (for nested tool_use) or delivering a truncated block
@@ -171,8 +179,8 @@ export class AnthropicProvider implements ProviderClient {
           }
           if (type === 'tool_use') {
             const call: ReviewerToolCall = {
-              id: ev.content_block?.id ?? '',
-              name: ev.content_block?.name ?? '',
+              id: p.content_block?.id ?? '',
+              name: p.content_block?.name ?? '',
               args: {},
             };
             const block: WireContentBlock = { type: 'tool_use', id: call.id, name: call.name, input: {} };
@@ -187,7 +195,7 @@ export class AnthropicProvider implements ProviderClient {
             const block: WireContentBlock = { type: 'thinking', thinking: '', signature: '' };
             blocks.push(block);
             openBlock = { block, kind: 'thinking' };
-            const seed = ev.content_block?.thinking;
+            const seed = p.content_block?.thinking;
             if (seed && seed.length > 0) {
               block.thinking = seed;
               thinking += seed;
@@ -197,24 +205,24 @@ export class AnthropicProvider implements ProviderClient {
           break;
         }
         case 'content_block_delta':
-          if (ev.delta?.type === 'text_delta' && ev.delta.text) {
-            text += ev.delta.text;
-            opts.onDelta(ev.delta.text);
-            if (openBlock?.kind === 'text') openBlock.block.text = (openBlock.block.text ?? '') + ev.delta.text;
-          } else if (ev.delta?.type === 'thinking_delta' && ev.delta.thinking) {
-            thinking += ev.delta.thinking;
-            opts.onDelta('', ev.delta.thinking);
-            if (openBlock?.kind === 'thinking') openBlock.block.thinking = (openBlock.block.thinking ?? '') + ev.delta.thinking;
-          } else if (ev.delta?.type === 'signature_delta' && ev.delta.signature) {
+          if (p.delta?.type === 'text_delta' && p.delta.text) {
+            text += p.delta.text;
+            opts.onDelta(p.delta.text);
+            if (openBlock?.kind === 'text') openBlock.block.text = (openBlock.block.text ?? '') + p.delta.text;
+          } else if (p.delta?.type === 'thinking_delta' && p.delta.thinking) {
+            thinking += p.delta.thinking;
+            opts.onDelta('', p.delta.thinking);
+            if (openBlock?.kind === 'thinking') openBlock.block.thinking = (openBlock.block.thinking ?? '') + p.delta.thinking;
+          } else if (p.delta?.type === 'signature_delta' && p.delta.signature) {
             // the thinking block's signature arrives as its own delta just
             // before content_block_stop — it must ride along with the
             // replayed block or the API rejects the continuation
-            if (openBlock?.kind === 'thinking') openBlock.block.signature = ev.delta.signature;
-          } else if (ev.delta?.type === 'input_json_delta' && ev.delta.partial_json) {
+            if (openBlock?.kind === 'thinking') openBlock.block.signature = p.delta.signature;
+          } else if (p.delta?.type === 'input_json_delta' && p.delta.partial_json) {
             // a delta with no open block means a lost content_block_stop —
             // fail loudly instead of running the tool with empty args
             if (!openBlock || openBlock.kind !== 'tool') throw new Error('anthropic stream error: input_json_delta without an open block');
-            openBlock.raw = (openBlock.raw ?? '') + ev.delta.partial_json;
+            openBlock.raw = (openBlock.raw ?? '') + p.delta.partial_json;
           }
           break;
         case 'content_block_stop': {
@@ -231,12 +239,18 @@ export class AnthropicProvider implements ProviderClient {
       }
     }
 
+    // a stream that dies before message_stop (connection close, gateway
+    // crash) was cut off — never treat the partial reply as complete
+    if (!sawStop) {
+      throw new Error('anthropic stream ended prematurely — connection closed before message_stop');
+    }
     return {
       text,
       toolCalls: [...calls.values()],
       thinking,
       contentBlocks: blocks.length > 0 ? blocks : undefined,
       usage,
+      finishReason: stopReason ?? 'end_turn',
     };
   }
 }

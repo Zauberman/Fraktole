@@ -1055,6 +1055,8 @@ const local: ProviderCatalogEntry[] = [
     defaultModel: 'local-model',
     models: ['local-model'],
     auth: 'optional',
+    notes:
+      'No API key. Start the server with `llama-server -m <model.gguf> -c <ctx>` and set the same value in the context window advanced option — the harness compacts inside the server\u2019s window, never past it.',
   },
   {
     id: 'koboldcpp',

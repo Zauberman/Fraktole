@@ -65,24 +65,25 @@ function toTools(tools: CompleteOpts['tools']): unknown[] {
   }));
 }
 
-/** Builds the /api/chat `options` map from the sampler knobs. Undefined
- *  when no knob is set — the request body then stays byte-identical to a
- *  knob-less config. Fields are exactly the Ollama engine options; nothing
- *  else may ever leak into the map. */
-function buildOllamaOptions(knobs: SamplerKnobs | undefined): Record<string, unknown> | undefined {
-  if (!knobs) return undefined;
+/** Builds the /api/chat `options` map from the sampler knobs. Two defaults
+ *  are always enforced for local servers: num_predict (an unset knob means
+ *  the server default of -1 = UNLIMITED generation — a runaway local model
+ *  would stream forever with no cap) and num_ctx consistency. Fields are
+ *  exactly the Ollama engine options; nothing else may ever leak into the
+ *  map. */
+function buildOllamaOptions(knobs: SamplerKnobs | undefined): Record<string, unknown> {
   const o: Record<string, unknown> = {};
-  if (knobs.contextTokens !== undefined) o.num_ctx = knobs.contextTokens;
-  if (knobs.maxOutputTokens !== undefined) o.num_predict = Math.max(knobs.maxOutputTokens, 512);
-  if (knobs.temperature !== undefined) o.temperature = knobs.temperature;
-  if (knobs.topP !== undefined) o.top_p = knobs.topP;
-  if (knobs.topK !== undefined) o.top_k = knobs.topK;
-  if (knobs.minP !== undefined) o.min_p = knobs.minP;
-  if (knobs.seed !== undefined) o.seed = knobs.seed;
-  if (knobs.repeatPenalty !== undefined) o.repeat_penalty = knobs.repeatPenalty;
-  if (knobs.presencePenalty !== undefined) o.presence_penalty = knobs.presencePenalty;
-  if (knobs.frequencyPenalty !== undefined) o.frequency_penalty = knobs.frequencyPenalty;
-  return Object.keys(o).length > 0 ? o : undefined;
+  if (knobs?.contextTokens !== undefined) o.num_ctx = knobs.contextTokens;
+  o.num_predict = knobs?.maxOutputTokens !== undefined ? Math.max(knobs.maxOutputTokens, 512) : 4096;
+  if (knobs?.temperature !== undefined) o.temperature = knobs.temperature;
+  if (knobs?.topP !== undefined) o.top_p = knobs.topP;
+  if (knobs?.topK !== undefined) o.top_k = knobs.topK;
+  if (knobs?.minP !== undefined) o.min_p = knobs.minP;
+  if (knobs?.seed !== undefined) o.seed = knobs.seed;
+  if (knobs?.repeatPenalty !== undefined) o.repeat_penalty = knobs.repeatPenalty;
+  if (knobs?.presencePenalty !== undefined) o.presence_penalty = knobs.presencePenalty;
+  if (knobs?.frequencyPenalty !== undefined) o.frequency_penalty = knobs.frequencyPenalty;
+  return o;
 }
 
 /** Ollama /api/chat with NDJSON streaming. Tool calls arrive in a single
@@ -104,9 +105,11 @@ export class OllamaProvider implements ProviderClient {
         stream: true,
         messages: toMessages(opts.messages),
         tools: toTools(opts.tools),
-        ...(ollamaOptions ? { options: ollamaOptions } : {}),
-        // keep_alive and think are top-level ChatRequest fields, not options
-        ...(knobs?.keepAlive ? { keep_alive: knobs.keepAlive } : {}),
+        options: ollamaOptions,
+        // keep_alive guards the local model against unloading mid-session —
+        // the server default (5m) evicts a 25GB model, and the reload
+        // makes the next prompt look like a hang
+        keep_alive: knobs?.keepAlive ?? '1h',
         ...(knobs?.think !== undefined ? { think: knobs.think } : {}),
       }),
     });
@@ -117,6 +120,8 @@ export class OllamaProvider implements ProviderClient {
     let text = '';
     let thinking = '';
     let usage: ProviderUsage | undefined;
+    let finishReason: string | undefined;
+    let sawDone = false;
     const toolCalls: ReviewerToolCall[] = [];
     let toolSeq = 0; // monotonic per-turn suffix for generated ids
 
@@ -132,16 +137,21 @@ export class OllamaProvider implements ProviderClient {
           tool_calls?: Array<{ function?: { name?: string; arguments?: string | Record<string, unknown> | null } }>;
         };
         done?: boolean;
+        done_reason?: string;
         prompt_eval_count?: number;
         eval_count?: number;
       }).message;
       const done = (payload as { done?: boolean }).done;
-      if (done && typeof (payload as { prompt_eval_count?: number }).prompt_eval_count === 'number') {
-        usage = {
-          inputTokens: (payload as { prompt_eval_count: number }).prompt_eval_count,
-          cachedTokens: 0,
-          outputTokens: (payload as { eval_count?: number }).eval_count ?? 0,
-        };
+      if (done) {
+        sawDone = true;
+        finishReason = (payload as { done_reason?: string }).done_reason ?? 'stop';
+        if (typeof (payload as { prompt_eval_count?: number }).prompt_eval_count === 'number') {
+          usage = {
+            inputTokens: (payload as { prompt_eval_count: number }).prompt_eval_count,
+            cachedTokens: 0,
+            outputTokens: (payload as { eval_count?: number }).eval_count ?? 0,
+          };
+        }
       }
       if (!msg) continue;
       if (typeof msg.content === 'string' && msg.content.length > 0) {
@@ -165,7 +175,12 @@ export class OllamaProvider implements ProviderClient {
       }
     }
 
-    return { text, toolCalls, thinking, usage };
+    // a stream that ends without the done chunk was cut off (server crash,
+    // network drop) — the partial reply must not be treated as complete
+    if (!sawDone) {
+      throw new Error('ollama stream ended prematurely — connection closed before the done chunk');
+    }
+    return { text, toolCalls, thinking, usage, finishReason: finishReason ?? 'stop' };
   }
 }
 

@@ -79,19 +79,10 @@ const mock = http.createServer((req, res) => {
             break;
           }
         }
-        // the thinking-replay gate: prior reasoning may only be replayed to
-        // the OFFICIAL deepseek hostname (api.deepseek.com) via
-        // reasoning_content — real OpenAI 400s on reasoning as input, and a
-        // custom endpoint must never see it. This mock is not deepseek, so
-        // any occurrence is a leak of the hostname gate.
-        if (!violation) {
-          for (const m of j.messages ?? []) {
-            if ('reasoning_content' in m) {
-              violation = `${m.role ?? '?'} message carries reasoning_content on a non-deepseek endpoint`;
-              break;
-            }
-          }
-        }
+        // the thinking-replay guard is now the scenario's job: this mock
+        // streams reasoning_content itself (llama.cpp + qwen-style model),
+        // so replays are the local-thinking continuity feature. The
+        // scenario asserts the exact replayed value in req2.
         // tool-precedence guard: every tool response must sit behind an
         // assistant message that called its tool_call_id
         if (!violation) {
@@ -209,6 +200,56 @@ const ollamaMock = http.createServer((req, res) => {
 // main.cjs must be CURRENT or the drive tests the last build, not the tree —
 // electron loads package.json "main" from dist-electron
 execFileSync('pnpm', ['build:main'], { cwd: APP, stdio: 'ignore' });
+
+// ---------- mock provider #3: llama.cpp-shaped (/props, /v1/models with
+// meta.n_ctx, SSE chat with reasoning_content + final usage chunk) ----------
+let llamaHits = 0;
+let lastLlamaReq = null;
+const llamaMock = http.createServer((req, res) => {
+  const path = req.url?.split('?')[0] ?? '';
+  if (req.method === 'GET' && path === '/v1/props') {
+    // llama.cpp /props: the real per-slot context window the harness probes
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ default_generation_settings: { n_ctx: 16384 }, total_slots: 1 }));
+    return;
+  }
+  if (req.method === 'GET' && path === '/v1/models') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        object: 'list',
+        data: [{ id: 'qwen-g', object: 'model', created: 1, owned_by: 'llamacpp', meta: { n_ctx: 16384, n_ctx_train: 131072 } }],
+      }),
+    );
+    return;
+  }
+  if (req.method === 'POST' && path === '/v1/chat/completions') {
+    let body = '';
+    req.on('data', (d) => (body += d));
+    req.on('end', () => {
+      llamaHits += 1;
+      lastLlamaReq = body;
+      console.log(`  llama.cpp mock hit #${llamaHits}`);
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'let me check the tiles' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'local ' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'llama answer' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 320, completion_tokens: 28 } })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+const llamaMockPort = await new Promise((resolve, reject) => {
+  llamaMock.once('error', reject);
+  llamaMock.listen(0, '127.0.0.1', () => resolve(llamaMock.address().port));
+});
+const LLAMA_MOCK_BASE = `http://127.0.0.1:${llamaMockPort}/v1`;
+console.log(`llama.cpp mock provider on ${LLAMA_MOCK_BASE}`);
 
 // ---------- launch ----------
 const children = [];
@@ -410,8 +451,10 @@ const main = async () => {
   // answer (chunk 1: reasoning_content + read_tile call) and replayed the
   // assistant turn for the tool-error continuation (request 2). The replay
   // must keep assistant content EMPTY (thinking never smuggled into
-  // content), keep the tool call intact, and never leak reasoning_content
-  // to this custom endpoint (the deepseek hostname gate).
+  // content), keep the tool call intact — and replay the reasoning_content
+  // because THIS endpoint emitted thinking itself (a local server that
+  // streams thinking gets it back for chain-of-thought continuity; only a
+  // server that never emitted thinking stays reasoning-free).
   try {
     const req2 = reqBodies[1];
     if (!req2) fail(`no second request captured to validate thinking replay (got ${reqBodies.length})`);
@@ -425,9 +468,9 @@ const main = async () => {
         const calls = prev.tool_calls ?? [];
         if (calls.length !== 1 || calls[0].id !== 'call-1') fail(`tool-call history not intact across the thinking round-trip: ${JSON.stringify(calls)}`);
         else ok('assistant tool-call history intact across the thinking round-trip');
+        if (prev.reasoning_content === 'let me think about the tiles') ok('prior reasoning replayed to the endpoint that emitted it (local-thinking continuity)');
+        else fail(`prior reasoning not replayed on the emitted-thinking endpoint: "${String(prev.reasoning_content).slice(0, 40)}"`);
       }
-      if ((req2.messages ?? []).some((m) => 'reasoning_content' in m)) fail('reasoning_content leaked to the custom endpoint');
-      else ok('no reasoning_content on the custom endpoint (deepseek hostname gate)');
     }
   } catch (err) {
     fail(`thinking-replay wire assertion error: ${err.message}`);
@@ -908,6 +951,54 @@ const main = async () => {
     }
   }
 
+  // 7) llama.cpp-shaped mock: keyless local server, /props probed for the
+  //    real context window, reasoning_content captured into the thinking
+  //    chip, usage streamed (include_usage), and NO Authorization header
+  await evalJs(`window.fraktole.setSettings({ reviewer: { providerId: 'llamacpp', model: 'qwen-g', baseUrl: '${LLAMA_MOCK_BASE}' } })`);
+  const sid4 = await evalJs(`window.fraktole.listSessions().then((s) => s[0]?.id ?? '')`);
+  await evalJs(`window.fraktole.restartReviewer('${sid4}')`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .orch-judge-status')?.textContent === 'running'`, 25000, 'reviewer running against the llama.cpp mock');
+  // the probed server window shows next to the status (ctx 16,384 ≤ knob-less 8K default? no: probed wins)
+  const ctxChip = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-model-label')].some((e) => e.textContent.includes('16,384'))`,
+    8000,
+    'probed context shown in the status header',
+  );
+  if (!ctxChip) fail('probed server context not shown in the status header');
+  else ok(`status header shows the probed server context (16,384)`);
+  const beforeL = llamaHits;
+  await prompt('llamacpp ping');
+  const llamaAnswer = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('local llama answer'))`,
+    25000,
+    'llama.cpp mock answer',
+  );
+  if (!llamaAnswer) fail('llama.cpp mock answer did not land in the transcript');
+  else ok('llama.cpp mock answered (keyless local wire path)');
+  if (llamaHits <= beforeL) fail('llama.cpp mock not hit during the local turn');
+  else {
+    try {
+      const req = JSON.parse(lastLlamaReq);
+      if (req.stream_options?.include_usage !== true) fail(`stream_options.include_usage missing: ${JSON.stringify(req.stream_options)}`);
+      else ok('llama.cpp wire asks for usage (token accounting is real)');
+      if (req.max_tokens < 256) fail(`max_tokens suspiciously small: ${req.max_tokens}`);
+      else ok(`message.wire max_tokens clipped to the real window (${req.max_tokens})`);
+    } catch (err) {
+      fail(`llama.cpp wire assertion error: ${err.message}`);
+    }
+  }
+  // reasoning_content flows into the thinking chip (the chip is a toggle —
+  // open the last one to reveal the block)
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-thinking-chip')].at(-1)?.click(); true`);
+  await sleep(200);
+  const thought = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-thinking')].some((e) => e.textContent.includes('let me check the tiles'))`,
+    8000,
+    'reasoning_content captured as thinking',
+  );
+  if (!thought) fail('reasoning_content not captured into the thinking chip');
+  else ok('reasoning_content captured into the thinking chip (deepseek format)');
+
   console.log(`\nmock provider calls: ${callCount}`);
   console.log(failures === 0 ? 'DRIVER-E2E OK' : `DRIVER-E2E FAILED (${failures})`);
 };
@@ -934,5 +1025,6 @@ main()
     }
     mock.close();
     ollamaMock.close();
+    llamaMock.close();
     process.exit(failures === 0 ? 0 : 1);
   });

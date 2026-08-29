@@ -163,6 +163,20 @@ const api = {
     ipcRenderer.on(IPC.reviewerRecap, listener);
     return () => ipcRenderer.removeListener(IPC.reviewerRecap, listener);
   },
+  onReviewerBudget: (sessionId: string, cb: (info: { contextTokens: number; probed?: number }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, info: { contextTokens: number; probed?: number }): void => {
+      if (sid === sessionId) cb(info);
+    };
+    ipcRenderer.on(IPC.reviewerBudget, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerBudget, listener);
+  },
+  onReviewerPrevError: (sessionId: string, cb: (message: string) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, message: string): void => {
+      if (sid === sessionId) cb(message);
+    };
+    ipcRenderer.on(IPC.reviewerPrevError, listener);
+    return () => ipcRenderer.removeListener(IPC.reviewerPrevError, listener);
+  },
 
   setReviewerGoal: (sessionId: string, text: string | null): Promise<void> =>
     ipcRenderer.invoke(IPC.reviewerSetGoal, sessionId, text),

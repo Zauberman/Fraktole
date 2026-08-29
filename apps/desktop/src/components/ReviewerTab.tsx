@@ -225,6 +225,11 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   /** The last manual summarize-session recap (persisted server-side). */
   const [recap, setRecap] = useState<{ text: string; at: number } | null>(null);
   const [recapOpen, setRecapOpen] = useState(false);
+  /** The resolved context budget (server-probed ≤ knob ≤ guess) — shown next
+   *  to the status so a mismatch with the launch flags is at least visible. */
+  const [budgetInfo, setBudgetInfo] = useState<{ contextTokens: number; probed?: number } | null>(null);
+  /** The previous run's failure, resurfaced after a restart. */
+  const [prevError, setPrevError] = useState<string | undefined>(undefined);
   const [summarizing, setSummarizing] = useState(false);
   const [question, setQuestion] = useState<ReviewerQuestion | null>(null);
   const [input, setInput] = useState('');
@@ -430,6 +435,8 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         setRecap(r);
         setRecapOpen(true);
       }),
+      bridge.onReviewerBudget(sessionId, (info) => setBudgetInfo(info)),
+      bridge.onReviewerPrevError(sessionId, (message) => setPrevError(message)),
     ];
     return () => {
       for (const unsub of unsubs) unsub();
@@ -594,11 +601,14 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     : PROVIDER_GROUPS;
 
   // fetch the live model list from the provider API (debounced); null = fall
-  // back to the offline suggestions; [] = the API had nothing to say
+  // back to the offline suggestions; [] = the API had nothing to say.
+  // Keyless local servers (auth 'optional': llama.cpp, LM Studio, vLLM …)
+  // expose /v1/models WITHOUT a key — they fetch too; only a key-demanded
+  // entry with no key stays offline
   useEffect(() => {
     if (!configOpen) return;
     const key = draft.apiKey.trim();
-    if (config.entry?.auth !== 'none' && derived !== 'ollama' && key.length === 0) {
+    if (config.entry?.auth === 'key' && key.length === 0) {
       setLiveModels(null);
       return;
     }
@@ -674,7 +684,22 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             {status}
           </span>
           {runningModel && <span className="reviewer-model-label">{runningModel}</span>}
+          {budgetInfo && (
+            <span
+              className="reviewer-model-label"
+              title={
+                budgetInfo.probed
+                  ? `server context ${budgetInfo.probed.toLocaleString()} tokens · budget ${budgetInfo.contextTokens.toLocaleString()}`
+                  : `context budget ${budgetInfo.contextTokens.toLocaleString()} tokens (server does not report its window)`
+              }
+            >
+              ctx {budgetInfo.contextTokens.toLocaleString()}
+            </span>
+          )}
         </div>
+        {/* the previous run's failure — a dead local loop must stay
+            diagnosable after a restart */}
+        {prevError && <div className="reviewer-note reviewer-note-warn">{prevError} (previous run)</div>}
         <div className="reviewer-actions">
           <div className="autonomy-wrap">
             <button

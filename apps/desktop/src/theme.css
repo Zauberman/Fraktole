@@ -828,6 +828,12 @@ button:active:not(:disabled) {
   border-left: 2px solid var(--err);
 }
 
+.reviewer-note-warn {
+  background: var(--warn-tint);
+  color: var(--warn);
+  border-left: 2px solid var(--warn);
+}
+
 .reviewer-empty {
   flex: 1;
   display: flex;

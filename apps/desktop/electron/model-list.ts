@@ -3,6 +3,8 @@
  *  (network, auth, proxy, unknown shape) resolves to [] — the caller falls
  *  back to the offline suggestions. */
 
+import { normalizeOpenaiBase } from './reviewer/providers.js';
+
 const LIST_TIMEOUT_MS = 8_000;
 const LIST_CAP = 100;
 
@@ -49,8 +51,12 @@ async function fetchByAdapter(
     const json = (await res.json()) as { models?: Array<{ name?: string }> };
     return (json.models ?? []).map((m) => m.name ?? '').filter((name) => name.length > 0);
   }
-  const res = await fetcher(`${baseUrl}/models`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
+  const base = normalizeOpenaiBase(baseUrl);
+  const res = await fetcher(`${base}/models`, {
+    headers:
+      apiKey.length > 0
+        ? { Authorization: `Bearer ${apiKey}` }
+        : {}, // keyless local servers (llama.cpp etc.) accept no header
     signal,
   });
   const json = (await res.json()) as { data?: Array<{ id?: string }> };

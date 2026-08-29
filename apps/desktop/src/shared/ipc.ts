@@ -60,6 +60,8 @@ export const IPC = {
   reviewerSummarize: 'reviewer:summarize',
   reviewerResumable: 'reviewer:resumable',
   reviewerRecap: 'reviewer:recap',
+  reviewerBudget: 'reviewer:budget',
+  reviewerPrevError: 'reviewer:prev-error',
   reviewerToolCall: 'reviewer:tool-call',
   reviewerMessage: 'reviewer:message',
   menuSession: 'menu:session',
@@ -260,6 +262,11 @@ export interface ReviewerState {
   /** The last manual "summarize session" recap, if any. Survives restarts
    *  (persisted in state.json alongside the ledger). */
   recap?: { text: string; at: number } | null;
+  /** The failure of the last run (cleared on the next successful turn) —
+   *  a dead loop must stay diagnosable after a restart. */
+  lastError?: string | null;
+  /** Timestamp of the last completed turn (undefined before any). */
+  lastTurnAt?: number;
 }
 
 /** reviewer:usage event payload (cumulative totals). */

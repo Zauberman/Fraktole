@@ -6,7 +6,7 @@ import { emptyState, isGoalMet, loadState, persistState } from '../electron/revi
 
 describe('reviewer state', () => {
   it('emptyState has no goal and no tasks', () => {
-    expect(emptyState()).toEqual({ goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null });
+    expect(emptyState()).toEqual({ goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null, lastError: null });
   });
 
   it('persist + load roundtrips a full state', async () => {
@@ -20,6 +20,8 @@ describe('reviewer state', () => {
       variant: 'cyber' as const,
       usage: { inputTokens: 10, cachedTokens: 2, outputTokens: 3 },
       recap: null,
+      lastError: 'previous run died: context limit reached',
+      lastTurnAt: 789,
     };
     await persistState(file, state);
     expect(await loadState(file)).toEqual(state);
@@ -27,21 +29,21 @@ describe('reviewer state', () => {
 
   it('a missing file loads as empty', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fraktole-state-'));
-    expect(await loadState(join(dir, 'nope.json'))).toEqual({ goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null });
+    expect(await loadState(join(dir, 'nope.json'))).toEqual({ goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null, lastError: null });
   });
 
   it('a corrupt file loads as empty, never throws', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fraktole-state-'));
     const file = join(dir, 'state.json');
     await writeFile(file, '{not json!!', 'utf8');
-    expect(await loadState(file)).toEqual({ goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null });
+    expect(await loadState(file)).toEqual({ goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null, lastError: null });
   });
 
   it('a malformed goal (bad state value) loads as empty', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fraktole-state-'));
     const file = join(dir, 'state.json');
     await writeFile(file, JSON.stringify({ goal: { text: 'x', setAt: 1, state: 'weird' }, tasks: [] }), 'utf8');
-    expect(await loadState(file)).toEqual({ goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null });
+    expect(await loadState(file)).toEqual({ goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null, lastError: null });
   });
 
   it('loadState keeps a persisted lastAgentKind', async () => {
