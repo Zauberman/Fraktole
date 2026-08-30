@@ -498,7 +498,6 @@ if (!app.requestSingleInstanceLock()) {
             usage: (ev) => mainWindow?.webContents.send(IPC.reviewerUsage, session.id, ev),
             recap: (recap) => mainWindow?.webContents.send(IPC.reviewerRecap, session.id, recap),
             budget: (info) => mainWindow?.webContents.send(IPC.reviewerBudget, session.id, info),
-            prevError: (message) => mainWindow?.webContents.send(IPC.reviewerPrevError, session.id, message),
           },
           logger: (line) => console.log(line),
         });

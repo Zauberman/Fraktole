@@ -9,7 +9,7 @@ import type { ReviewerState, ReviewerTask } from '../src/shared/ipc.js';
 export const GOAL_MET_SENTINEL = 'GOAL-MET:';
 
 export function emptyState(): ReviewerState {
-  return { goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null, lastError: null };
+  return { goal: null, subGoals: [], tasks: [], lastAgentKind: null, variant: null, usage: { inputTokens: 0, cachedTokens: 0, outputTokens: 0 }, recap: null };
 }
 
 export async function loadState(file: string): Promise<ReviewerState> {
@@ -54,8 +54,6 @@ export async function loadState(file: string): Promise<ReviewerState> {
         outputTokens: typeof parsed.usage?.outputTokens === 'number' ? parsed.usage.outputTokens : 0,
       },
       recap: isValidRecap(parsed.recap) ? parsed.recap : null,
-      lastError: typeof parsed.lastError === 'string' ? parsed.lastError : null,
-      lastTurnAt: typeof parsed.lastTurnAt === 'number' && Number.isFinite(parsed.lastTurnAt) ? parsed.lastTurnAt : undefined,
     };
   } catch {
     return emptyState();

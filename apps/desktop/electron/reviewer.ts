@@ -77,9 +77,6 @@ export interface ReviewerEmitter {
   /** The resolved context budget for the current provider (after probing a
    *  local server), emitted at start so the UI can show it. */
   budget?(info: { contextTokens: number; probed?: number }): void;
-  /** The error of the previous run, resurfaced at load so a dead local loop
-   *  never dies silently twice. */
-  prevError?(message: string): void;
 }
 
 export interface ReviewerHostOpts {
@@ -433,9 +430,6 @@ export class ReviewerHost {
     // a restored session may already exceed the (now-probed) budget — compact
     // before the first request instead of taking one gratuitous 400
     await this.compactIfNeeded(false, true);
-    // surface the previous run's failure once — a dead local loop must not
-    // stay mysterious after a restart
-    if (this.state.lastError) this.opts.emit.prevError?.(this.state.lastError);
     // tell the UI what budget actually applies (probed server ≤ knob ≤ guess)
     this.opts.emit.budget?.({
       contextTokens: this.contextBudget(),
@@ -1236,14 +1230,8 @@ export class ReviewerHost {
             this.warnedStale = false;
           }
         }
-        // the run is alive: clear the previous failure and stamp the last
-        // turn — persisted only on the transition (an error → healthy flip);
-        // a per-turn write would slow every turn boundary for no reader
-        this.state.lastTurnAt = Date.now();
-        if (this.state.lastError) {
-          this.state.lastError = null;
-          await persistState(this.stateFile, this.state, this.opts.logger);
-        }
+        // the run is alive — nothing to clear: failures surface through
+        // status events and transcript entries only (no durable error echo)
         // a completed summarize turn: capture the model's recap, persist it,
         // then compact the older exchanges away — the recap is now the
         // durable record of everything before it
@@ -1278,9 +1266,6 @@ export class ReviewerHost {
             ? `cannot reach ${this.resolved?.baseUrl ?? 'the configured endpoint'} — check the local server is running (${(err as Error).message})`
             : (err as Error).message;
         this.setStatus('error', message);
-        // the failure is durable: a restart resurfhaces it (prevError)
-        this.state.lastError = message;
-        void persistState(this.stateFile, this.state, this.opts.logger);
       }
     } finally {
       this.running = false;

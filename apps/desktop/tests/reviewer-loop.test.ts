@@ -111,7 +111,6 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
       usage: (ev) => events.push(`usage:${ev.inputTokens}:${ev.cachedTokens}:${ev.outputTokens}`),
       recap: (recap) => events.push(`recap:${recap.text}`),
       budget: (info) => events.push(`budget:${info.contextTokens}`),
-      prevError: (message) => events.push(`prevError:${message}`),
     },
   });
   return { host, provider, events, asks };
@@ -2276,7 +2275,7 @@ describe('ReviewerHost — local-provider hardening (context, truncation, readin
     expect(events2.filter((e) => e.startsWith('status-error:')).length).toBeGreaterThan(0);
   });
 
-  it('a crashed/silent local server surfaces a durable error and reappears on restart', async () => {
+  it('a crashed/silent local server surfaces an error status (no durable echo — the live status is the record)', async () => {
     const dir = join(tmpdir(), `fraktole-reviewer-local-death-${process.pid}-${++hostSeq}`);
     const recorder = new TileRecorder();
     const { host, events } = makeHost([{ failWith: 'openai API error 404: model not found' }], recorder, {
@@ -2288,18 +2287,12 @@ describe('ReviewerHost — local-provider hardening (context, truncation, readin
     await host.prompt('x');
     await settle(80);
     expect(host.status).toBe('error');
-    expect(events.some((e) => e.startsWith('status-error:'))).toBe(true);
-    const state = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')) as { lastError?: string };
-    expect(state.lastError).toMatch(/404/);
-    // a fresh host on the same dir resurfaces the failure at start
-    const recorder2 = new TileRecorder();
-    const { host: host2, events: events2 } = makeHost([], recorder2, {
-      config: llamacppConfig,
-      probe: okProbe(),
-      dir,
-    });
-    await host2.start();
-    expect(events2.some((e) => e.startsWith('prevError:') && e.includes('404'))).toBe(true);
+    expect(events.some((e) => e.startsWith('status-error:') && e.includes('404'))).toBe(true);
+    // nothing beyond the live status: no sticky persistence of the failure
+    const state = (await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')
+      .then((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .catch(() => ({}))) as Record<string, unknown>;
+    expect(state.lastError).toBeUndefined();
   });
 
   it('three ledger-less loop carrier re-checks stand the re-check loop down (the stall guard)', async () => {

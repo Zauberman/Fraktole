@@ -228,8 +228,6 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   /** The resolved context budget (server-probed ≤ knob ≤ guess) — shown next
    *  to the status so a mismatch with the launch flags is at least visible. */
   const [budgetInfo, setBudgetInfo] = useState<{ contextTokens: number; probed?: number } | null>(null);
-  /** The previous run's failure, resurfaced after a restart. */
-  const [prevError, setPrevError] = useState<string | undefined>(undefined);
   const [summarizing, setSummarizing] = useState(false);
   const [question, setQuestion] = useState<ReviewerQuestion | null>(null);
   const [input, setInput] = useState('');
@@ -436,7 +434,6 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         setRecapOpen(true);
       }),
       bridge.onReviewerBudget(sessionId, (info) => setBudgetInfo(info)),
-      bridge.onReviewerPrevError(sessionId, (message) => setPrevError(message)),
     ];
     return () => {
       for (const unsub of unsubs) unsub();
@@ -697,9 +694,6 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             </span>
           )}
         </div>
-        {/* the previous run's failure — a dead local loop must stay
-            diagnosable after a restart */}
-        {prevError && <div className="reviewer-note reviewer-note-warn">{prevError} (previous run)</div>}
         <div className="reviewer-actions">
           <div className="autonomy-wrap">
             <button
