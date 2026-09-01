@@ -60,6 +60,7 @@ export const IPC = {
   reviewerSummarize: 'reviewer:summarize',
   reviewerResumable: 'reviewer:resumable',
   reviewerRecap: 'reviewer:recap',
+  reviewerBudget: 'reviewer:budget',
   reviewerToolCall: 'reviewer:tool-call',
   reviewerMessage: 'reviewer:message',
   menuSession: 'menu:session',
@@ -127,6 +128,35 @@ export interface Project {
   sessionId?: string;
 }
 
+/** Model-tuning knobs for the reviewer harness. Every field optional:
+ *  unset = provider default (the field is not sent on the wire). Range
+ *  validation lives in the settings whitelist (electron/settings.ts) —
+ *  invalid values are dropped at load, never coerced. */
+export interface SamplerKnobs {
+  /** Context window in tokens. Wire: ollama options.num_ctx; budget: the
+   *  harness compaction target for every provider (80% of this). */
+  contextTokens?: number;
+  /** Output cap in tokens — max_tokens (openai/anthropic) or ollama
+   *  options.num_predict. */
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+  /** ollama only (not a chat.completions field) */
+  topK?: number;
+  /** ollama only */
+  minP?: number;
+  seed?: number;
+  /** ollama only */
+  repeatPenalty?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+  /** ollama only — body.keep_alive (e.g. "5m", "0" = unload) */
+  keepAlive?: string;
+  /** ollama only — body.think (force/disable thinking; false is safe on
+   *  any model, true only on thinking-capable ones) */
+  think?: boolean;
+}
+
 export interface Settings {
   theme: string;
   /** The reviewer harness model config. Everything except the key is
@@ -137,8 +167,11 @@ export interface Settings {
     apiKey?: string;
     /** Env-var fallback when apiKey is empty. */
     apiKeyEnv?: string;
+    /** The manual provider pick (provider-catalog.ts id) — wins over the
+     *  key-prefix detection when set. */
+    providerId?: string;
     /** Explicit pick for ambiguous sk- keys ('deepseek' routes through the
-     *  OpenAI adapter to api.deepseek.com). */
+     *  OpenAI adapter to api.deepseek.com). Superseded by providerId. */
     provider?: 'openai' | 'anthropic' | 'ollama' | 'deepseek';
     /** User's model pick; empty → per-provider default. */
     model?: string;
@@ -147,10 +180,16 @@ export interface Settings {
   /** Launcher command for reviewer-spawned agent tiles (e.g. "opencode");
    *  empty = the model asks the user which agent to spawn. */
   agentCommand?: string;
+  /** Extra launchers the reviewer may start in a shell tile (beyond the
+   *  built-in defaults); anything else is rejected by spawn/terminal gating. */
+  allowedLaunchers?: string[];
   /** Reasoning effort for models that support it (deepseek/openai).
    *  Unset = auto: 'high' on official DeepSeek/OpenAI endpoints, omitted
    *  elsewhere (custom endpoints can reject unknown params). */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /** Model-tuning knobs; every field validated and optional (see
+   *  SamplerKnobs). Unset = provider default, nothing sent on the wire. */
+  knobs?: SamplerKnobs;
   /** The user's custom autonomous loop: name + full directive. When the
    *  custom variant is picked, this prompt replaces the placeholder. */
   customAutonomy?: { name?: string; prompt?: string };
@@ -171,7 +210,7 @@ export interface TestPageState {
   console: Array<{ level: number; message: string }>;
 }
 
-/** The watchdog goal the user arms with /goal. Only the user sets it; the
+/** The loop carrier goal the user arms with /goal. Only the user sets it; the
  *  harness flips it to 'met' when the model declares GOAL-MET. */
 export interface ReviewerGoal {
   text: string;
@@ -179,7 +218,7 @@ export interface ReviewerGoal {
   state: 'active' | 'met';
 }
 
-/** One sub-goal of the armed watchdog goal, set by the model via set_goal.
+/** One sub-goal of the armed loop carrier goal, set by the model via set_goal.
  *  The model keeps the list current as it completes items; the harness
  *  marks every sub-goal done when GOAL-MET is declared. */
 export interface SubGoal {
@@ -204,7 +243,7 @@ export interface ReviewerUsage {
   outputTokens: number;
 }
 
-/** Durable watchdog state: the goal + its sub-goals + the task ledger.
+/** Durable loop carrier state: the goal + its sub-goals + the task ledger.
  *  Persisted as sessionDir/reviewer/state.json — survives compaction and
  *  restarts. */
 export interface ReviewerState {

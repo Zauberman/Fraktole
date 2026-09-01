@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { ReviewerState, ReviewerTask } from '../src/shared/ipc.js';
 
@@ -39,7 +39,13 @@ export async function loadState(file: string): Promise<ReviewerState> {
       tasks: Array.isArray(parsed.tasks) ? parsed.tasks.filter(isValidTask) : [],
       lastAgentKind: typeof parsed.lastAgentKind === 'string' ? parsed.lastAgentKind : null,
       variant:
-        parsed.variant === 'cyber' || parsed.variant === 'frontend' || parsed.variant === 'bugs'
+        parsed.variant === 'cyber' ||
+        parsed.variant === 'frontend' ||
+        parsed.variant === 'bugs' ||
+        parsed.variant === 'feature' ||
+        parsed.variant === 'tests' ||
+        parsed.variant === 'readability' ||
+        parsed.variant === 'custom'
           ? parsed.variant
           : null,
       usage: {
@@ -88,13 +94,28 @@ function isValidTask(t: unknown): t is ReviewerTask {
   );
 }
 
-/** Writes the full state file. Errors go to the optional logger — the model
- *  loop must never throw because the ledger file could not be written. */
+let stateWriteSeq = 0;
+
+/** Writes the full state file atomically (unique tmp + rename): the loop may
+ *  persist from several call sites in flight (ledger upserts, turn end,
+ *  error catch), and a non-atomic writeFile can leave a truncated/empty file
+ *  for a concurrent reader (or the next reload). Errors go to the optional
+ *  logger — the model loop must never throw because the ledger file could
+ *  not be written. */
 export async function persistState(file: string, state: ReviewerState, logger?: (line: string) => void): Promise<void> {
+  let tmp = '';
   try {
     await mkdir(dirname(file), { recursive: true });
-    await writeFile(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    tmp = `${file}.${process.pid}.${++stateWriteSeq}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    await rename(tmp, file);
   } catch (err) {
+    // the rename may never have landed (target still missing) — fall back to
+    // a direct write so the ledger is never empty on the next reload
+    const exists = await readFile(file)
+      .then(() => true)
+      .catch(() => false);
+    if (!exists) await writeFile(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8').catch(() => undefined);
     logger?.(`reviewer: state persist failed (${(err as Error).message})`);
   }
 }

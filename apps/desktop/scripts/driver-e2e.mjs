@@ -3,7 +3,7 @@
 // the reviewer column in the Node tab, the Test tab, the tile/reviewer focus
 // cycle, the thinking toggles, the tool families and the 13-theme walk
 // (via applyTheme), against a scripted mock provider. Run: node scripts/driver-e2e.mjs
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import http from 'node:http';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
@@ -28,6 +28,9 @@ let failNext = 0;
 let mockViolations = 0;
 let MOCK_BASE = '';
 let lastReqBody = null;
+/** every /chat/completions request body, in order (drive assertions read
+ *  specific requests — e.g. the replayed history of the first turn) */
+const reqBodies = [];
 const mock = http.createServer((req, res) => {
   const path = req.url?.split('?')[0] ?? '';
   const isCompletions = path.endsWith('/chat/completions');
@@ -65,6 +68,7 @@ const mock = http.createServer((req, res) => {
       let violation = '';
       try {
         const j = JSON.parse(body);
+        reqBodies.push(j);
         const last = j.messages?.[j.messages.length - 1];
         console.log(`  mock hit #${callCount}: last msg role=${last?.role} toolCalls=${last?.toolCalls ? last.toolCalls.length : 0}`);
         // the contract guard: OpenAI rejects "tool_calls": [] — a request
@@ -75,6 +79,10 @@ const mock = http.createServer((req, res) => {
             break;
           }
         }
+        // the thinking-replay guard is now the scenario's job: this mock
+        // streams reasoning_content itself (llama.cpp + qwen-style model),
+        // so replays are the local-thinking continuity feature. The
+        // scenario asserts the exact replayed value in req2.
         // tool-precedence guard: every tool response must sit behind an
         // assistant message that called its tool_call_id
         if (!violation) {
@@ -161,10 +169,92 @@ const mock = http.createServer((req, res) => {
   res.end();
 });
 
+// ---------- mock provider #2: ollama-shaped (/api/chat, NDJSON) ----------
+let ollamaHits = 0;
+let lastOllamaReq = null;
+const ollamaMock = http.createServer((req, res) => {
+  const path = req.url?.split('?')[0] ?? '';
+  if (req.method === 'GET' && path === '/api/tags') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ models: [{ name: 'mock-ollama' }] }));
+    return;
+  }
+  if (req.method === 'POST' && path === '/api/chat') {
+    let body = '';
+    req.on('data', (d) => (body += d));
+    req.on('end', () => {
+      ollamaHits += 1;
+      lastOllamaReq = body;
+      console.log(`  ollama mock hit #${ollamaHits}`);
+      res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+      res.write('{"message":{"role":"assistant","content":"local "},"done":false}\n');
+      res.write('{"message":{"role":"assistant","content":"answer"},"done":true,"prompt_eval_count":77,"eval_count":11}\n');
+      res.end();
+    });
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+// main.cjs must be CURRENT or the drive tests the last build, not the tree —
+// electron loads package.json "main" from dist-electron
+execFileSync('pnpm', ['build:main'], { cwd: APP, stdio: 'ignore' });
+
+// ---------- mock provider #3: llama.cpp-shaped (/props, /v1/models with
+// meta.n_ctx, SSE chat with reasoning_content + final usage chunk) ----------
+let llamaHits = 0;
+let lastLlamaReq = null;
+const llamaMock = http.createServer((req, res) => {
+  const path = req.url?.split('?')[0] ?? '';
+  if (req.method === 'GET' && path === '/v1/props') {
+    // llama.cpp /props: the real per-slot context window the harness probes
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ default_generation_settings: { n_ctx: 16384 }, total_slots: 1 }));
+    return;
+  }
+  if (req.method === 'GET' && path === '/v1/models') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        object: 'list',
+        data: [{ id: 'qwen-g', object: 'model', created: 1, owned_by: 'llamacpp', meta: { n_ctx: 16384, n_ctx_train: 131072 } }],
+      }),
+    );
+    return;
+  }
+  if (req.method === 'POST' && path === '/v1/chat/completions') {
+    let body = '';
+    req.on('data', (d) => (body += d));
+    req.on('end', () => {
+      llamaHits += 1;
+      lastLlamaReq = body;
+      console.log(`  llama.cpp mock hit #${llamaHits}`);
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'let me check the tiles' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'local ' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'llama answer' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 320, completion_tokens: 28 } })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+const llamaMockPort = await new Promise((resolve, reject) => {
+  llamaMock.once('error', reject);
+  llamaMock.listen(0, '127.0.0.1', () => resolve(llamaMock.address().port));
+});
+const LLAMA_MOCK_BASE = `http://127.0.0.1:${llamaMockPort}/v1`;
+console.log(`llama.cpp mock provider on ${LLAMA_MOCK_BASE}`);
+
 // ---------- launch ----------
 const children = [];
 const launch = (cmd, args, env = null) => {
-  const child = spawn(cmd, args, { cwd: APP, env: env ?? process.env, stdio: 'ignore' });
+  const child = spawn(cmd, args, { cwd: APP, env: env ?? process.env, stdio: 'ignore', detached: true });
   children.push(child);
   return child;
 };
@@ -175,6 +265,13 @@ const mockPort = await new Promise((resolve, reject) => {
 });
 MOCK_BASE = `http://127.0.0.1:${mockPort}`;
 console.log(`mock provider on ${MOCK_BASE}`);
+
+const ollamaMockPort = await new Promise((resolve, reject) => {
+  ollamaMock.once('error', reject);
+  ollamaMock.listen(0, '127.0.0.1', () => resolve(ollamaMock.address().port));
+});
+const OLLAMA_MOCK_BASE = `http://127.0.0.1:${ollamaMockPort}`;
+console.log(`ollama mock provider on ${OLLAMA_MOCK_BASE}`);
 
 launch('pnpm', ['exec', 'vite', '--port', String(VITE_PORT), '--strictPort']);
 const userData = mkdtempSync(join(tmpdir(), 'frak-e2e-'));
@@ -349,6 +446,35 @@ const main = async () => {
   );
   if (!final) fail('final answer missing');
   else ok('model answered (DRIVER-42 in transcript)');
+
+  // thinking-replay wire checks: the first turn round-tripped a reasoning
+  // answer (chunk 1: reasoning_content + read_tile call) and replayed the
+  // assistant turn for the tool-error continuation (request 2). The replay
+  // must keep assistant content EMPTY (thinking never smuggled into
+  // content), keep the tool call intact — and replay the reasoning_content
+  // because THIS endpoint emitted thinking itself (a local server that
+  // streams thinking gets it back for chain-of-thought continuity; only a
+  // server that never emitted thinking stays reasoning-free).
+  try {
+    const req2 = reqBodies[1];
+    if (!req2) fail(`no second request captured to validate thinking replay (got ${reqBodies.length})`);
+    else {
+      const asst = (req2.messages ?? []).filter((m) => m.role === 'assistant');
+      const prev = asst[0] ?? null;
+      if (!prev) fail('replayed request has no assistant history');
+      else {
+        if (prev.content !== '') fail(`assistant history content polluted by thinking: "${String(prev.content).slice(0, 60)}"`);
+        else ok('assistant history replays thinking-free content');
+        const calls = prev.tool_calls ?? [];
+        if (calls.length !== 1 || calls[0].id !== 'call-1') fail(`tool-call history not intact across the thinking round-trip: ${JSON.stringify(calls)}`);
+        else ok('assistant tool-call history intact across the thinking round-trip');
+        if (prev.reasoning_content === 'let me think about the tiles') ok('prior reasoning replayed to the endpoint that emitted it (local-thinking continuity)');
+        else fail(`prior reasoning not replayed on the emitted-thinking endpoint: "${String(prev.reasoning_content).slice(0, 40)}"`);
+      }
+    }
+  } catch (err) {
+    fail(`thinking-replay wire assertion error: ${err.message}`);
+  }
 
   // the transcript stays pinned to the bottom while content streams, and a
   // deliberate scroll-up is never yanked back
@@ -666,8 +792,8 @@ const main = async () => {
   if (!contextKept) fail('conversation wiped after revive');
   else ok('conversation retained after revive');
 
-  if (mockViolations > 0) fail(`${mockViolations} request(s) carried an empty tool_calls array`);
-  else ok('no request ever carried an empty tool_calls array');
+  if (mockViolations > 0) fail(`${mockViolations} request(s) violated the wire contract (empty tool_calls / reasoning_content leak — see mock logs)`);
+  else ok('no request ever violated the wire contract (empty tool_calls / reasoning_content leak)');
 
   // the two new driving tools: keystrokes (shift-tab) and typing answers
   // into a tile; against an unknown agent they must error cleanly. Each
@@ -695,6 +821,184 @@ const main = async () => {
   if (!typed) fail('type_into_tile turn did not complete');
   else ok('type_into_tile turn completed (safe-yolo tool wired)');
 
+  // ---- manual provider picker (search + grouped select + keyless local) ----
+  // open the config dialog (a real user click path)
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'config')?.click(); true`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') !== null`, 10000, 'config dialog for picker');
+
+  // 1) catalog breadth: the provider <select> renders the whole catalog
+  const optionCount = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-config-wide select')?.options.length ?? 0`);
+  // 100 providers + the empty "auto-detect" default option
+  if (optionCount < 101) fail(`provider <select> has only ${optionCount} options`);
+  else ok(`provider <select> lists ${optionCount - 1} catalog providers`);
+
+  // 2) search filter narrows the options (find the provider label's search input)
+  const setReactValue = (el, v) =>
+    `(() => { const e = ${el}; const proto = e.tagName === 'SELECT' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype; const set = Object.getOwnPropertyDescriptor(proto, 'value').set; set.call(e, '${v}'); e.dispatchEvent(new Event(e.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); return true; })()`;
+  const searchBox = `document.querySelector('.pane-reviewer-column .reviewer-config-wide input[placeholder^="search providers"]')`;
+  const providerSel = `document.querySelector('.pane-reviewer-column .reviewer-config-wide select')`;
+  await evalJs(setReactValue(searchBox, 'gro'));
+  await sleep(400);
+  const afterFilter = await evalJs(`([...document.querySelectorAll('.pane-reviewer-column .reviewer-config-wide select option')].map((o) => o.value))`);
+  if (!afterFilter.includes('groq')) fail(`search 'gro' lost the groq option: ${afterFilter.join(',')}`);
+  else ok(`search 'gro' keeps Groq`);
+  if (afterFilter.includes('openai')) fail(`search 'gro' kept the unfiltered openai option`);
+  else ok('search filter removes unrelated providers');
+  await evalJs(setReactValue(searchBox, ''));
+  await sleep(300);
+
+  // 3) manual pick drives resolution + autofill, then persists on save
+  await evalJs(setReactValue(providerSel, 'deepseek'));
+  await sleep(300);
+  // the pick's keyHint lands in the api key field placeholder
+  const keyHint = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-config-wide input[type="password"]')?.placeholder ?? ''`);
+  if (keyHint !== 'sk-… (DeepSeek key)') fail(`key hint after picking deepseek: "${keyHint}"`);
+  else ok('provider pick autofills the api key hint');
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-config-actions button')].find((b) => b.textContent.includes('save'))?.click(); true`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') === null`, 10000, 'dialog closed after provider save');
+  await sleep(1500);
+  const persisted = await evalJs(`window.fraktole.getSettings().then((s) => s.reviewer.providerId ?? '')`);
+  if (persisted !== 'deepseek') fail(`providerId not persisted after UI pick: ${persisted}`);
+  else ok('manual provider pick persisted (providerId=deepseek)');
+
+  // 4) resolution + harness path: route the picked provider to the mock and
+  //    confirm the outgoing request carries the catalog default model
+  const sid2 = await evalJs(`window.fraktole.listSessions().then((s) => s[0]?.id ?? '')`);
+  await evalJs(`window.fraktole.setSettings({ reviewer: { providerId: 'deepseek', model: 'deepseek-chat', baseUrl: '${MOCK_BASE}', apiKey: 'sk-mock-42' } })`);
+  await evalJs(`window.fraktole.restartReviewer('${sid2}')`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .orch-judge-status')?.textContent === 'running'`, 25000, 'reviewer running after provider restart');
+  const before = callCount;
+  await prompt('provider ping');
+  await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.trim().length > 0)`,
+    25000,
+    'answer after provider pick',
+  );
+  const after2 = callCount;
+  if (after2 <= before) fail(`mock not hit during the manual-provider turn (was ${before}, now ${after2})`);
+  else {
+    let m = '';
+    try {
+      m = JSON.parse(lastReqBody).model ?? '';
+    } catch {
+      /* ignore */
+    }
+    if (m === 'deepseek-chat') ok('manual provider resolution flowed to the harness (model deepseek-chat)');
+    else fail(`outgoing request model was "${m}", expected deepseek-chat`);
+  }
+
+  // 5) keyless local provider: picking ollama disables the api key field
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'config')?.click(); true`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') !== null`, 10000, 'config dialog for ollama');
+  await evalJs(setReactValue(searchBox, 'ollama'));
+  await sleep(300);
+  await evalJs(setReactValue(providerSel, 'ollama'));
+  await sleep(300);
+  const keyDisabled = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-config-wide input[type="password"]')?.disabled ?? false`);
+  if (!keyDisabled) fail('api key field is not disabled for the keyless ollama provider');
+  else ok('keyless local provider disables the api key field');
+  // the advanced knobs section exposes the ollama knob fields in the dialog
+  await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-advanced summary')?.click(); true`);
+  await sleep(300);
+  const advLabels = await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-advanced label')].map((l) => l.textContent)`);
+  if (advLabels.length === 0) fail('advanced knobs section has no fields');
+  else {
+    const has = (p) => advLabels.some((t) => t.includes(p));
+    if (!has('context window') || !has('keep_alive') || !has('thinking (ollama)')) fail(`advanced fields missing ollama knobs: ${advLabels.join(' | ')}`);
+    else ok(`advanced knobs render for ollama (${advLabels.length} fields)`);
+  }
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-config-actions button')].find((b) => b.textContent.includes('save'))?.click(); true`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') === null`, 10000, 'dialog closed after ollama save');
+  const persistedLocal = await evalJs(`window.fraktole.getSettings().then((s) => s.reviewer.providerId ?? '')`);
+  if (persistedLocal !== 'ollama') fail(`ollama providerId not persisted: ${persistedLocal}`);
+  else ok('keyless local provider pick persisted (providerId=ollama)');
+
+  // 6) local wire: the model knobs ride the /api/chat payload end-to-end —
+  //    options.num_ctx / num_predict / temperature, top-level think, and
+  //    the system prompt as history line 1 — against the ollama-shaped mock
+  await evalJs(`window.fraktole.setSettings({ reviewer: { providerId: 'ollama', model: 'mock-ollama', baseUrl: '${OLLAMA_MOCK_BASE}', knobs: { contextTokens: 16384, maxOutputTokens: 2048, temperature: 0.4, think: true } } })`);
+  const sid3 = await evalJs(`window.fraktole.listSessions().then((s) => s[0]?.id ?? '')`);
+  await evalJs(`window.fraktole.restartReviewer('${sid3}')`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .orch-judge-status')?.textContent === 'running'`, 25000, 'reviewer running against the ollama mock');
+  const beforeO = ollamaHits;
+  await prompt('ollama ping');
+  const localAnswer = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('local answer'))`,
+    25000,
+    'ollama mock answer',
+  );
+  if (!localAnswer) fail('ollama mock answer did not land in the transcript');
+  else ok('ollama mock answered (local wire path)');
+  if (ollamaHits <= beforeO) fail('ollama mock not hit during the local turn');
+  else {
+    try {
+      const req = JSON.parse(lastOllamaReq);
+      if (req.model !== 'mock-ollama') fail(`ollama wire model: ${req.model}`);
+      else ok('ollama wire carries the configured model');
+      const o = req.options ?? {};
+      if (o.num_ctx !== 16384) fail(`options.num_ctx missing/off: ${JSON.stringify(o)}`);
+      else ok('ollama wire carries options.num_ctx=16384');
+      if (o.num_predict !== 2048) fail(`options.num_predict missing/off: ${JSON.stringify(o)}`);
+      else ok('ollama wire carries options.num_predict=2048');
+      if (o.temperature !== 0.4) fail(`options.temperature missing/off: ${JSON.stringify(o)}`);
+      else ok('ollama wire carries options.temperature=0.4');
+      if (req.think !== true) fail(`think missing/off: ${JSON.stringify(req.think)}`);
+      else ok('ollama wire carries think=true');
+      if (!Array.isArray(req.messages) || req.messages[0]?.role !== 'system') fail('ollama history missing the system prompt as line 1');
+      else ok('ollama history replays the system prompt as line 1');
+    } catch (err) {
+      fail(`ollama wire assertion error: ${err.message}`);
+    }
+  }
+
+  // 7) llama.cpp-shaped mock: keyless local server, /props probed for the
+  //    real context window, reasoning_content captured into the thinking
+  //    chip, usage streamed (include_usage), and NO Authorization header
+  await evalJs(`window.fraktole.setSettings({ reviewer: { providerId: 'llamacpp', model: 'qwen-g', baseUrl: '${LLAMA_MOCK_BASE}' } })`);
+  const sid4 = await evalJs(`window.fraktole.listSessions().then((s) => s[0]?.id ?? '')`);
+  await evalJs(`window.fraktole.restartReviewer('${sid4}')`);
+  await waitFor(`document.querySelector('.pane-reviewer-column .orch-judge-status')?.textContent === 'running'`, 25000, 'reviewer running against the llama.cpp mock');
+  // the probed server window shows next to the status (ctx 16,384 ≤ knob-less 8K default? no: probed wins)
+  const ctxChip = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-model-label')].some((e) => e.textContent.includes('16,384'))`,
+    8000,
+    'probed context shown in the status header',
+  );
+  if (!ctxChip) fail('probed server context not shown in the status header');
+  else ok(`status header shows the probed server context (16,384)`);
+  const beforeL = llamaHits;
+  await prompt('llamacpp ping');
+  const llamaAnswer = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.includes('local llama answer'))`,
+    25000,
+    'llama.cpp mock answer',
+  );
+  if (!llamaAnswer) fail('llama.cpp mock answer did not land in the transcript');
+  else ok('llama.cpp mock answered (keyless local wire path)');
+  if (llamaHits <= beforeL) fail('llama.cpp mock not hit during the local turn');
+  else {
+    try {
+      const req = JSON.parse(lastLlamaReq);
+      if (req.stream_options?.include_usage !== true) fail(`stream_options.include_usage missing: ${JSON.stringify(req.stream_options)}`);
+      else ok('llama.cpp wire asks for usage (token accounting is real)');
+      if (req.max_tokens < 256) fail(`max_tokens suspiciously small: ${req.max_tokens}`);
+      else ok(`message.wire max_tokens clipped to the real window (${req.max_tokens})`);
+    } catch (err) {
+      fail(`llama.cpp wire assertion error: ${err.message}`);
+    }
+  }
+  // reasoning_content flows into the thinking chip (the chip is a toggle —
+  // open the last one to reveal the block)
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-thinking-chip')].at(-1)?.click(); true`);
+  await sleep(200);
+  const thought = await waitFor(
+    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-thinking')].some((e) => e.textContent.includes('let me check the tiles'))`,
+    8000,
+    'reasoning_content captured as thinking',
+  );
+  if (!thought) fail('reasoning_content not captured into the thinking chip');
+  else ok('reasoning_content captured into the thinking chip (deepseek format)');
+
   console.log(`\nmock provider calls: ${callCount}`);
   console.log(failures === 0 ? 'DRIVER-E2E OK' : `DRIVER-E2E FAILED (${failures})`);
 };
@@ -708,11 +1012,19 @@ main()
     await sleep(300);
     for (const c of children) {
       try {
-        c.kill('SIGKILL');
+        // detached: kill the whole process group so shell wrappers (the
+        // electron .bin) cannot orphan the real binary on the CDP port
+        process.kill(-c.pid, 'SIGKILL');
       } catch {
-        /* gone */
+        try {
+          c.kill('SIGKILL');
+        } catch {
+          /* gone */
+        }
       }
     }
     mock.close();
+    ollamaMock.close();
+    llamaMock.close();
     process.exit(failures === 0 ? 0 : 1);
   });

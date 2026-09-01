@@ -2,6 +2,7 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
 import type { FraktoleMessage, ReviewerQuestion, ReviewerState, ReviewerTask } from '../src/shared/ipc.js';
 import { sanitizeChatText } from '../src/shared/sanitize.js';
+import { commandIsPlainLaunch, effectiveAllowlist, launcherFirstToken } from '../src/shared/launchers.js';
 import { emptyState } from './reviewer-state.js';
 import { ORCHESTRATOR_ID, messageId } from './mailbox.js';
 import type { TileRecorder } from './tile-recorder.js';
@@ -29,19 +30,33 @@ export interface ReviewerToolContext {
   killAgent?(tileId: string): Promise<string>;
   /** Grant-checked kill (single-use per agent); the host enforces policy. */
   tryKillAgent?(agentId: string): Promise<string>;
-  /** Spawn an agent tile; main allocates the id and mounts it in the UI. */
-  spawnAgent?(kind: string, cwd: string): Promise<string>;
+  /** Spawn an agent tile; main allocates the id and mounts it in the UI.
+   *  userPicked=true marks a launcher the USER chose (ask_user answer /
+   *  remembered ledger pick) — it skips the allowlist but never the
+   *  plain-command check. */
+  spawnAgent?(kind: string, cwd: string, opts?: { userPicked?: boolean }): Promise<string>;
   /** Live agent tile count (spawn cap). */
   agentCount?(): number;
   /** The configured launcher command ('' = none). */
   getAgentCommand?(): string;
-  /** Set or clear the watchdog goal (user-authorized: always allowed). The
+  /** Set or clear the loop carrier goal (user-authorized: always allowed). The
    *  model may also subdivide the CURRENT goal into sub-goals. */
   setGoal?(text: string, subGoals?: Array<{ text: string; done: boolean }>): Promise<void>;
   /** The mailbox message log for the session. */
   listMessages?(): Promise<FraktoleMessage[]>;
-  /** Write a command into an existing agent's terminal (launch_agent). */
-  writeToAgent?(agentId: string, command: string): Promise<string>;
+  /** Write into an existing agent's terminal (launch_agent, send_keystroke,
+   *  type_into_tile). raw=true sends the bytes verbatim — no trailing newline
+   *  is appended (keystrokes and typed answers press their own keys). */
+  writeToAgent?(agentId: string, command: string, opts?: { raw?: boolean }): Promise<string>;
+  /** True only for tiles running a harness launcher (kind === 'agent'); a bare
+   *  shell tile is never a valid target for terminal input. */
+  isHarnessTile?(tileId: string): boolean;
+  /** The user's extra allowed launchers (settings); extends the built-in
+   *  defaults — gates spawn_agent and terminal input into shell tiles. */
+  getAllowedLaunchers?(): Promise<string[]>;
+  /** Every agent tile in the session (including silent ones with no output
+   *  yet) — list_tiles merges this with the live recording stats. */
+  listAgents?(): Array<{ agentId: string; cwd: string | null }>;
   /** Reload the Test tab's guest page. */
   reloadTestPage?(): Promise<string>;
   /** Open a URL in the Test tab (the embedded mini browser). */
@@ -97,6 +112,50 @@ function noLiveHint(): string {
   return 'no live recording yet — use read_scrollback for the persisted history';
 }
 
+/** Terminal-input tools (type_into_tile, send_keystroke, launch_agent) may
+ *  freely target a tile running a harness launcher. A bare shell tile accepts
+ *  ONLY the command that starts an allowlisted launcher (plain invocation, no
+ *  shell metacharacters) — anything else would execute as arbitrary shell
+ *  commands, the path where the orchestrator "does the work itself" instead of
+ *  delegating. Returns an error string, or null when the input is allowed. */
+async function terminalInputGuard(agentId: string, ctx: ReviewerToolContext, input?: string): Promise<string | null> {
+  const id = agentId.trim();
+  const tileId = ctx.tileOfAgent?.(id);
+  if (!tileId) return `error: unknown agent ${id || '(empty)'}`;
+  if (ctx.isHarnessTile?.(tileId)) return null;
+  const cmd = typeof input === 'string' ? input.trim() : '';
+  if (
+    cmd.length > 0 &&
+    commandIsPlainLaunch(cmd) &&
+    effectiveAllowlist(await ctx.getAllowedLaunchers?.(), ctx.getAgentCommand?.()).includes(launcherFirstToken(cmd))
+  ) {
+    return null;
+  }
+  return 'error: only allowlisted launchers (e.g. opencode) may be started in a shell tile — delegate work with send_message or spawn_agent';
+}
+
+/** The slice of ReviewerToolContext the launcher gate needs — lets host-side
+ *  callers (spawnAgentInSession) reuse the exact same rule. */
+export interface LauncherGateContext {
+  getAllowedLaunchers?(): Promise<string[]>;
+  /** May be sync (reviewer memory) or async (settings read). */
+  getAgentCommand?(): string | Promise<string>;
+}
+
+/** spawn_agent's kind is typed into a fresh shell as a command — validate it
+ *  exactly like terminal input into a shell tile ('shell' = plain shell).
+ *  Exported so the host-side spawn path (spawnAgentInSession) enforces the
+ *  same rule as the tool: the remote agent.spawn RPC funnels through there. */
+export async function validateLauncherKind(kind: string, ctx: LauncherGateContext): Promise<string | null> {
+  if (kind === 'shell') return null;
+  const allowed =
+    commandIsPlainLaunch(kind) &&
+    effectiveAllowlist(await ctx.getAllowedLaunchers?.(), await ctx.getAgentCommand?.()).includes(launcherFirstToken(kind));
+  return allowed
+    ? null
+    : 'error: unknown launcher — use one from the allowed launchers (e.g. opencode or shell), or ask the user with ask_user (kind agent-kind)';
+}
+
 const TOOLS: ReviewerTool[] = [
   {
     name: 'list_tiles',
@@ -104,16 +163,25 @@ const TOOLS: ReviewerTool[] = [
     inputSchema: { type: 'object', properties: {} },
     async run(_args, ctx) {
       const now = Date.now();
-      const rows = Array.from(ctx.recorder.list().entries()).map(([tileId, summary]) => {
+      const stats = new Map<string, { lines: number; lastAt: number }>();
+      for (const [tileId, summary] of ctx.recorder.list().entries()) {
         const agentId = ctx.agentOfTile(tileId) ?? tileId;
-        return {
-          tileId,
-          agentId,
-          cwd: ctx.cwdOfAgent(agentId),
-          lines: summary.lines,
-          lastActiveAgoSec: Math.max(0, Math.round((now - summary.lastAt) / 1000)),
-        };
+        stats.set(agentId, summary);
+      }
+      const row = (agentId: string, s?: { lines: number; lastAt: number }): Record<string, unknown> => ({
+        tileId: ctx.tileOfAgent(agentId) ?? null,
+        agentId,
+        cwd: ctx.cwdOfAgent(agentId),
+        lines: s?.lines ?? 0,
+        lastActiveAgoSec: s ? Math.max(0, Math.round((now - s.lastAt) / 1000)) : null,
       });
+      // every session agent, even one that just spawned and has not printed
+      // anything yet — a silent tile is a fact the reviewer must see
+      const agents = ctx.listAgents?.() ?? [];
+      const rows = agents.map((a) => row(a.agentId, stats.get(a.agentId)));
+      for (const [agentId, s] of stats) {
+        if (!agents.some((a) => a.agentId === agentId)) rows.push(row(agentId, s));
+      }
       if (rows.length === 0) return 'no tiles recorded yet';
       return JSON.stringify(rows, null, 2);
     },
@@ -162,7 +230,7 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'read_scrollback',
-    description: "Read an agent's full output history — the zero-lag complement to read_tile when its tail is not enough. While the agent runs, this reads its live recording; otherwise it reads the on-disk capture (fresh within ~1s). Up to 5000 lines. Use it to judge a completed piece of work.",
+    description: "Read an agent's full output history — the zero-lag complement to read_tile when its tail is not enough. While the agent runs, this reads its live recording (a real terminal emulation: full-screen TUIs like opencode render as clean lines); otherwise it reads the on-disk capture (fresh within ~1s). Up to 5000 lines. Use it to judge a completed piece of work.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -173,6 +241,9 @@ const TOOLS: ReviewerTool[] = [
     async run(args, ctx) {
       const agentId = typeof args.agentId === 'string' ? args.agentId : '';
       if (!agentId) return 'error: agentId required';
+      // agent ids are internally generated agent-<n> — reject anything else
+      // before it ever reaches a path join (same rule as the spawn host)
+      if (!/^agent-\d+$/.test(agentId)) return 'error: invalid agentId';
       const n = clampInt(args.tail, 200, 1, 5000);
       // while the agent runs, its live recording is the freshest view (zero
       // lag) — use it directly and never fall back to a save-time snapshot
@@ -235,7 +306,7 @@ const TOOLS: ReviewerTool[] = [
   },
   {
     name: 'read_state',
-    description: 'Return the current goal and task ledger (the durable watchdog state). Check it when you need to recall what was assigned, to whom, and in what state.',
+    description: 'Return the current goal and task ledger (the durable loop carrier state). Check it when you need to recall what was assigned, to whom, and in what state.',
     inputSchema: { type: 'object', properties: {} },
     async run(_args, ctx) {
       return JSON.stringify(ctx.getState?.() ?? emptyState(), null, 2);
@@ -320,7 +391,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'spawn_agent',
     description:
-      "Spawn a NEW agent tile (a shell in cwd with the launch command written into it). Fire agents for implementation work whenever the workforce is idle or too small. Fire a known kind directly (the ledger remembers the user's choice) or omit kind to let the user pick. Capped at 8 agents. To run a harness inside an EXISTING tile instead, use launch_agent.",
+      "Spawn a NEW agent tile (a shell in cwd with the launch command written into it). Fire agents for implementation work whenever the workforce is idle or too small. Fire a known kind directly (the ledger remembers the user's choice) or omit kind to let the user pick. Capped at 8 agents. Only ALLOWED launchers are accepted as a kind ('shell' = a plain shell tile); anything else is rejected — use ask_user (kind agent-kind) to get the user's pick. To run a harness inside an EXISTING tile instead, use launch_agent.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -335,21 +406,33 @@ const TOOLS: ReviewerTool[] = [
       let kind = kindArg;
       if (kind.length === 0) kind = ctx.getState?.().lastAgentKind ?? '';
       if (kind.length === 0) kind = configCommand;
+      let asked = false;
       if (kind.length === 0) {
         if (!ctx.askUser) return 'error: no agent kind — ask the user which agent to spawn';
         kind = (await ctx.askUser('which agent should I spawn? (opencode, shell, or a launcher command)', 'agent-kind')).trim();
         if (/^(skipped?|skip)$/i.test(kind)) return 'error: spawn cancelled by the user';
+        asked = true;
       }
       if (kind.length === 0) return 'error: no agent kind';
+      // a launcher the USER picked (ask_user answer, or the ledger's
+      // remembered pick) is authorized by consent — the allowlist does not
+      // apply to it, but the plain-command check always does
+      const userPicked = asked || kind === ctx.getState?.().lastAgentKind;
+      if (!userPicked) {
+        const kindErr = await validateLauncherKind(kind, ctx);
+        if (kindErr) return kindErr;
+      } else if (!commandIsPlainLaunch(kind)) {
+        return 'error: launcher command is not a plain invocation (no shell metacharacters)';
+      }
       const count = ctx.agentCount?.() ?? 0;
       if (count >= 8) return `error: agent cap (8) reached — ${count} tiles running`;
-      return ctx.spawnAgent?.(kind, cwd) ?? 'error: spawn unavailable';
+      return ctx.spawnAgent?.(kind, cwd, { userPicked }) ?? 'error: spawn unavailable';
     },
   },
   {
     name: 'set_goal',
     description:
-      'Set a new watchdog goal (replaces the current one and re-arms the loop), clear it by omitting text, or subdivide the CURRENT goal into sub-goals with subGoals. You are authorized to set goals when the situation calls for it — when a big goal is armed, break it into smaller sub-goals with subGoals and keep the list current as you complete items.',
+      'Set a new loop carrier goal (replaces the current one and re-arms the loop), clear it by omitting text, or subdivide the CURRENT goal into sub-goals with subGoals. You are authorized to set goals when the situation calls for it — when a big goal is armed, break it into smaller sub-goals with subGoals and keep the list current as you complete items.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -490,7 +573,7 @@ const TOOLS: ReviewerTool[] = [
   {
     name: 'launch_agent',
     description:
-      "Run a command inside an EXISTING agent's terminal — e.g. launch an agent harness like opencode in a shell tile — without spawning a new tile. Its output lands in the tile recording (read with read_tile). For a brand-new tile use spawn_agent.",
+      "Run a command inside an EXISTING agent's terminal. In a HARNESS tile (running a launcher like opencode) any command is accepted. In a bare SHELL tile only an allowed launcher (e.g. opencode, a plain program invocation with no shell metacharacters) may be started — arbitrary shell commands are rejected there; delegate work with send_message or spawn_agent instead. Its output lands in the tile recording (read with read_tile). For a brand-new tile use spawn_agent.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -504,6 +587,8 @@ const TOOLS: ReviewerTool[] = [
       const command = typeof args.command === 'string' ? args.command.trim() : '';
       if (agentId.length === 0 || command.length === 0) return 'error: agentId and command required';
       if (command.length > TERMINAL_INPUT_CAP) return `error: command too large (${command.length} chars, cap ${TERMINAL_INPUT_CAP})`;
+      const err = await terminalInputGuard(agentId, ctx, command);
+      if (err) return err;
       return ctx.writeToAgent?.(agentId, command) ?? 'error: launch unavailable';
     },
   },
@@ -529,7 +614,9 @@ const TOOLS: ReviewerTool[] = [
       if (agentId.length === 0 || keys.length === 0) return 'error: agentId and at least one key required';
       const bytes = keys.map((k) => KEY_ESCAPES[k] ?? k).join('');
       if (bytes.length > TERMINAL_INPUT_CAP) return `error: keystrokes too large (${bytes.length} chars, cap ${TERMINAL_INPUT_CAP})`;
-      const result = await ctx.writeToAgent?.(agentId, bytes);
+      const err = await terminalInputGuard(agentId, ctx, bytes);
+      if (err) return err;
+      const result = await ctx.writeToAgent?.(agentId, bytes, { raw: true });
       return result ?? `error: unknown agent ${agentId}`;
     },
   },
@@ -551,8 +638,10 @@ const TOOLS: ReviewerTool[] = [
       const text = typeof args.text === 'string' ? args.text : '';
       if (agentId.length === 0 || text.length === 0) return 'error: agentId and text required';
       if (text.length > TERMINAL_INPUT_CAP) return `error: text too large (${text.length} chars, cap ${TERMINAL_INPUT_CAP})`;
+      const err = await terminalInputGuard(agentId, ctx, text);
+      if (err) return err;
       const withEnter = args.pressEnter === true ? '\r' : '';
-      const result = await ctx.writeToAgent?.(agentId, `${text}${withEnter}`);
+      const result = await ctx.writeToAgent?.(agentId, `${text}${withEnter}`, { raw: true });
       return result ?? `error: unknown agent ${agentId}`;
     },
   },

@@ -1,9 +1,11 @@
-/** Provider resolution for the reviewer harness: derive the provider,
- *  endpoint and model from a single API key. Pure module — imported by both
- *  the main process (ReviewerHost) and the renderer (config form), so the
- *  badge shown while typing always matches what the harness will use.
+/** Provider resolution for the reviewer harness. The manual provider pick
+ *  (provider-catalog.ts) drives resolution when one is set — "dropdown wins".
+ *  When no provider was chosen, fall back to key-prefix auto-detection from a
+ *  single API key. Pure module — imported by both the main process
+ *  (ReviewerHost) and the renderer (config form), so the badge shown while
+ *  typing always matches what the harness will use.
  *
- *  Key prefixes:
+ *  Key prefixes (fallback path only):
  *    sk-ant-*            → Anthropic (unambiguous)
  *    sk-proj-* and sk-svcacct-* → OpenAI (unambiguous)
  *    sk-*                → ambiguous (OpenAI vs DeepSeek vs compatible
@@ -12,6 +14,7 @@
  *    empty               → Ollama (local, keyless)
  *    anything else       → usable only with a custom baseUrl
  */
+import { getProvider, type ProviderCatalogEntry } from './provider-catalog.js';
 export type DetectedProvider = 'anthropic' | 'openai' | 'deepseek' | 'ollama';
 
 export interface ProviderResolution {
@@ -133,4 +136,80 @@ export function resolveProvider(key: string, opts: ResolveOpts = {}): ProviderRe
 function isOllamaNative(baseUrl: string): boolean {
   const u = baseUrl.toLowerCase();
   return u.includes('/api/chat') || (u.includes(':11434') && !u.includes('/v1'));
+}
+
+/** The reviewer config as the harness + form see it (a slim slice of
+ *  Settings['reviewer']). Both the main process and the renderer use this. */
+export interface ReviewerConfigInput {
+  apiKey?: string;
+  apiKeyEnv?: string;
+  /** The manual provider id (provider-catalog.ts) — wins when set. */
+  providerId?: string;
+  /** Legacy provider hint (ambiguous sk- keys); superseded by providerId. */
+  provider?: 'openai' | 'anthropic' | 'ollama' | 'deepseek';
+  model?: string;
+  baseUrl?: string;
+}
+
+/** A resolution plus the catalog entry that produced it (for the UI to know
+ *  whether a key is required, show a keyHint, etc.). */
+export interface ConfigResolution extends ProviderResolution {
+  /** The catalog entry when a manual provider was picked. */
+  entry?: ProviderCatalogEntry;
+  /** True when resolution came from the explicit provider pick. */
+  manual: boolean;
+  /** True when NOTHING is configured (no key, no pick, no endpoint, no
+   *  model) — the first-run signal: the harness must NOT silently target
+   *  the localhost ollama port; it asks the user to pick a provider. */
+  empty?: boolean;
+}
+
+/**
+ *  Resolve the effective provider/adapter/baseUrl/model for the reviewer.
+ *
+ *  Precedence ("dropdown wins, both run"):
+ *    1. A set providerId that resolves in the catalog — its adapter, baseUrl
+ *       and default model win; a cfg baseUrl/model still override the entry.
+ *    2. Otherwise fall back to key-prefix auto-detection (resolveProvider),
+ *       preserving legacy behavior.
+ */
+export function resolveReviewerConfig(cfg: ReviewerConfigInput = {}): ConfigResolution {
+  const entry = getProvider(cfg.providerId);
+  if (entry) {
+    const baseUrl = cfg.baseUrl?.trim() || entry.baseUrl || resolveProvider(cfg.apiKey ?? '', {}).baseUrl;
+    const model = cfg.model?.trim() || entry.defaultModel;
+    return {
+      adapter: entry.adapter,
+      model: model || DEFAULT_MODELS.openai,
+      baseUrl,
+      ambiguous: false,
+      entry,
+      manual: true,
+    };
+  }
+  // literally nothing configured (fresh install): falling through to the
+  // keyless ollama default would silently talk to localhost:11434 with a
+  // qwen2.5 the user never chose — flag it and let the harness ask instead
+  const nothingConfigured =
+    !cfg.apiKey?.trim() &&
+    !cfg.apiKeyEnv &&
+    !cfg.baseUrl &&
+    !cfg.model &&
+    !cfg.provider;
+  if (nothingConfigured) {
+    return {
+      adapter: 'ollama',
+      model: DEFAULT_MODELS.ollama,
+      baseUrl: 'http://localhost:11434',
+      ambiguous: false,
+      manual: false,
+      empty: true,
+    };
+  }
+  const res = resolveProvider(cfg.apiKey ?? '', {
+    baseUrl: cfg.baseUrl,
+    providerHint: cfg.provider,
+    modelHint: cfg.model,
+  });
+  return { ...res, manual: false };
 }

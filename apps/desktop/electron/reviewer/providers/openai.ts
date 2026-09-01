@@ -1,6 +1,7 @@
 import {
   joinBase,
-  ssePayloads,
+  normalizeOpenaiBase,
+  sseEvents,
   type CompleteOpts,
   type ProviderClient,
   type ProviderMsg,
@@ -23,7 +24,33 @@ function isOfficialHost(base: string): boolean {
   }
 }
 
-function toMessages(messages: ProviderMsg[]): unknown[] {
+/** Exact DeepSeek host — the only host that must receive prior
+ *  reasoning_content back. With the `tools` parameter present (always true
+ *  for the reviewer harness) DeepSeek's thinking mode REQUIRES the
+ *  reasoning_content of every previous turn in subsequent requests
+ *  ("If your code does not correctly pass back reasoning_content, the API
+ *  will return a 400 error"). OpenAI's reasoning models REJECT reasoning
+ *  as input, so this stays an exact hostname gate. */
+function isDeepseekHost(base: string): boolean {
+  try {
+    return new URL(base).hostname === 'api.deepseek.com';
+  } catch {
+    return false;
+  }
+}
+
+function toMessages(messages: ProviderMsg[], baseUrl: string): unknown[] {
+  // Prior reasoning is replayed only where the server understands it:
+  //  - official deepseek REQUIRES it back (400 without it),
+  //  - any server that EMITTED thinking previously (a loading
+  //    qwen/kimi-style reasoning model on llama.cpp, LM Studio, vLLM…)
+  //    continues its chain-of-thought instead of restarting — our Qwen3.6
+  //    boot relies on this,
+  //  - the official OpenAI host REJECTS reasoning as input (400) — never
+  //    send it there.
+  const official = isOfficialHost(baseUrl);
+  const anyPriorThinking = messages.some((m) => m.role === 'assistant' && (m.thinking?.length ?? 0) > 0);
+  const replayThinking = isDeepseekHost(baseUrl) || (!official && anyPriorThinking);
   const out = messages.map((m) => {
     switch (m.role) {
       case 'system':
@@ -40,6 +67,12 @@ function toMessages(messages: ProviderMsg[]): unknown[] {
             type: 'function',
             function: { name: c.name, arguments: JSON.stringify(c.args) },
           }));
+        }
+        // prior reasoning is only understood on the official deepseek
+        // endpoint — never on openai.com (reasoning input is a 400) nor on
+        // gateways that never emitted thinking (unknown fields risk a 400)
+        if (m.thinking && m.thinking.length > 0 && replayThinking) {
+          msg.reasoning_content = m.thinking;
         }
         return msg;
       }
@@ -74,35 +107,58 @@ export class OpenAIProvider implements ProviderClient {
   readonly name = 'openai' as const;
 
   async complete(opts: CompleteOpts): Promise<ProviderResult> {
-    const url = joinBase(opts.baseUrl || DEFAULT_BASE, '/chat/completions');
-    const base = opts.baseUrl || DEFAULT_BASE;
-    // usage is only returned on the final stream chunk when asked for — and
-    // only official endpoints accept the field (custom proxies can 400), so
-    // it is gated on the exact hostname
-    const official = isOfficialHost(base);
-    const res = await fetch(url, {
-      method: 'POST',
-      signal: opts.signal,
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${opts.apiKey}`,
-      },
-      body: JSON.stringify({
+    const base = normalizeOpenaiBase(opts.baseUrl || DEFAULT_BASE);
+    const url = joinBase(base, '/chat/completions');
+    // usage (and the token accounting it feeds) needs stream_options on
+    // every endpoint — local servers (llama.cpp, vLLM, LM Studio) support it
+    // too. A strict gateway that rejects the field 400s; retry once without.
+    const bodyFor = (includeUsage: boolean): string =>
+      JSON.stringify({
         model: opts.model,
         stream: true,
-        max_tokens: 4096,
-        messages: toMessages(opts.messages),
+        max_tokens: opts.knobs?.maxOutputTokens ?? 4096,
+        messages: toMessages(opts.messages, base),
         tools: toTools(opts.tools),
-        ...(official ? { stream_options: { include_usage: true } } : {}),
+        ...(includeUsage ? { stream_options: { include_usage: true } } : {}),
         ...(opts.reasoningEffort !== undefined ? { reasoning_effort: opts.reasoningEffort } : {}),
-      }),
-    });
-    if (!res.ok || !res.body) {
+        // standard chat/completions sampler fields — safe on every
+        // OpenAI-compatible endpoint, so no hostname gate (unlike
+        // reasoning_effort/stream_options). Top_k/min_p/repeat_penalty/
+        // keep_alive/think are NOT chat.completions fields and are never
+        // sent here.
+        ...(opts.knobs?.temperature !== undefined ? { temperature: opts.knobs.temperature } : {}),
+        ...(opts.knobs?.topP !== undefined ? { top_p: opts.knobs.topP } : {}),
+        ...(opts.knobs?.seed !== undefined ? { seed: opts.knobs.seed } : {}),
+        ...(opts.knobs?.presencePenalty !== undefined ? { presence_penalty: opts.knobs.presencePenalty } : {}),
+        ...(opts.knobs?.frequencyPenalty !== undefined ? { frequency_penalty: opts.knobs.frequencyPenalty } : {}),
+      });
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    // keyless local servers (llama.cpp etc.) get no Authorization header at
+    // all — an empty "Bearer " is one 401 away on strict local gateways
+    if (opts.apiKey.length > 0) headers.authorization = `Bearer ${opts.apiKey}`;
+    let res = await fetch(url, { method: 'POST', signal: opts.signal, headers, body: bodyFor(true) });
+    if (!res.ok && !res.body) {
       throw new Error(`openai API error ${res.status}: ${(await res.text()).slice(0, 300)}`);
     }
+    if (!res.ok) {
+      const text = (await res.text()).slice(0, 300);
+      // a server that rejects stream_options outright (older LocalAI /
+      // htmx-style gateways) gets one retry without it
+      if (res.status === 400 && /stream_options|include_usage/i.test(text)) {
+        res = await fetch(url, { method: 'POST', signal: opts.signal, headers, body: bodyFor(false) });
+        if (!res.ok || !res.body) {
+          throw new Error(`openai API error ${res.status}: ${(await res.text()).slice(0, 300)}`);
+        }
+      } else {
+        throw new Error(`openai API error ${res.status}: ${text}`);
+      }
+    }
+    if (!res.body) throw new Error(`openai API error ${res.status}: empty body`);
 
     let text = '';
     let thinking = '';
+    let finishReason: string | undefined;
+    let sawDone = false;
     let usage: ProviderUsage | undefined;
     const calls = new Map<number, { id: string; name: string; args: string; lastFrag: string }>();
     const ensure = (i: number): { id: string; name: string; args: string; lastFrag: string } => {
@@ -111,7 +167,13 @@ export class OpenAIProvider implements ProviderClient {
       return cur;
     };
 
-    for await (const payload of ssePayloads(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
+    for await (const ev of sseEvents(res.body as ReadableStream<Uint8Array<ArrayBufferLike>>)) {
+      if (ev.done) {
+        sawDone = true;
+        break;
+      }
+      const payload = ev.payload as Record<string, unknown> | undefined;
+      if (payload === undefined) continue;
       // some gateways report failures as HTTP 200 with an error payload —
       // surface it instead of silently replying with an empty turn
       const errField = (payload as { error?: { message?: string } }).error;
@@ -120,8 +182,10 @@ export class OpenAIProvider implements ProviderClient {
         choices?: Array<{
           delta?: { content?: string; reasoning_content?: string; reasoning?: string; thinking?: string; thinking_content?: string; tool_calls?: unknown[] };
           message?: { reasoning_content?: string };
+          finish_reason?: string | null;
         }>;
       }).choices?.[0];
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
       // some providers send the reasoning only on the final chunk, inside
       // choice.message with no delta at all — check before the delta guard
       const msgReason = choice?.message?.reasoning_content;
@@ -181,12 +245,18 @@ export class OpenAIProvider implements ProviderClient {
       }
     }
 
+    // a stream that ends without the final completion chunk ([DONE] or a
+    // finish_reason) was cut off — a crashed local server must never look
+    // like a completed turn
+    if (finishReason === undefined && !sawDone) {
+      throw new Error('openai stream ended prematurely — connection closed before the final chunk');
+    }
     const toolCalls: ReviewerToolCall[] = [...calls.values()]
       .filter((c) => c.name.length > 0)
       // index-disambiguated fallback ids: two same-name calls without
       // provider ids must never share a tool_call_id
       .map((c, i) => ({ id: c.id || `tc-${c.name}-${i}`, name: c.name, args: parseArgs(c.args, c.lastFrag) }));
-    return { text, toolCalls, thinking, usage };
+    return { text, toolCalls, thinking, usage, finishReason: finishReason ?? 'stop' };
   }
 }
 

@@ -1,6 +1,6 @@
 # Fraktole
 
-> **A Linux-native tiling command center for orchestrating autonomous AI coding agents, Allowing UI easiness for Loops , with a set of premaid loops (Auto compose).**
+> **A Linux-native tiling command center for orchestrating autonomous AI coding agents — real PTY tiles, a supervising Reviewer model, and one-click premade loops (Auto Compose).**
 
 Fraktole pairs terminal multiplexing with a supervising **Reviewer model** that has the role of an autonomous general: it dispatches substantive work to an agent workforce running in live PTY tiles, verifies code and runtime state itself, and manages goals through to completion.
 
@@ -26,8 +26,8 @@ The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter A
 
 - **Tiling Matrix**: Split-pane workspace of real PTY terminals with drag dividers, keyboard focus cycle, swap, and instant zoom.
 - **Delegation Doctrine**: The Reviewer model is pushed to review and orchestrate, rather than edits blindly. It should be able to inspect files, search the codebase, monitor terminal output, and delegates implementation to worker agents.
-- **Autonomous Auto Compose**: Dedicated autonomous loops (*Bugs*, *Feature*, *Cyber*, *Frontend*, *Tests*, *Readability*, *Custom*) that operate inside  project forks.
-- **Goal Watchdog & Sub-Goals**: Break large initiatives into tracked sub-goals with self-healing watchdog loops and automated progression upon reaching `GOAL-MET:`.
+- **Autonomous Auto Compose**: Dedicated autonomous loops (*Bugs*, *Feature*, *Cyber*, *Frontend*, *Tests*, *Readability*, *Custom*) that operate inside project forks.
+- **Goal Loop Carrier & Sub-Goals**: Break large initiatives into tracked sub-goals with self-healing loop carrier re-checks and automated progression upon reaching `GOAL-MET:`.
 - **Integrated Browser Testing**: Embedded webview Test tab that the AI can navigate, capture console errors from, screenshot, and verify after fixes.
 - **Mobile Remote Companion**: Flutter Android client connecting over end-to-end local TLS/WSS to monitor agents, stream tiles, and review tasks on the go.
 
@@ -42,12 +42,16 @@ The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter A
 - **Session Bundles**: Export and import complete session arrangements, histories, and reviewer states.
 
 ### 2. The Reviewer Supervising Harness
-The built-in Reviewer is an autonomous control loop that is designed to  support **OpenAI-compatible endpoints**, **Anthropic** (Claude 3.5/3.7 with extended thinking), **Ollama** (DeepSeek-R1, Qwen2.5-Coder, Llama), **DeepSeek**, and **Moonshot/Kimi**.
+The built-in Reviewer is an autonomous control loop supporting **OpenAI-compatible endpoints**, **Anthropic** (Claude 3.5/3.7 with extended thinking), **Ollama** (DeepSeek-R1, Qwen2.5-Coder, Llama), **llama.cpp** (`llama-server`, keyless, auth-optional), **DeepSeek**, and **Moonshot/Kimi**.
 
 - **Resilient Execution**: Failed tool calls do not abort the turn; the model reads the error and adjusts. Stalled streams (120s timeout) auto-retry.
 - **Token-Aware Compaction**: Compaction preserves system prompts, durable task ledgers, and the latest turns while safely trimming older context to ~80% of model limits.
 - **Prompt Preemption**: Send prompts while the model is actively working; prompts queue and execute cleanly at turn boundaries.
 - **Live Metrics**: Real-time tracking of input tokens, cache-hit tokens, output tokens, and compaction cycles in the footer.
+- **Local Provider Hardening**: Local servers are probed for their real context window and the resolved budget (probed ≤ knob ≤ fallback) is shown live next to the status. The harness waits for server readiness before the first request, auto-heals context-limit errors by compacting and retrying, and detects truncated `finish_reason` responses to re-request cleanly. A stall guard stands the loop down after repeated ledger-less re-checks.
+- **Model-Tuning Knobs**: Per-provider context window, output cap, and sampler overrides (temperature, top_p, top_k) for local servers.
+- **Provider Catalog**: Searchable catalog of OpenAI-compatible endpoints — keyless local servers included — with config validation.
+- **Thinking Replay**: Reasoning traces replay across providers on continuation turns; the system prompt persists across restarts.
 
 ### 3. Auto Compose (Autonomous Loops in Safe Forks)
 Auto Compose runs structured, autonomous development loops. Each run launches inside an **isolated project fork** (`.fraktole-auto/`), leaving the master repository untouched:
@@ -87,9 +91,9 @@ The Reviewer has access to a comprehensive suite of inspection, driving, delegat
 | | `read_test_page` | Inspect page title, loading state, console logs, and JavaScript errors. |
 | | `reload_test_page`| Reload the active test page to verify hot-reload and bug fixes. |
 | | `screenshot_test_page` | Capture a PNG screenshot of the webview for user verification. |
-| **Ledger & Goals** | `read_state` | Read durable watchdog goals and the task assignment ledger. |
+| **Ledger & Goals** | `read_state` | Read durable loop carrier goals and the task assignment ledger. |
 | | `update_task` | Upsert task ledger status (`pending`, `active`, `done`, `failed`). |
-| | `set_goal` | Arm, modify, or subdivide top-level watchdog goals into actionable sub-goals. |
+| | `set_goal` | Arm, modify, or subdivide top-level loop carrier goals into actionable sub-goals. |
 | | `ask_user` | Suspend execution and present interactive prompt/confirmation cards to the user. |
 
 ---
@@ -109,7 +113,7 @@ Fraktole organizes workflow into 4 synchronized views:
 ### Reviewer Prompt Commands
 
 Enter these commands directly in the Reviewer input box:
-- `/goal <text>` — Arm or update the watchdog goal (bare `/goal` clears it).
+- `/goal <text>` — Arm or update the loop carrier goal (bare `/goal` clears it).
 - `/compact` — Trigger an immediate context compaction.
 - `/summarize` — Generate a session recap and compact older turns.
 - `/kill <id>` — Terminate running agent tile `<id>`.
@@ -120,11 +124,26 @@ Enter these commands directly in the Reviewer input box:
 
 The companion Android application connects securely to your desktop workstation over local Wi-Fi:
 
-1. Open the **Remote** tab in Fraktole (`Alt+4`).
+1. Open the **Remote** tab in Fraktole.
 2. Launch **Fraktole Remote** on Android and enter the 6-character pairing code.
 3. The desktop generates a local self-signed TLS certificate and authenticates the client via an exchange token.
-4. Tokens are stored  in Android Keystore / Flutter Secure Storage for instant reconnection.
+4. Tokens are stored in Android Keystore / Flutter Secure Storage for instant reconnection.
 5. Monitor live tile outputs, view goal progression, and send commands from your phone.
+
+---
+
+## Download
+
+Prebuilt **AppImage** (x86_64, Linux) binaries are published automatically to [GitHub Releases](https://github.com/Zauberman/Fraktole/releases) whenever a version tag (`v*`) is pushed. Download the latest `Fraktole-*.AppImage`, make it executable, and run it — no installation required:
+
+```bash
+chmod +x Fraktole-*.AppImage
+./Fraktole-*.AppImage
+```
+
+> The AppImage requires [FUSE](https://github.com/AppImage/AppImageKit/wiki/FUSE) (`libfuse2`) on the host system.
+
+To build the AppImage yourself, see [Build Portable AppImage](#build-portable-appimage) below.
 
 ---
 
@@ -138,7 +157,7 @@ The companion Android application connects securely to your desktop workstation 
 ### Build Self-Contained Installer
 ```bash
 # Clone repository
-git clone https://github.com/Nusoidal/Fraktole.git
+git clone https://github.com/Zauberman/Fraktole.git
 cd Fraktole
 
 # Install dependencies
@@ -203,7 +222,6 @@ Fraktole/
 │   └── mobile/                   # Flutter Android remote client
 │       ├── lib/                  # Screens, transport gateway, tile buffer, protocol models
 │       └── integration_test/     # On-device pairing and control integration tests
-├── docs/                         # Protocol specs and interface screenshots
 └── package.json                  # Root monorepo workspace manifest
 ```
 

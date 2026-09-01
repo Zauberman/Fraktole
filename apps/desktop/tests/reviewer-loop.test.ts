@@ -10,9 +10,10 @@ import { TileRecorder } from '../electron/tile-recorder.js';
 import type { ProviderClient, ProviderMsg } from '../electron/reviewer/providers.js';
 
 type ScriptEntry =
-  | { text: string; toolCalls: ProviderMsg['toolCalls']; thinking?: string; usage?: { inputTokens: number; cachedTokens: number; outputTokens: number }; delay?: number }
+  | { text: string; toolCalls: ProviderMsg['toolCalls']; thinking?: string; usage?: { inputTokens: number; cachedTokens: number; outputTokens: number }; finishReason?: string; delay?: number }
   | { hang: boolean }
-  | { fail: boolean };
+  | { fail: boolean }
+  | { failWith: string };
 
 class FakeProvider implements ProviderClient {
   readonly name = 'openai' as const;
@@ -28,10 +29,14 @@ class FakeProvider implements ProviderClient {
       if (entry && 'fail' in entry) {
         return Promise.reject(new Error('provider boom'));
       }
+      if (entry && 'failWith' in entry) {
+        return Promise.reject(new Error(entry.failWith));
+      }
       const body = {
         text: entry.text,
         toolCalls: entry.toolCalls ?? [],
         thinking: entry.thinking ?? '',
+        finishReason: entry.finishReason ?? 'stop',
         ...(entry.usage ? { usage: entry.usage } : {}),
       };
       return entry.delay
@@ -58,6 +63,7 @@ function ctxFor(recorder: TileRecorder, opts: Partial<ReviewerToolContext> = {})
     },
     tileOfAgent: (agentId: string) => (agentId === 'agent-1' ? 'tile-1' : null),
     agentOfTile: (tileId: string) => (tileId === 'tile-1' ? 'agent-1' : null),
+    isHarnessTile: (tileId: string) => tileId === 'tile-1',
     cwdOfAgent: () => '/tmp/proj/agent-1',
     killAgent: vi.fn(async () => 'killed tile-1') as never,
     spawnAgent: vi.fn(async (kind: string, cwd: string) => `spawned agent a-9 (kind ${kind}, cwd ${cwd || 'root'})`) as never,
@@ -68,7 +74,7 @@ function ctxFor(recorder: TileRecorder, opts: Partial<ReviewerToolContext> = {})
 }
 
 let hostSeq = 0;
-function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; contextBudgetTokens: number; stallTimeoutMs: number; askTimeoutMs: number; cwd: string; forkProject: (variant: string, keepExisting: boolean) => Promise<{ ok: true; path: string } | { ok: false; error: string }> }> = {}) {
+function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; loadingRetryMs: number; contextBudgetTokens: number; stallTimeoutMs: number; askTimeoutMs: number; cwd: string; probe: () => Promise<unknown>; forkProject: (variant: string, keepExisting: boolean) => Promise<{ ok: true; path: string } | { ok: false; error: string }> }> = {}) {
   const dir = extra.dir ?? join(tmpdir(), `fraktole-reviewer-host-${process.pid}-${++hostSeq}`);
   const provider = new FakeProvider(script);
   const events: string[] = [];
@@ -83,9 +89,11 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
     createProvider: () => provider,
     forkProject: extra.forkProject,
     retryDelayMs: extra.retryDelayMs ?? 1,
+    loadingRetryMs: extra.loadingRetryMs,
     stallTimeoutMs: extra.stallTimeoutMs,
     contextBudgetTokens: extra.contextBudgetTokens,
     askTimeoutMs: extra.askTimeoutMs,
+    probe: extra.probe as never,
     conversationFile: extra.dir ? join(extra.dir, 'conversation.jsonl') : uniqueConversationFile(),
     emit: {
       status: (s, e) => {
@@ -102,6 +110,7 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
       },
       usage: (ev) => events.push(`usage:${ev.inputTokens}:${ev.cachedTokens}:${ev.outputTokens}`),
       recap: (recap) => events.push(`recap:${recap.text}`),
+      budget: (info) => events.push(`budget:${info.contextTokens}`),
     },
   });
   return { host, provider, events, asks };
@@ -128,6 +137,26 @@ describe('ReviewerHost', () => {
     const call = provider.complete.mock.calls[0]![0] as { model: string; baseUrl: string; apiKey: string };
     expect(call.model).toBe('qwen2.5');
     expect(call.baseUrl).toBe('http://localhost:11434');
+  });
+
+  it('starts keyless for a local-server pick with auth optional (llama.cpp)', async () => {
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: { providerId: 'llamacpp', model: 'local-model' },
+    });
+    expect(await host.start()).toBe(true);
+    expect(host.status).toBe('running');
+    await host.prompt('hi');
+    await settle(60);
+  });
+
+  it('still refuses to start keyless when the picked provider demands a key', async () => {
+    const recorder = new TileRecorder();
+    const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: { providerId: 'openai', model: 'gpt-4o' },
+    });
+    expect(await host.start()).toBe(false);
+    expect(host.status).toBe('unconfigured');
   });
 
   it('resolves provider, endpoint and model from a pasted key', async () => {
@@ -364,6 +393,47 @@ describe('ReviewerHost', () => {
     expect(users).toContain('third');
   });
 
+  it('flows the model knobs into every provider complete call', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: {
+        provider: 'ollama',
+        model: 'm',
+        knobs: { contextTokens: 16384, maxOutputTokens: 2048, temperature: 0.2, think: true },
+      },
+    });
+    await host.start();
+    await host.prompt('hi');
+    await settle(60);
+    const call = provider.complete.mock.calls[0]![0] as { knobs?: unknown };
+    expect(call.knobs).toEqual({ contextTokens: 16384, maxOutputTokens: 2048, temperature: 0.2, think: true });
+  });
+
+  it('knobs.contextTokens drives the compaction budget (config wins over the model guess)', async () => {
+    const recorder = recorderWith('x'.repeat(3000));
+    const script: ScriptEntry[] = [];
+    for (let i = 0; i < 6; i++) {
+      script.push({ text: '', toolCalls: [{ id: `c${i}`, name: 'read_tile', args: { agentId: 'agent-1', tail: 2000 } }] });
+    }
+    script.push({ text: 'done', toolCalls: [] });
+    script.push({ text: 'again', toolCalls: [] });
+    script.push({ text: 'third', toolCalls: [] });
+    const { host } = makeHost(script, recorder, {
+      config: { provider: 'ollama', model: 'm', knobs: { contextTokens: 500 } },
+    });
+    await host.start();
+    await host.prompt('dig');
+    await settle(400);
+    await host.prompt('again');
+    await settle(60);
+    await host.prompt('third');
+    await settle(60);
+    const conv = host.conversation;
+    expect(conv.some((e) => e.content.includes('context compacted'))).toBe(true);
+    const users = conv.filter((e) => e.role === 'user').map((e) => e.content);
+    expect(users).toContain('third');
+  });
+
   it('setGoal persists the ledger; read_state and update_task work through the real tools', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fraktole-reviewer-'));
     const recorder = new TileRecorder();
@@ -398,7 +468,7 @@ describe('ReviewerHost', () => {
     expect(state.tasks.some((t) => t.title === 'verify the build' && t.status === 'done' && t.id.startsWith('t-'))).toBe(true);
   });
 
-  it('the watchdog poll is silent without a goal', async () => {
+  it('the loop carrier poll is silent without a goal', async () => {
     const recorder = recorderWith('boot\nlog');
     const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder);
     await host.start();
@@ -408,7 +478,7 @@ describe('ReviewerHost', () => {
     expect(provider.complete).not.toHaveBeenCalled();
   });
 
-  it('with a goal, the watchdog wakes on tile activity but stays quiet without it', async () => {
+  it('with a goal, the loop carrier wakes on tile activity but stays quiet without it', async () => {
     const recorder = new TileRecorder();
     recorder.record('tile-1', 'boot');
     const script: ScriptEntry[] = [
@@ -424,11 +494,11 @@ describe('ReviewerHost', () => {
     expect(provider.complete).toHaveBeenCalledTimes(2); // the [goal armed] tool loop
     expect(host.conversation.some((e) => e.content.includes('[goal: watch the build (active)]'))).toBe(true);
 
-    recorder.record('tile-1', 'boot\nnew output');
+    recorder.record('tile-1', 'boot\r\nnew output');
     host.pollNow();
     await settle(100);
     expect(provider.complete).toHaveBeenCalledTimes(3); // activity delta woke the model
-    expect(host.conversation.some((e) => e.content.includes('[watchdog] re-check progress'))).toBe(true);
+    expect(host.conversation.some((e) => e.content.includes('[loop carrier] re-check progress'))).toBe(true);
 
     const beforeIdle = provider.complete.mock.calls.length;
     for (let i = 0; i < 5; i++) host.pollNow();
@@ -440,7 +510,7 @@ describe('ReviewerHost', () => {
     expect(provider.complete).toHaveBeenCalledTimes(beforeIdle + 1);
   });
 
-  it('a GOAL-MET declaration marks the goal met and silences the watchdog', async () => {
+  it('a GOAL-MET declaration marks the goal met and silences the loop carrier', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fraktole-reviewer-'));
     const recorder = new TileRecorder();
     const { host, provider, events } = makeHost([{ text: 'GOAL-MET: the widget is built, all green', toolCalls: [] }], recorder, { dir });
@@ -455,7 +525,7 @@ describe('ReviewerHost', () => {
     host.pollNow();
     await settle(60);
     expect(provider.complete).toHaveBeenCalledTimes(calls); // met goal: poll stays silent
-    expect(host.conversation.some((e) => e.content.includes('[watchdog]'))).toBe(false);
+    expect(host.conversation.some((e) => e.content.includes('[loop carrier]'))).toBe(false);
   });
 
   it('re-arming a met goal wakes the loop again', async () => {
@@ -466,9 +536,9 @@ describe('ReviewerHost', () => {
     );
     await host.start();
     await host.setGoal('first goal');
-    await settle(100);
+    await settle(500);
     await host.setGoal('second goal');
-    await settle(100);
+    await settle(500);
     expect(provider.complete).toHaveBeenCalledTimes(2);
     expect(host.conversation.some((e) => e.content.includes('second goal engaged'))).toBe(true);
   });
@@ -603,6 +673,29 @@ describe('ReviewerHost', () => {
     expect(host.status).toBe('running');
   });
 
+  it('kill_agent refuses to kill the orchestrator', async () => {
+    const recorder = new TileRecorder();
+    const ctx = ctxFor(recorder);
+    const provider = new FakeProvider([
+      { text: '', toolCalls: [{ id: 'c1', name: 'kill_agent', args: { agentId: 'orchestrator' } }] },
+      { text: 'cannot kill the orchestrator', toolCalls: [] },
+    ]);
+    const host = new ReviewerHost({
+      getConfig: async (): Promise<ReviewerConfig> => ({ provider: 'ollama', model: 'm' }),
+      sessionId: 's1',
+      sessionDir: '/tmp/sessions/s1',
+      cwd: '/tmp/proj',
+      recorder,
+      toolContext: ctx,
+      createProvider: () => provider,
+      emit: { status: () => undefined, stream: () => undefined, toolCall: () => undefined, message: () => undefined, goal: () => undefined, question: () => undefined, usage: () => undefined },
+    });
+    await host.start();
+    await host.prompt('kill');
+    await settle(80);
+    expect(ctx.killAgent).not.toHaveBeenCalled();
+  });
+
   it('a tool error mid-turn does not stop the reviewer (no final reply is lost)', async () => {
     const recorder = new TileRecorder();
     const ctx = ctxFor(recorder);
@@ -697,7 +790,7 @@ describe('ReviewerHost', () => {
     await host.start();
     await host.prompt('spin one up');
     await settle(100);
-    expect(ctx.spawnAgent).toHaveBeenCalledWith('opencode', '');
+    expect(ctx.spawnAgent).toHaveBeenCalledWith('opencode', '', { userPicked: false });
     expect(host.conversation.some((e) => e.content.includes('spawned agent a-9'))).toBe(true);
     const state = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')) as ReviewerState;
     expect(state.lastAgentKind).toBe('opencode');
@@ -735,7 +828,7 @@ describe('ReviewerHost', () => {
     await host.start();
     await host.prompt('spin one up');
     await settle(100);
-    expect(ctx.spawnAgent).toHaveBeenCalledWith('opencode', '');
+    expect(ctx.spawnAgent).toHaveBeenCalledWith('opencode', '', { userPicked: true });
     expect(host.conversation.some((e) => e.content.includes('spawned agent a-9'))).toBe(true);
     const state = JSON.parse(await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')) as ReviewerState;
     expect(state.lastAgentKind).toBe('opencode');
@@ -1338,7 +1431,7 @@ describe('ReviewerHost', () => {
     await host.prompt('third');
     await settle(80);
     expect(host.status).toBe('running');
-    // goal turn + 2 prompts + the automatic watchdog wake
+    // goal turn + 2 prompts + the automatic loop carrier wake
     expect(provider.complete.mock.calls.length).toBeGreaterThanOrEqual(4);
     const last = provider.complete.mock.calls[provider.complete.mock.calls.length - 1]![0] as { messages: ProviderMsg[] };
     expect(last.messages.some((m) => (m.content ?? '').includes('context was compacted'))).toBe(true);
@@ -1469,7 +1562,7 @@ describe('ReviewerHost', () => {
     expect(raw).toContain('after repair');
   });
 
-  it('watchdog revives the harness after an error when a goal is armed', async () => {
+  it('loop carrier revives the harness after an error when a goal is armed', async () => {
     const recorder = new TileRecorder();
     // first an armed-goal turn succeeds, then two failures exhaust the retry
     const { host, provider } = makeHost([{ text: 'armed ok', toolCalls: [] }, { fail: true }, { fail: true }, { text: 'healed', toolCalls: [] }], recorder, { retryDelayMs: 1 });
@@ -1480,13 +1573,13 @@ describe('ReviewerHost', () => {
     await settle(80);
     expect(host.status).toBe('error');
     const callsBefore = provider.complete.mock.calls.length;
-    // the next watchdog tick revives the harness and wakes the loop — no
+    // the next loop carrier tick revives the harness and wakes the loop — no
     // user prompt involved
     host.pollNow();
     await settle(120);
     expect(host.status).toBe('running');
     expect(provider.complete.mock.calls.length).toBeGreaterThan(callsBefore);
-    expect(host.conversation.some((e) => (e.content ?? '').includes('[watchdog] re-check progress'))).toBe(true);
+    expect(host.conversation.some((e) => (e.content ?? '').includes('[loop carrier] re-check progress'))).toBe(true);
   });
 
   it('a stalled provider stream is aborted and retried, then surfaces as error', async () => {
@@ -1592,6 +1685,67 @@ describe('ReviewerHost', () => {
     await host.setVariant(null);
     await settle(30);
     expect(host.conversation[0]?.content).not.toContain('AUTONOMOUS MODE');
+  });
+
+  it('persists the system prompt as line one and restores it verbatim on reload', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-syspersist-${process.pid}-${++hostSeq}`);
+    const { mkdir, readFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const recorder = new TileRecorder();
+    const { host } = makeHost(
+      [{ text: 'ok', toolCalls: [] }, { text: 'ok', toolCalls: [] }],
+      recorder,
+      {
+        dir,
+        config: {
+          provider: 'ollama',
+          model: 'm',
+          customAutonomy: { name: 'My Loop', prompt: 'AUTONOMOUS MODE: MY LOOP\n- my directive line' },
+        },
+      },
+    );
+    await host.start();
+    await host.setVariant('custom');
+    await host.prompt('hi');
+    await settle(60);
+    const lines = (await readFile(join(dir, 'conversation.jsonl'), 'utf8'))
+      .split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
+    expect(lines[0]!.role).toBe('system');
+    expect(lines[0]!.content).toContain('AUTONOMOUS MODE: MY LOOP');
+    // a second host reloading the same session restores the SAME doctrine
+    // verbatim — even though its config no longer carries the saved custom
+    // prompt, so identity to the persisted line is the only way it can
+    // contain MY LOOP (a rebuild would produce the CUSTOM placeholder)
+    const { host: host2 } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir });
+    await host2.start();
+    const mem = host2 as unknown as { messages: Array<{ role: string; content: string }> };
+    expect(mem.messages[0]!.role).toBe('system');
+    expect(mem.messages[0]!.content).toBe(lines[0]!.content);
+    expect(mem.messages[0]!.content).toContain('my directive line');
+  });
+
+  it('setVariant rewrites the persisted system line so reloads see the new doctrine', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-variantpersist-${process.pid}-${++hostSeq}`);
+    const { mkdir, readFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    const recorder = new TileRecorder();
+    const { host } = makeHost(
+      [{ text: 'ok', toolCalls: [] }, { text: 'ok', toolCalls: [] }],
+      recorder,
+      { dir },
+    );
+    await host.start();
+    await host.setVariant('feature');
+    await settle(30);
+    const lines = (await readFile(join(dir, 'conversation.jsonl'), 'utf8'))
+      .split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
+    expect(lines[0]!.role).toBe('system');
+    expect(lines[0]!.content).toContain('AUTONOMOUS MODE: FEATURES');
+    // the swapped doctrine survives a restart without calling setVariant
+    const { host: host2 } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, { dir });
+    await host2.start();
+    const mem = host2 as unknown as { messages: Array<{ role: string; content: string }> };
+    expect(mem.messages[0]!.content).toContain('AUTONOMOUS MODE: FEATURES');
   });
 
   it('custom variant uses the saved directive and arms a name-derived mission', async () => {
@@ -1857,17 +2011,19 @@ describe('ReviewerHost', () => {
       await settle(40);
       host.summarizeSession();
       await settle(80);
-      // the conversation file is memory + the big-compact summary turn only.
-      // The system prompt is memory-only (never persisted), so the on-disk
-      // file holds exactly the summary turn — all prior history wiped.
+      // the conversation file is the system prompt + the big-compact summary
+      // turn only. The system prompt is persisted (it is part of the
+      // transcript) and restored verbatim on reload — the on-disk file holds
+      // exactly [system, summary], all prior history wiped.
       const lines = (await readFile(join(dir, 'conversation.jsonl'), 'utf8'))
         .split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
-      expect(lines.length).toBe(1); // just the big-compact summary
-      expect(lines[0]!.role).toBe('user');
-      expect(lines[0]!.content).toContain('[big compact]');
-      expect(lines[0]!.content).toContain('RECAP: everything is now one summary');
+      expect(lines.length).toBe(2); // system line + big-compact summary
+      expect(lines[0]!.role).toBe('system');
+      expect(lines[1]!.role).toBe('user');
+      expect(lines[1]!.content).toContain('[big compact]');
+      expect(lines[1]!.content).toContain('RECAP: everything is now one summary');
       // the summary turn still carries the goal/ledger state block
-      expect(lines[0]!.content).toContain('[goal');
+      expect(lines[1]!.content).toContain('[goal');
       // and the in-memory conversation still holds the system prompt first
       const mem = host as unknown as { messages: Array<{ role: string; content: string }> };
       expect(mem.messages[0]!.role).toBe('system');
@@ -1883,7 +2039,7 @@ describe('ReviewerHost', () => {
       expect(host.summarizeSession().ok).toBe(false);
     });
 
-    it('stop is a full stop: status stopped, queue cleared, watchdog cannot revive', async () => {
+    it('stop is a full stop: status stopped, queue cleared, loop carrier cannot revive', async () => {
       const recorder = new TileRecorder();
       const { host } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {});
       await host.start();
@@ -1894,7 +2050,7 @@ describe('ReviewerHost', () => {
       host.pollNow();
       await settle(40);
       expect(host.status).toBe('stopped');
-      expect(host.conversation.some((e) => (e.content ?? '').includes('[watchdog]'))).toBe(false);
+      expect(host.conversation.some((e) => (e.content ?? '').includes('[loop carrier]'))).toBe(false);
     });
   });
 
@@ -1989,5 +2145,190 @@ describe('ReviewerHost', () => {
       expect(before.some((e) => e.toolCallId === 'c1')).toBe(true);
       expect(before.some((e) => e.toolCallId === 'c2')).toBe(true);
     });
+  });
+});
+
+describe('ReviewerHost — local-provider hardening (context, truncation, readiness, stall guard)', () => {
+  const llamacppConfig: ReviewerConfig = { providerId: 'llamacpp', model: 'local-model', baseUrl: 'http://localhost:8080/v1' };
+  const okProbe = (contextTokens = 16_384): (() => Promise<unknown>) =>
+    vi.fn(async () => ({ contextTokens, state: 'ok', kind: 'llamacpp' })) as never;
+
+  it('a fresh-first-run (nothing configured) asks to pick a provider instead of silently targeting ollama', async () => {
+    const recorder = new TileRecorder();
+    const { host, events } = makeHost([], recorder, { config: {} });
+    expect(await host.start()).toBe(false);
+    expect(host.status).toBe('unconfigured');
+    expect(events.some((e) => e.startsWith('status-error:') && e.includes('pick a provider'))).toBe(true);
+  });
+
+  it('resolved budget honors the probed server window (knob capped by probe)', async () => {
+    const recorder = new TileRecorder();
+    const { host, events, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: { ...llamacppConfig, knobs: { contextTokens: 4096 } },
+      probe: okProbe(2048),
+    });
+    await host.start();
+    await host.prompt('x');
+    await settle(60);
+    expect(events).toContain('budget:2048');
+    expect(provider.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('a context-overflow 400 compacts the conversation and retries (never dies)', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider, events } = makeHost(
+      [
+        { failWith: 'openai API error 400: input exceeds the available context window (n_ctx 1000)' },
+        { text: 'recovered', toolCalls: [] },
+      ],
+      recorder,
+      { config: llamacppConfig, probe: okProbe() },
+    );
+    await host.start();
+    await host.prompt('big turn');
+    await settle(120);
+    expect(host.status).toBe('running');
+    expect(provider.complete).toHaveBeenCalledTimes(2);
+    // the compaction dropped everything but the newest turn — and the
+    // conversation still contains the model's recovery reply
+    expect(host.conversation.some((e) => e.content.includes('recovered'))).toBe(true);
+    expect(events.some((e) => e.startsWith('status-error:'))).toBe(false);
+  });
+
+  it('max_tokens is clipped to the remaining window (prompt + output can never overrun the server context)', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: { ...llamacppConfig, knobs: { contextTokens: 1000, maxOutputTokens: 4096 } },
+      probe: okProbe(1_000_000),
+    });
+    await host.start();
+    await host.prompt('x');
+    await settle(60);
+    const knobs = (provider.complete.mock.calls[0]![0] as { knobs: { maxOutputTokens: number } }).knobs;
+    // budget 1000 - system estimate 400 - reserve 512 → floor 256
+    expect(knobs.maxOutputTokens).toBe(256);
+  });
+
+  it('a length-truncated reply (no tool calls) triggers a bounded continue prompt instead of a silent stop', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost(
+      [
+        { text: 'The reply was cut', toolCalls: [], finishReason: 'length' },
+        { text: 'continuing where I left off', toolCalls: [] },
+      ],
+      recorder,
+      { config: llamacppConfig, probe: okProbe() },
+    );
+    await host.start();
+    await host.prompt('x');
+    await settle(120);
+    expect(provider.complete).toHaveBeenCalledTimes(2);
+    expect(host.conversation.some((e) => e.content.includes('cut off at the provider'))).toBe(true);
+    expect(host.conversation.some((e) => e.content.includes('continuing where I left off'))).toBe(true);
+  });
+
+  it('a length-truncated tool call is NEVER executed: the window closes with an error and the loop continues', async () => {
+    const recorder = new TileRecorder();
+    const { host, events } = makeHost(
+      [
+        { text: '', toolCalls: [{ id: 'c1', name: 'read_tile', args: { _raw: '{"agentId":unclosed' } }], finishReason: 'length' },
+        { text: 're-issued correctly', toolCalls: [] },
+      ],
+      recorder,
+      { config: llamacppConfig, probe: okProbe() },
+    );
+    await host.start();
+    await host.prompt('x');
+    await settle(120);
+    expect(events).toContain('tool:read_tile:error');
+    expect(host.conversation.some((e) => e.role === 'tool' && (e.content ?? '').includes('truncated by the provider'))).toBe(true);
+    expect(host.conversation.some((e) => e.content.includes('re-issued correctly'))).toBe(true);
+  });
+
+  it('a still-loading server (503 Loading model) is waited out, not errored', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider, events } = makeHost(
+      [
+        { failWith: 'openai API error 503: Loading model' },
+        { text: 'loaded at last', toolCalls: [] },
+      ],
+      recorder,
+      { config: llamacppConfig, probe: okProbe(), loadingRetryMs: 1 },
+    );
+    await host.start();
+    await host.prompt('x');
+    await settle(200);
+    expect(host.status).toBe('running');
+    expect(provider.complete).toHaveBeenCalledTimes(2);
+    expect(events.some((e) => e.startsWith('status-error:'))).toBe(false);
+    // and 503s are retried rather than marked fatal only up to the loading cap
+    const recorder2 = new TileRecorder();
+    const { host: host2, events: events2 } = makeHost(
+      [{ failWith: 'openai API error 503: Loading model' }],
+      recorder2,
+      { config: llamacppConfig, probe: okProbe(), loadingRetryMs: 1 },
+    );
+    await host2.start();
+    await host2.prompt('x');
+    await settle(120);
+    expect(host2.status).toBe('error');
+    expect(events2.filter((e) => e.startsWith('status-error:')).length).toBeGreaterThan(0);
+  });
+
+  it('a crashed/silent local server surfaces an error status (no durable echo — the live status is the record)', async () => {
+    const dir = join(tmpdir(), `fraktole-reviewer-local-death-${process.pid}-${++hostSeq}`);
+    const recorder = new TileRecorder();
+    const { host, events } = makeHost([{ failWith: 'openai API error 404: model not found' }], recorder, {
+      config: llamacppConfig,
+      probe: okProbe(),
+      dir,
+    });
+    await host.start();
+    await host.prompt('x');
+    await settle(80);
+    expect(host.status).toBe('error');
+    expect(events.some((e) => e.startsWith('status-error:') && e.includes('404'))).toBe(true);
+    // nothing beyond the live status: no sticky persistence of the failure
+    const state = (await readFile(join(dir, 'reviewer', 'state.json'), 'utf8')
+      .then((raw) => JSON.parse(raw) as Record<string, unknown>)
+      .catch(() => ({}))) as Record<string, unknown>;
+    expect(state.lastError).toBeUndefined();
+  });
+
+  it('three ledger-less loop carrier re-checks stand the re-check loop down (the stall guard)', async () => {
+    const recorder = new TileRecorder();
+    // 1 goal-armed turn + 3 re-checks + 1 stall-warning turn
+    const script: ScriptEntry[] = Array.from({ length: 5 }, () => ({ text: 'still nothing', toolCalls: [] }));
+    const { host, provider } = makeHost(script, recorder, {
+      config: llamacppConfig,
+      probe: okProbe(),
+      retryDelayMs: 1,
+    });
+    await host.start();
+    await host.setGoal('do the thing'); // queues "[goal armed]" turn
+    await settle(120); // goal-armed turn completes (drained)
+    expect(host.status).toBe('running');
+    let guard = 0;
+    for (; provider.complete.mock.calls.length < 5 && guard < 60; guard += 1) {
+      host.pollNow();
+      await settle(30);
+    }
+    // the 6-poll backstop needs its own ticks for each wake
+    for (let i = 0; i < 6; i++) {
+      host.pollNow();
+      await settle(30);
+    }
+    await settle(200);
+    expect(provider.complete).toHaveBeenCalledTimes(5);
+    expect(host.conversation.some((e) => e.content.includes('[stall warning]'))).toBe(true);
+    // beyond the limit, no more wakes append context
+    const calls = provider.complete.mock.calls.length;
+    for (let i = 0; i < 8; i++) {
+      host.pollNow();
+      await settle(30);
+    }
+    await settle(200);
+    // the warning turn consumed one — count grows only if the guard broke
+    expect(provider.complete.mock.calls.length).toBe(calls);
   });
 });

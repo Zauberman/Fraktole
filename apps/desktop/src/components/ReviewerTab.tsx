@@ -1,16 +1,152 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReviewerEntry, ReviewerGoal, ReviewerQuestion, ReviewerStatus, ReviewerToolCallEvent, SubGoal } from '../ipc.js';
-import { bridge, type Settings } from '../ipc.js';
+import { bridge, type SamplerKnobs, type Settings } from '../ipc.js';
 import { AUTONOMY_NAMES, AUTONOMY_VARIANTS, type AutonomyVariant } from '../shared/autonomy.js';
 import {
   DEFAULT_MODELS,
   REVIEWER_MODEL_SUGGESTIONS,
-  resolveProvider,
+  resolveReviewerConfig,
   type DetectedProvider,
 } from '../shared/reviewer-detect.js';
+import {
+  PROVIDER_GROUPS,
+  getProvider,
+  requiresKey,
+  type ProviderCatalogEntry,
+} from '../shared/provider-catalog.js';
 import { sanitizeChatText } from '../shared/sanitize.js';
+import { sanitizeAllowedLaunchers } from '../shared/launchers.js';
 import { CustomPluginDialog } from './CustomPluginDialog.js';
 import { ReviewerToolCard } from './ReviewerToolCard.js';
+
+// ---- advanced model parameters -------------------------------------------
+
+/** The config-dialog knob drafts (inputs are strings; '' = unset). */
+interface KnobDraft {
+  contextTokens: string;
+  maxOutputTokens: string;
+  temperature: string;
+  topP: string;
+  topK: string;
+  minP: string;
+  seed: string;
+  repeatPenalty: string;
+  presencePenalty: string;
+  frequencyPenalty: string;
+  keepAlive: string;
+  think: string;
+}
+
+/** number → input string ('' for unset). */
+function numStr(v: number | undefined): string {
+  return v === undefined ? '' : String(v);
+}
+
+/** input string → number ('' and junk → undefined; the settings whitelist
+ *  range-validates on top, so no error surface is needed here). */
+function numOf(s: string): number | undefined {
+  const t = s.trim();
+  if (t.length === 0) return undefined;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** The numeric-only knob keys (the rest are keepAlive/think — handled
+ *  separately below). */
+type NumKnobKey =
+  | 'contextTokens'
+  | 'maxOutputTokens'
+  | 'temperature'
+  | 'topP'
+  | 'topK'
+  | 'minP'
+  | 'seed'
+  | 'repeatPenalty'
+  | 'presencePenalty'
+  | 'frequencyPenalty';
+
+/** Draft → effective SamplerKnobs (unset fields omitted entirely). */
+function knobsFromDraft(d: KnobDraft): SamplerKnobs | undefined {
+  const k: SamplerKnobs = {};
+  const nums: Array<[NumKnobKey, string]> = [
+    ['contextTokens', d.contextTokens],
+    ['maxOutputTokens', d.maxOutputTokens],
+    ['temperature', d.temperature],
+    ['topP', d.topP],
+    ['topK', d.topK],
+    ['minP', d.minP],
+    ['seed', d.seed],
+    ['repeatPenalty', d.repeatPenalty],
+    ['presencePenalty', d.presencePenalty],
+    ['frequencyPenalty', d.frequencyPenalty],
+  ];
+  for (const [field, raw] of nums) {
+    const v = numOf(raw);
+    if (v !== undefined) k[field] = v;
+  }
+  const ka = d.keepAlive.trim();
+  if (ka.length > 0) k.keepAlive = ka;
+  if (d.think === 'on') k.think = true;
+  else if (d.think === 'off') k.think = false;
+  return Object.keys(k).length > 0 ? k : undefined;
+}
+
+type KnobAdapter = 'ollama' | 'openai' | 'anthropic';
+
+/** The advanced knob registry: which fields render for which adapter, and
+ *  each field's input metadata. ollama maps onto engine options; openai
+ *  (incl. deepseek) and anthropic only accept their standard fields. */
+const ADVANCED_KNOBS: Array<{
+  key: keyof KnobDraft;
+  label: string;
+  kind: 'number' | 'text' | 'select';
+  adapters: KnobAdapter[];
+  placeholder?: string;
+  hint?: string;
+  options?: Array<{ v: string; label: string }>;
+}> = [
+  {
+    key: 'contextTokens',
+    label: 'context window (tokens)',
+    kind: 'number',
+    adapters: ['ollama', 'openai', 'anthropic'],
+    hint: 'ollama: options.num_ctx (grows KV cache memory) · remote: compaction budget only',
+  },
+  {
+    key: 'maxOutputTokens',
+    label: 'max output tokens',
+    kind: 'number',
+    adapters: ['ollama', 'openai', 'anthropic'],
+    hint: 'ollama num_predict ≥512 · anthropic clamped ≥8192 (thinking budget)',
+  },
+  { key: 'temperature', label: 'temperature', kind: 'number', adapters: ['ollama', 'openai', 'anthropic'], placeholder: 'model default' },
+  { key: 'topP', label: 'top_p', kind: 'number', adapters: ['ollama', 'openai', 'anthropic'], placeholder: 'model default' },
+  { key: 'topK', label: 'top_k', kind: 'number', adapters: ['ollama'], placeholder: 'model default' },
+  { key: 'minP', label: 'min_p', kind: 'number', adapters: ['ollama'], placeholder: 'model default' },
+  { key: 'seed', label: 'seed', kind: 'number', adapters: ['ollama', 'openai'], placeholder: '-1 = random' },
+  { key: 'repeatPenalty', label: 'repeat_penalty', kind: 'number', adapters: ['ollama'], placeholder: 'model default' },
+  { key: 'presencePenalty', label: 'presence_penalty', kind: 'number', adapters: ['ollama', 'openai'], placeholder: 'model default' },
+  { key: 'frequencyPenalty', label: 'frequency_penalty', kind: 'number', adapters: ['ollama', 'openai'], placeholder: 'model default' },
+  {
+    key: 'keepAlive',
+    label: 'keep_alive',
+    kind: 'text',
+    adapters: ['ollama'],
+    placeholder: 'e.g. 5m · 0 = unload after the turn',
+  },
+  {
+    key: 'think',
+    label: 'thinking (ollama)',
+    kind: 'select',
+    adapters: ['ollama'],
+    hint: 'true only on thinking-capable models (qwen3, llama4…); non-thinking models 400 on it',
+    options: [
+      { v: 'auto', label: 'auto (model default)' },
+      { v: 'on', label: 'on' },
+      { v: 'off', label: 'off' },
+    ],
+  },
+];
 
 /** One row of the unified transcript timeline: a message or a tool call.
  *  Events arrive over IPC in order, so the renderer's monotonic `seq` is
@@ -43,6 +179,12 @@ function timeOf(at: number): string {
 /** Compact token formatting: 12500 → '12.5k'. */
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+/** Key-field placeholder when no provider is explicitly picked. */
+function skHint(key: string): string {
+  if (key.trim().length === 0) return 'sk-… (provider detected from the key)';
+  return 'paste the provider API key';
 }
 
 function roleLabel(role?: string): string {
@@ -83,13 +225,42 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   /** The last manual summarize-session recap (persisted server-side). */
   const [recap, setRecap] = useState<{ text: string; at: number } | null>(null);
   const [recapOpen, setRecapOpen] = useState(false);
+  /** The resolved context budget (server-probed ≤ knob ≤ guess) — shown next
+   *  to the status so a mismatch with the launch flags is at least visible. */
+  const [budgetInfo, setBudgetInfo] = useState<{ contextTokens: number; probed?: number } | null>(null);
   const [summarizing, setSummarizing] = useState(false);
   const [question, setQuestion] = useState<ReviewerQuestion | null>(null);
   const [input, setInput] = useState('');
   const [configOpen, setConfigOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [draft, setDraft] = useState({ apiKey: '', provider: '', model: '', baseUrl: '', agentCommand: '', reasoningEffort: '' });
+  /** Knob drafts as strings (numeric inputs); '' = unset (provider default). */
+  const [draft, setDraft] = useState({
+    apiKey: '',
+    providerId: '',
+    provider: '',
+    model: '',
+    baseUrl: '',
+    agentCommand: '',
+    allowedLaunchers: '',
+    reasoningEffort: '',
+    knobs: {
+      contextTokens: '',
+      maxOutputTokens: '',
+      temperature: '',
+      topP: '',
+      topK: '',
+      minP: '',
+      seed: '',
+      repeatPenalty: '',
+      presencePenalty: '',
+      frequencyPenalty: '',
+      keepAlive: '',
+      think: 'auto',
+    },
+  });
   const [liveModels, setLiveModels] = useState<string[] | null>(null);
+  const [providerFilter, setProviderFilter] = useState('');
+  const filterRef = useRef<HTMLInputElement | null>(null);
   /** Transient inline note when a prompt could not be accepted — the text
    *  stays in the box, never silently dropped. */
   const [composeError, setComposeError] = useState<string | null>(null);
@@ -127,13 +298,30 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     loadTranscript();
     void bridge.getSettings().then((s) => {
       setSettings(s);
+      const k = s.reviewer.knobs ?? {};
       setDraft({
         apiKey: s.reviewer.apiKey ?? '',
+        providerId: s.reviewer.providerId ?? '',
         provider: s.reviewer.provider ?? '',
         model: s.reviewer.model ?? '',
         baseUrl: s.reviewer.baseUrl ?? '',
         agentCommand: s.reviewer.agentCommand ?? '',
+        allowedLaunchers: s.reviewer.allowedLaunchers?.join(', ') ?? '',
         reasoningEffort: s.reviewer.reasoningEffort ?? '',
+        knobs: {
+          contextTokens: numStr(k.contextTokens),
+          maxOutputTokens: numStr(k.maxOutputTokens),
+          temperature: numStr(k.temperature),
+          topP: numStr(k.topP),
+          topK: numStr(k.topK),
+          minP: numStr(k.minP),
+          seed: numStr(k.seed),
+          repeatPenalty: numStr(k.repeatPenalty),
+          presencePenalty: numStr(k.presencePenalty),
+          frequencyPenalty: numStr(k.frequencyPenalty),
+          keepAlive: k.keepAlive ?? '',
+          think: k.think === undefined ? 'auto' : k.think ? 'on' : 'off',
+        },
       });
     });
   }, [sessionId, loadTranscript]);
@@ -245,6 +433,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         setRecap(r);
         setRecapOpen(true);
       }),
+      bridge.onReviewerBudget(sessionId, (info) => setBudgetInfo(info)),
     ];
     return () => {
       for (const unsub of unsubs) unsub();
@@ -381,35 +570,65 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     setQuestion(null);
   };
 
-  // live provider resolution from the pasted key (same logic the harness uses)
-  const det = resolveProvider(draft.apiKey, {
-    baseUrl: draft.baseUrl.trim() || undefined,
-    providerHint: draft.provider || undefined,
-    modelHint: draft.model.trim() || undefined,
+  // effective resolution: the manual provider pick wins, else key detection
+  const config = resolveReviewerConfig({
+    apiKey: draft.apiKey,
+    providerId: draft.providerId || undefined,
+    provider: (draft.provider || undefined) as 'openai' | 'anthropic' | 'ollama' | 'deepseek' | undefined,
+    model: draft.model,
+    baseUrl: draft.baseUrl,
   });
+  const selEntry = getProvider(draft.providerId || undefined);
+  const keyRequired = requiresKey(config.entry);
   const derived: DetectedProvider =
-    det.adapter === 'openai' && (det.baseUrl.includes('deepseek') || draft.provider === 'deepseek')
-      ? 'deepseek'
-      : det.adapter;
+    config.entry?.adapter ?? (config.adapter === 'openai' && config.baseUrl.includes('deepseek') ? 'deepseek' : config.adapter);
+
+  // suggestions: live list wins, then the selected provider's offline list,
+  // then the detection-derived list
+  const suggestions = liveModels ?? selEntry?.models ?? REVIEWER_MODEL_SUGGESTIONS[derived] ?? [];
+
+  // provider list filtered by the search box (matches id too, so short ids
+  // like "noel" still surface; empty query shows every group)
+  const q = providerFilter.trim().toLowerCase();
+  const filteredGroups = q
+    ? PROVIDER_GROUPS.map((g) => ({
+        ...g,
+        entries: g.entries.filter((p) => p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)),
+      }))
+    : PROVIDER_GROUPS;
 
   // fetch the live model list from the provider API (debounced); null = fall
-  // back to the offline suggestions; [] = the API had nothing to say
+  // back to the offline suggestions; [] = the API had nothing to say.
+  // Keyless local servers (auth 'optional': llama.cpp, LM Studio, vLLM …)
+  // expose /v1/models WITHOUT a key — they fetch too; only a key-demanded
+  // entry with no key stays offline
   useEffect(() => {
     if (!configOpen) return;
     const key = draft.apiKey.trim();
-    if (derived !== 'ollama' && key.length === 0) {
+    if (config.entry?.auth === 'key' && key.length === 0) {
       setLiveModels(null);
       return;
     }
-    const adapter = derived === 'deepseek' ? 'openai' : derived;
+    const adapter = config.adapter;
     const timer = window.setTimeout(() => {
       void bridge
-        .listReviewerModels({ adapter, apiKey: key, baseUrl: det.baseUrl })
+        .listReviewerModels({ adapter, apiKey: key, baseUrl: config.baseUrl })
         .then((models) => setLiveModels(models.length > 0 ? models : null))
         .catch(() => setLiveModels(null));
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [configOpen, draft.apiKey, draft.baseUrl, draft.provider, det.baseUrl, derived]);
+  }, [configOpen, draft.apiKey, draft.baseUrl, draft.providerId, config.baseUrl, config.adapter, derived]);
+
+  /** Fill the model + baseUrl from the picked provider (only when the user
+   *  hasn't already customized them). */
+  const applyProviderDefaults = (entry: ProviderCatalogEntry): void => {
+    setDraft((d) => ({
+      ...d,
+      providerId: entry.id,
+      baseUrl: d.baseUrl.trim().length === 0 ? entry.baseUrl : d.baseUrl,
+      model: d.model.trim().length === 0 ? entry.defaultModel : d.model,
+    }));
+  };
 
   const saveConfig = (): void => {
     if (!settings) return;
@@ -417,11 +636,14 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       ...settings,
       reviewer: {
         apiKey: draft.apiKey.trim() || undefined,
+        providerId: draft.providerId || undefined,
         provider: (draft.provider || undefined) as Settings['reviewer']['provider'],
         model: draft.model.trim() || undefined,
         baseUrl: draft.baseUrl.trim() || undefined,
         agentCommand: draft.agentCommand.trim() || undefined,
+        allowedLaunchers: sanitizeAllowedLaunchers(draft.allowedLaunchers),
         reasoningEffort: (draft.reasoningEffort || undefined) as Settings['reviewer']['reasoningEffort'],
+        knobs: knobsFromDraft(draft.knobs),
         customAutonomy: settings.reviewer.customAutonomy,
       },
     };
@@ -459,6 +681,18 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             {status}
           </span>
           {runningModel && <span className="reviewer-model-label">{runningModel}</span>}
+          {budgetInfo && (
+            <span
+              className="reviewer-model-label"
+              title={
+                budgetInfo.probed
+                  ? `server context ${budgetInfo.probed.toLocaleString()} tokens · budget ${budgetInfo.contextTokens.toLocaleString()}`
+                  : `context budget ${budgetInfo.contextTokens.toLocaleString()} tokens (server does not report its window)`
+              }
+            >
+              ctx {budgetInfo.contextTokens.toLocaleString()}
+            </span>
+          )}
         </div>
         <div className="reviewer-actions">
           <div className="autonomy-wrap">
@@ -541,12 +775,40 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
             <div className="dialog-title">reviewer config</div>
             <div className="reviewer-config">
               <label className="reviewer-config-wide">
-                api key
+                provider
+                <input
+                  ref={filterRef}
+                  type="text"
+                  value={providerFilter}
+                  onChange={(e) => setProviderFilter(e.target.value)}
+                  placeholder="search providers… (150+)"
+                  autoComplete="off"
+                />
+                <select value={draft.providerId} onChange={(e) => {
+                  setProviderFilter('');
+                  const entry = getProvider(e.target.value || undefined);
+                  if (entry) applyProviderDefaults(entry);
+                  else setDraft((d) => ({ ...d, providerId: '' }));
+                }}>
+                  <option value="">{providerFilter.trim() ? 'matched provider…' : 'auto-detect from the key'}</option>
+                  {filteredGroups.map((g) => g.entries.length > 0 && (
+                    <optgroup key={g.group} label={`${g.label} (${g.entries.length})`}>
+                      {g.entries.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                {selEntry?.notes && <span className="reviewer-config-hint">{selEntry.notes}</span>}
+              </label>
+              <label className="reviewer-config-wide">
+                api key{keyRequired ? '' : ' (optional / none for local)'}
                 <input
                   type="password"
                   value={draft.apiKey}
+                  disabled={config.entry?.auth === 'none'}
                   onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
-                  placeholder="sk-…  (provider detected from the key)"
+                  placeholder={selEntry?.keyHint ?? skHint(draft.apiKey)}
                   autoComplete="off"
                 />
               </label>
@@ -559,18 +821,22 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
                   placeholder={DEFAULT_MODELS[derived]}
                 />
                 <datalist id={`reviewer-models-${sessionId}`}>
-                  {(liveModels ?? REVIEWER_MODEL_SUGGESTIONS[derived]).map((m) => (
+                  {suggestions.map((m) => (
                     <option key={m} value={m} />
                   ))}
                 </datalist>
               </label>
               <label>
                 baseUrl (optional)
-                <input value={draft.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))} placeholder="(provider default)" />
+                <input value={draft.baseUrl} onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))} placeholder={selEntry?.baseUrl || '(provider default)'} />
               </label>
               <label>
                 agent launcher (optional)
                 <input value={draft.agentCommand ?? ''} onChange={(e) => setDraft((d) => ({ ...d, agentCommand: e.target.value }))} placeholder="e.g. opencode — spawned agents run it" />
+              </label>
+              <label>
+                allowed launchers (optional)
+                <input value={draft.allowedLaunchers} onChange={(e) => setDraft((d) => ({ ...d, allowedLaunchers: e.target.value }))} placeholder="extra launchers the reviewer may start — comma separated" />
               </label>
               <label>
                 reasoning effort
@@ -581,15 +847,50 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
                   <option value="low">low</option>
                 </select>
               </label>
+              <details className="reviewer-advanced">
+                <summary>advanced model parameters</summary>
+                <div className="reviewer-advanced-grid">
+                  {ADVANCED_KNOBS.filter((f) => f.adapters.includes(config.adapter as KnobAdapter)).map((f) => (
+                    <label key={f.key}>
+                      {f.label}
+                      {f.kind === 'select' ? (
+                        <select
+                          value={draft.knobs[f.key]}
+                          onChange={(e) =>
+                            setDraft((d) => ({ ...d, knobs: { ...d.knobs, [f.key]: e.target.value } }))
+                          }
+                        >
+                          {f.options?.map((o) => (
+                            <option key={o.v} value={o.v}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type={f.kind === 'number' ? 'number' : 'text'}
+                          inputMode={f.kind === 'number' ? 'decimal' : undefined}
+                          value={draft.knobs[f.key]}
+                          placeholder={f.placeholder ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({ ...d, knobs: { ...d.knobs, [f.key]: e.target.value } }))
+                          }
+                          autoComplete="off"
+                        />
+                      )}
+                      {f.hint && <span className="reviewer-config-hint">{f.hint}</span>}
+                    </label>
+                  ))}
+                </div>
+              </details>
               <div className="reviewer-config-provider">
                 <span className="orch-judge-status orch-judge-running">{derived}</span>
-                {det.model && <span className="reviewer-model-label">{det.model}</span>}
-                {det.ambiguous && (
-                  <select value={draft.provider} onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value }))}>
-                    <option value="">openai (default)</option>
-                    <option value="deepseek">deepseek</option>
-                  </select>
-                )}
+                {config.model && <span className="reviewer-model-label">{config.model}</span>}
+                {typeof draft.apiKey === 'string' &&
+                  draft.apiKey.trim().length === 0 &&
+                  keyRequired && (
+                    <span className="reviewer-model-label">paste an api key to enable</span>
+                  )}
               </div>
               <div className="reviewer-config-actions">
                 <button type="button" className="btn btn-sm btn-primary" onClick={saveConfig}>
@@ -624,7 +925,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           <div className="reviewer-empty">
             <div className="reviewer-empty-mark">reviewer</div>
             <div className="reviewer-empty-hint">prompt the reviewer — it observes every agent tile</div>
-            <div className="reviewer-empty-sub">/goal &lt;text&gt; arms the watchdog loop · config sets the model key</div>
+            <div className="reviewer-empty-sub">/goal &lt;text&gt; arms the loop carrier · config sets the model key</div>
           </div>
         )}
         {items.map((it) =>

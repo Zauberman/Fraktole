@@ -3,6 +3,7 @@ import {
   DEFAULT_MODELS,
   REVIEWER_MODEL_SUGGESTIONS,
   resolveProvider,
+  resolveReviewerConfig,
 } from '../src/shared/reviewer-detect.js';
 
 describe('resolveProvider — no key', () => {
@@ -100,5 +101,51 @@ describe('model hints and suggestions', () => {
       expect(REVIEWER_MODEL_SUGGESTIONS[provider].length).toBeGreaterThan(0);
       expect(DEFAULT_MODELS[provider].length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('resolveReviewerConfig — manual provider wins', () => {
+  it('a catalog provider supplies adapter, baseUrl and default model', () => {
+    const r = resolveReviewerConfig({ providerId: 'deepseek' });
+    expect(r.manual).toBe(true);
+    expect(r.adapter).toBe('openai');
+    expect(r.baseUrl).toBe('https://api.deepseek.com/v1');
+    expect(r.model).toBe('deepseek-chat');
+    expect(r.entry?.id).toBe('deepseek');
+    expect(r.ambiguous).toBe(false);
+  });
+
+  it('an explicit baseUrl/model override the catalog entry', () => {
+    const r = resolveReviewerConfig({ providerId: 'deepseek', baseUrl: 'http://localhost:9000/v1', model: 'custom-model' });
+    expect(r.baseUrl).toBe('http://localhost:9000/v1');
+    expect(r.model).toBe('custom-model');
+  });
+
+  it('the manual pick wins over a conflicting key prefix', () => {
+    const r = resolveReviewerConfig({ providerId: 'groq', apiKey: 'sk-ant-api03-xyz' });
+    expect(r.manual).toBe(true);
+    expect(r.adapter).toBe('openai');
+    expect(r.baseUrl).toBe('https://api.groq.com/openai/v1');
+  });
+
+  it('a keyless local provider resolves with no adapter change', () => {
+    const r = resolveReviewerConfig({ providerId: 'ollama' });
+    expect(r.manual).toBe(true);
+    expect(r.adapter).toBe('ollama');
+    expect(r.baseUrl).toBe('http://localhost:11434');
+    expect(r.entry?.auth).toBe('none');
+  });
+
+  it('a missing/unknown providerId falls back to key detection', () => {
+    const r = resolveReviewerConfig({ apiKey: 'sk-ant-api03-xyz' });
+    expect(r.manual).toBe(false);
+    expect(r.adapter).toBe('anthropic');
+    expect(r.entry).toBeUndefined();
+  });
+
+  it('a missing/unknown providerId with no key falls back to keyless ollama', () => {
+    const r = resolveReviewerConfig({});
+    expect(r.manual).toBe(false);
+    expect(r.adapter).toBe('ollama');
   });
 });

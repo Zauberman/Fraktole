@@ -2,6 +2,9 @@
  *  The harness talks to models over plain HTTP streaming — no SDKs, so the
  *  whole provider surface is testable with stubbed fetch + fixtures. */
 
+export type { SamplerKnobs } from '../../src/shared/ipc.js';
+import type { SamplerKnobs } from '../../src/shared/ipc.js';
+
 export type ProviderName = 'openai' | 'anthropic' | 'ollama';
 
 export interface ReviewerTool {
@@ -14,6 +17,21 @@ export interface ReviewerToolCall {
   id: string;
   name: string;
   args: Record<string, unknown>;
+}
+
+/** A verbatim wire content block captured from an assistant turn
+ *  (anthropic thinking/text/tool_use blocks, signature included). Replayed
+ *  exactly as received so provider-side continuity rules hold (anthropic
+ *  requires thinking blocks to accompany tool_use blocks unmodified).
+ *  Never interpreted by the harness itself. */
+export interface WireContentBlock {
+  type: 'thinking' | 'text' | 'tool_use' | string;
+  thinking?: string;
+  signature?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+  text?: string;
 }
 
 /** The harness's normalized conversation message. */
@@ -31,8 +49,14 @@ export interface ProviderMsg {
   /** assistant only: the model's reasoning output, captured from the
    *  provider's thinking field (deepseek reasoning_content, ollama
    *  thinking, anthropic thinking blocks, ...). Persisted with the
-   *  message; never re-sent to the model. */
+   *  message and re-sent by the adapters whose providers require or
+   *  support it (deepseek reasoning_content on official hosts, ollama
+   *  `thinking`, anthropic thinking blocks with signature). */
   thinking?: string;
+  /** assistant only: the provider's verbatim content blocks of this turn
+   *  (anthropic capture; ignored by the other adapters). Replayed as-is
+   *  for thinking/tool-use continuity. */
+  contentBlocks?: WireContentBlock[];
 }
 
 export interface CompleteOpts {
@@ -45,6 +69,10 @@ export interface CompleteOpts {
   signal: AbortSignal;
   /** Reasoning effort for models that support it; undefined = provider default. */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /** Model-tuning knobs; each adapter applies only the fields its wire
+   *  format accepts (ollama options.*, openai/anthropic standard fields).
+   *  Undefined = provider defaults, nothing extra sent. */
+  knobs?: SamplerKnobs;
   /** Streamed deltas, delivered as they arrive: content text and/or a
    *  thinking delta (the provider's reasoning output). */
   onDelta: (text: string, thinking?: string) => void;
@@ -63,8 +91,20 @@ export interface ProviderResult {
   toolCalls: ReviewerToolCall[];
   /** Full reasoning output of the turn ('' when the provider sent none). */
   thinking: string;
+  /** The provider's verbatim content blocks of this turn (anthropic
+   *  capture; undefined elsewhere). Replayed as-is for thinking
+   *  continuity in tool loops. */
+  contentBlocks?: WireContentBlock[];
   /** Token usage when the provider reports it (streamed or final). */
   usage?: ProviderUsage;
+  /** The provider's own stop reason (openai/others: 'stop' | 'length' |
+   *  'tool_calls' | …; anthropic: 'end_turn' | 'max_tokens' | 'tool_use';
+   *  ollama: done_reason). 'length'/'max_tokens' means the generation was
+   *  CLIPPED — the harness compacts and continues instead of trusting a
+   *  truncated reply. Always set: a stream that simply dies mid-flight
+   *  (connection close, server crash) is a failed attempt, never a turned
+   *  silent success. */
+  finishReason: string;
 }
 
 export interface ProviderClient {
@@ -92,6 +132,27 @@ export function createProvider(name: string): ProviderClient {
 export function joinBase(baseUrl: string, path: string): string {
   const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
   return `${base}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+/** Normalizes a user-supplied OpenAI-compatible base URL: strips a pasted
+ *  full `/chat/completions` suffix, and appends the `/v1` path the
+ *  OpenAI-compatible surface requires (llama.cpp, LM Studio, vLLM are all
+ *  mounted there). A base already carrying a `/v1` path is untouched.
+ *  Ollama-native bases (/api/…) and scheme-less junk are returned as-is —
+ *  this never invents a URL for a URL that doesn't parse. */
+export function normalizeOpenaiBase(baseUrl: string): string {
+  const raw = baseUrl.trim();
+  if (raw.length === 0) return raw;
+  try {
+    const u = new URL(raw);
+    let p = u.pathname.replace(/\/+$/, '');
+    if (p.endsWith('/chat/completions')) p = p.slice(0, -'/chat/completions'.length);
+    if (!p.endsWith('/v1')) p = `${p.replace(/\/+$/, '')}/v1`;
+    u.pathname = p;
+    return u.toString().replace(/\/+$/, '');
+  } catch {
+    return raw;
+  }
 }
 
 /** Reads a web ReadableStream byte-by-byte (the generic variance of
@@ -141,6 +202,55 @@ export async function* ssePayloads(body: ReadableStream<Uint8Array<ArrayBufferLi
     if (data.length > 0) {
       try {
         yield JSON.parse(data) as unknown;
+      } catch {
+        // malformed payload — skip
+      }
+    }
+  }
+}
+
+/** SSE reader that keeps completion visible: yields parsed JSON payloads
+ *  for `data:` lines, a `{ done: true }` sentinel for [DONE], and closes on
+ *  EOF. A turn that ends WITHOUT either a done sentinel or a final
+ *  `finish_reason` chunk is premature (connection closed, server crash) —
+ *  the adapters must treat that as a failed attempt, not a silent success.
+ *  Malformed payloads are skipped (one bad line must never kill the turn). */
+export interface SseEvent {
+  payload?: unknown;
+  done: boolean;
+}
+
+export async function* sseEvents(body: ReadableStream<Uint8Array<ArrayBufferLike>>): AsyncGenerator<SseEvent> {
+  let buf = '';
+  for await (const chunk of readBytes(body)) {
+    buf += new TextDecoder().decode(chunk, { stream: true });
+    let idx: number;
+    while ((idx = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (data === '[DONE]') {
+        yield { done: true };
+        return;
+      }
+      if (data.length === 0) continue;
+      try {
+        yield { payload: JSON.parse(data) as unknown, done: false };
+      } catch {
+        // malformed payload — skip
+      }
+    }
+  }
+  // flush an unterminated tail: the final chunk may carry the usage block
+  // or [DONE] without a trailing newline
+  const tail = buf.trim();
+  if (tail.startsWith('data:')) {
+    const data = tail.slice(5).trim();
+    if (data === '[DONE]') yield { done: true };
+    else if (data.length > 0) {
+      try {
+        yield { payload: JSON.parse(data) as unknown, done: false };
       } catch {
         // malformed payload — skip
       }

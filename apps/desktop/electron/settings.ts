@@ -1,6 +1,52 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { Settings } from '../src/shared/ipc.js';
+import type { SamplerKnobs, Settings } from '../src/shared/ipc.js';
+import { sanitizeAllowedLaunchers } from '../src/shared/launchers.js';
+
+/** Numeric range validator for the sampler knobs: any non-finite or
+ *  out-of-range value is dropped (never coerced) — a bad bump in a
+ *  settings file must not 400 the provider. */
+function knobNumber(v: unknown, min: number, max: number): number | undefined {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return undefined;
+  return v >= min && v <= max ? v : undefined;
+}
+
+function knobInt(v: unknown, min: number, max: number): number | undefined {
+  if (typeof v !== 'number' || !Number.isInteger(v)) return undefined;
+  return knobNumber(v, min, max);
+}
+
+/** Parses the model-tuning knobs with per-field ranges. Invalid values
+ *  drop individually; missing/absent knobs yield undefined. */
+function parseKnobs(raw: Record<string, unknown> | undefined): SamplerKnobs | undefined {
+  if (!raw) return undefined;
+  const k: SamplerKnobs = {};
+  const c = knobInt(raw.contextTokens, 1024, 1_048_576);
+  if (c !== undefined) k.contextTokens = c;
+  const m = knobInt(raw.maxOutputTokens, 256, 131_072);
+  if (m !== undefined) k.maxOutputTokens = m;
+  const t = knobNumber(raw.temperature, 0, 2);
+  if (t !== undefined) k.temperature = t;
+  const p = knobNumber(raw.topP, 0, 1);
+  if (p !== undefined) k.topP = p;
+  const tk = knobInt(raw.topK, 0, 1000);
+  if (tk !== undefined) k.topK = tk;
+  const mp = knobNumber(raw.minP, 0, 1);
+  if (mp !== undefined) k.minP = mp;
+  const s = knobInt(raw.seed, -1, 2_147_483_647);
+  if (s !== undefined) k.seed = s;
+  const rp = knobNumber(raw.repeatPenalty, 0, 2);
+  if (rp !== undefined) k.repeatPenalty = rp;
+  const pr = knobNumber(raw.presencePenalty, -2, 2);
+  if (pr !== undefined) k.presencePenalty = pr;
+  const fr = knobNumber(raw.frequencyPenalty, -2, 2);
+  if (fr !== undefined) k.frequencyPenalty = fr;
+  if (typeof raw.keepAlive === 'string' && (/^(\d+(ms|s|m|h))$/.test(raw.keepAlive) || raw.keepAlive === '0')) {
+    k.keepAlive = raw.keepAlive;
+  }
+  if (typeof raw.think === 'boolean') k.think = raw.think;
+  return Object.keys(k).length > 0 ? k : undefined;
+}
 
 /**
  * App preferences, persisted as JSON under userData: the color theme and the
@@ -25,6 +71,10 @@ export class SettingsStore {
         reviewer: {
           apiKey: typeof parsed.reviewer?.apiKey === 'string' ? parsed.reviewer.apiKey : undefined,
           apiKeyEnv: typeof parsed.reviewer?.apiKeyEnv === 'string' ? parsed.reviewer.apiKeyEnv : undefined,
+          providerId:
+            typeof parsed.reviewer?.providerId === 'string' && parsed.reviewer.providerId.trim().length > 0
+              ? parsed.reviewer.providerId
+              : undefined,
           provider:
             provider === 'openai' || provider === 'anthropic' || provider === 'ollama' || provider === 'deepseek'
               ? provider
@@ -32,12 +82,14 @@ export class SettingsStore {
           model: typeof parsed.reviewer?.model === 'string' ? parsed.reviewer.model : undefined,
           baseUrl: typeof parsed.reviewer?.baseUrl === 'string' ? parsed.reviewer.baseUrl : undefined,
           agentCommand: typeof parsed.reviewer?.agentCommand === 'string' ? parsed.reviewer.agentCommand : undefined,
+          allowedLaunchers: sanitizeAllowedLaunchers(parsed.reviewer?.allowedLaunchers),
           reasoningEffort:
             parsed.reviewer?.reasoningEffort === 'low' ||
             parsed.reviewer?.reasoningEffort === 'medium' ||
             parsed.reviewer?.reasoningEffort === 'high'
               ? parsed.reviewer.reasoningEffort
               : undefined,
+          knobs: parseKnobs(parsed.reviewer?.knobs as Record<string, unknown> | undefined),
           customAutonomy:
             typeof parsed.reviewer?.customAutonomy?.name === 'string' ||
             typeof parsed.reviewer?.customAutonomy?.prompt === 'string'
