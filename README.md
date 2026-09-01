@@ -1,6 +1,6 @@
 # Fraktole
 
-> **A Linux-native tiling command center for orchestrating autonomous AI coding agents, Allowing UI easiness for Loops , with a set of premaid loops (Auto compose).**
+> **A Linux-native tiling command center for orchestrating autonomous AI coding agents — real PTY tiles, a supervising Reviewer model, and one-click premade loops (Auto Compose).**
 
 Fraktole pairs terminal multiplexing with a supervising **Reviewer model** that has the role of an autonomous general: it dispatches substantive work to an agent workforce running in live PTY tiles, verifies code and runtime state itself, and manages goals through to completion.
 
@@ -43,12 +43,16 @@ The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter A
 - **Session Bundles**: Export and import complete session arrangements, histories, and reviewer states.
 
 ### 2. The Reviewer Supervising Harness
-The built-in Reviewer is an autonomous control loop supporting **OpenAI-compatible endpoints**, **Anthropic** (Claude 3.5/3.7 with extended thinking), **Ollama** (DeepSeek-R1, Qwen2.5-Coder, Llama), **DeepSeek**, and **Moonshot/Kimi**.
+The built-in Reviewer is an autonomous control loop supporting **OpenAI-compatible endpoints**, **Anthropic** (Claude 3.5/3.7 with extended thinking), **Ollama** (DeepSeek-R1, Qwen2.5-Coder, Llama), **llama.cpp** (`llama-server`, keyless, auth-optional), **DeepSeek**, and **Moonshot/Kimi**.
 
 - **Resilient Execution**: Failed tool calls do not abort the turn; the model reads the error and adjusts. Stalled streams (120s timeout) auto-retry.
 - **Token-Aware Compaction**: Compaction preserves system prompts, durable task ledgers, and the latest turns while safely trimming older context to ~80% of model limits.
 - **Prompt Preemption**: Send prompts while the model is actively working; prompts queue and execute cleanly at turn boundaries.
 - **Live Metrics**: Real-time tracking of input tokens, cache-hit tokens, output tokens, and compaction cycles in the footer.
+- **Local Provider Hardening**: Local servers are probed for their real context window and the resolved budget (probed ≤ knob ≤ fallback) is shown live next to the status. The harness waits for server readiness before the first request, auto-heals context-limit errors by compacting and retrying, and detects truncated `finish_reason` responses to re-request cleanly. A stall guard stands the loop down after repeated ledger-less re-checks.
+- **Model-Tuning Knobs**: Per-provider context window, output cap, and sampler overrides (temperature, top_p, top_k) for local servers.
+- **Provider Catalog**: Searchable catalog of OpenAI-compatible endpoints — keyless local servers included — with config validation.
+- **Thinking Replay**: Reasoning traces replay across providers on continuation turns; the system prompt persists across restarts.
 
 ### 3. Auto Compose (Autonomous Loops in Safe Forks)
 Auto Compose runs structured, autonomous development loops. Each run launches inside an **isolated project fork** (`.fraktole-auto/`), leaving the master repository untouched:
@@ -124,7 +128,7 @@ The companion Android application connects securely to your desktop workstation 
 1. Open the **Remote** tab in Fraktole (`Alt+4`).
 2. Launch **Fraktole Remote** on Android and enter the 6-character pairing code.
 3. The desktop generates a local self-signed TLS certificate and authenticates the client via an exchange token.
-4. Tokens are stored  in Android Keystore / Flutter Secure Storage for instant reconnection.
+4. Tokens are stored in Android Keystore / Flutter Secure Storage for instant reconnection.
 5. Monitor live tile outputs, view goal progression, and send commands from your phone.
 
 ---

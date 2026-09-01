@@ -1,17 +1,54 @@
-# fraktole_remote
+# Fraktole Remote
 
-A new Flutter project.
+Android companion client for [Fraktole](https://github.com/Nusoidal/Fraktole): secure remote control of the desktop workstation over local Wi-Fi.
 
-## Getting Started
+## What it does
 
-This project is a starting point for a Flutter application.
+| Screen | Role |
+|---|---|
+| `SplashScreen` | Boot and session-restore check. |
+| `ConnectScreen` | Desktop discovery and pairing via a 6-character one-time code. |
+| `SessionsScreen` | Lists desktop sessions with live status and tile counts. |
+| `TilesScreen` | Grid of live PTY tiles for the selected session. |
+| `TileDetailScreen` | Full terminal stream for a single tile. |
+| `OrchestratorScreen` | Reviewer dialogue: goal state, tasks, and prompts. |
+| `SettingsScreen` | Connection management, token lifecycle, preferences. |
 
-A few resources to get you started if this is your first Flutter project:
+## Architecture
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```
+lib/
+├── core/
+│   ├── protocol/    # Wire protocol models (JSON over WSS)
+│   ├── security/    # TLS certificate pinning (TOFU), token storage
+│   ├── tiles/       # Tile buffer: coalesced PTY chunk assembly
+│   └── transport/   # WSS gateway: reconnect, heartbeat, framing
+├── screens/         # UI screens (see table above)
+└── state/           # AppController: single source of client state
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Security model
+
+- Transport is **WebSocket over TLS (WSS)** with a desktop-generated self-signed certificate.
+- First connection pins the certificate fingerprint (TOFU); mismatches abort.
+- Pairing uses a one-time code; the client then authenticates with a long-lived exchange token.
+- Tokens are stored in **Flutter Secure Storage** (Android Keystore-backed).
+
+Wire protocol details: `docs/remote-protocol.md` (private repository).
+
+## Development
+
+```bash
+flutter pub get
+
+# Static analysis
+flutter analyze
+
+# Unit tests
+flutter test
+
+# On-device integration tests (pairing + control)
+flutter test integration_test
+```
+
+Requirements: Flutter SDK `^3.12.2`, a reachable desktop running Fraktole with the Remote Bridge enabled (`Alt+4`).

@@ -68,7 +68,7 @@ export function App(): React.JSX.Element {
   const [sidePct, setSidePct] = useState({ left: 10, right: 40 });
   const [projects, setProjects] = useState<Project[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [dialogDefault, setDialogDefault] = useState('/home/walid');
+  const [dialogDefault, setDialogDefault] = useState('');
   const [sessionDialog, setSessionDialog] = useState<{ mode: 'new' } | { mode: 'rename' | 'save-as'; value: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   /** Active project root for the quick-open palette (Ctrl+P). */
@@ -76,7 +76,7 @@ export function App(): React.JSX.Element {
   const [help, setHelp] = useState<string | null>(null);
   /** URL pushed by the reviewer's open_test_page; forwarded to the TestTab. */
   const [pendingTestUrl, setPendingTestUrl] = useState<string | null>(null);
-  const defaultCwd = useRef('/home/walid');
+  const defaultCwd = useRef('');
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const [bodyWidth, setBodyWidth] = useState(0);
 

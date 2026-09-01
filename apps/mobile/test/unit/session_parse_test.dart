@@ -10,7 +10,7 @@ void main() {
       final session = Session.fromJson({
         'id': 's1',
         'name': 'Fraktole',
-        'project': '/home/walid/Fraktole',
+        'project': '/home/user/Fraktole',
         'alive': true,
         'tileCount': 3,
         'updatedAt': 1786668903546,
