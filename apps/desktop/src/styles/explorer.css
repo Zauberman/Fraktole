@@ -24,29 +24,33 @@
   max-width: 140px;
 }
 
-.explorer-filter {
-  width: 22px;
-  height: 22px;
+/* ————— hidden-files text chip (the eye was removed) ————— */
+
+.explorer-chip {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  padding: 1px 7px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
 
-.explorer-filter-on {
-  color: var(--accent);
+.explorer-chip:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
 }
 
-/* ————— tree rows: icons + git change dots ————— */
-
-.explorer-icon {
-  flex-shrink: 0;
-  opacity: 0.9;
+.explorer-chip-on {
+  color: var(--rgn-explorer);
+  border-color: var(--rgn-explorer);
 }
 
-.explorer-tree .tree-row {
-  gap: var(--s1);
-}
-
-.explorer-tree .tree-chevron + .explorer-icon {
-  margin-left: calc(var(--s1) * -1);
-}
+/* ————— tree rows: color codes (leading tick + name tint) + git dots ————— */
 
 .git-dot {
   width: 6px;
@@ -290,28 +294,57 @@
   padding: var(--s1) var(--s2);
   cursor: pointer;
   min-width: 0;
+  transition: background var(--dur-fast) var(--ease-out);
 }
 
 .tree-row:hover {
-  color: var(--text);
   background: var(--hover-surface);
 }
+
+/* the leading color tick — replaces the per-file icon entirely */
+.tree-tick {
+  width: 2px;
+  height: 12px;
+  border-radius: var(--r-pill);
+  flex-shrink: 0;
+  background: var(--line-strong);
+}
+
+.tree-row-folder .tree-tick { background: var(--cat-folder); }
+.tree-row-code .tree-tick { background: var(--cat-code); }
+.tree-row-doc .tree-tick { background: var(--cat-doc); }
+.tree-row-config .tree-tick { background: var(--cat-config); }
+.tree-row-style .tree-tick { background: var(--cat-style); }
+.tree-row-data .tree-tick { background: var(--cat-data); }
+.tree-row-other .tree-tick { background: var(--line-strong); }
 
 .tree-chevron {
   color: var(--text-faint);
   font-size: var(--text-2xs);
   width: 10px;
   flex-shrink: 0;
+  transition: color var(--dur-fast) var(--ease-out);
 }
 
 .tree-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-out);
 }
 
-.tree-file:hover {
-  color: var(--accent);
+/* semantic name tints — the color code itself */
+.tree-name-folder { color: var(--cat-folder); font-weight: 500; }
+.tree-name-code { color: var(--cat-code); }
+.tree-name-doc { color: var(--cat-doc); }
+.tree-name-config { color: var(--cat-config); }
+.tree-name-style { color: var(--cat-style); }
+.tree-name-data { color: var(--cat-data); }
+.tree-row-other .tree-name { color: var(--text-muted); }
+
+.tree-row:hover .tree-name,
+.tree-row:hover .tree-chevron {
+  color: var(--text);
 }
 
 .tree-loading {
