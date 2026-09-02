@@ -1,0 +1,73 @@
+/* Settings > Usage: pure token-usage graphs (no cost). */
+
+.usage-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+.usage-picker {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.usage-select {
+  min-width: 240px;
+  padding: var(--s1) var(--s2);
+  background: var(--bg-raised);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+}
+
+.usage-totals {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2) var(--s4);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-faint {
+  color: var(--text-faint);
+}
+
+.usage-dim {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.usage-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s5) var(--s4);
+  align-items: end;
+}
+
+.usage-chart-title {
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: var(--s2);
+}
+
+.usage-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+@media (max-width: 900px) {
+  .usage-grid {
+    grid-template-columns: 1fr;
+  }
+}

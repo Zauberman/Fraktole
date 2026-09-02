@@ -658,15 +658,15 @@ const main = async () => {
   if (Math.abs(bj.status - 30) > 1) fail(`status bar height ${bj.status}`);
   else ok('status bar is 30px');
 
-  // config now opens as a modal dialog
-  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'config')?.click(); true`);
-  const dlg = await waitFor(`document.querySelector('.pane-reviewer-column .dialog') !== null`, 10000, 'config dialog');
-  if (!dlg) fail('config does not open as a dialog');
-  else ok('config opens as a modal dialog');
-  await evalJs(`document.querySelector('.pane-reviewer-column .dialog-backdrop')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); true`);
+  // the model button opens the full-window Settings Center at the Model section
+  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'model')?.click(); true`);
+  const dlg = await waitFor(`document.querySelector('.settings-view') !== null`, 10000, 'settings view');
+  if (!dlg) fail('model button does not open the settings view');
+  else ok('model button opens the settings center');
+  await evalJs(`document.querySelector('.settings-view .settings-header .btn')?.click(); true`);
   await sleep(300);
-  if (await evalJs(`document.querySelector('.pane-reviewer-column .dialog') !== null`)) fail('config dialog did not close on backdrop');
-  else ok('config dialog closes on backdrop');
+  if (await evalJs(`document.querySelector('.settings-view') !== null`)) fail('settings view did not close');
+  else ok('settings view closes');
 
   // auto compose: REAL pointer clicks (the path a user uses — the backdrop
   // must never swallow the button's own mousedown)
@@ -694,7 +694,7 @@ const main = async () => {
     if (!picker) fail('auto compose picker did not open on a real click');
     else ok('auto compose picker opens on a real click');
     const items = await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .autonomy-item')].map((b) => b.textContent.trim())`);
-    if (!['off', 'Cyber', 'Frontend', 'Bugs', 'Feature', 'Test suite', 'Readability', 'custom', 'edit custom…'].every((i) => items.includes(i)))
+    if (!['off', 'Cyber', 'Frontend', 'Bugs', 'Feature', 'Test suite', 'Readability', 'Custom', 'edit custom…'].every((i) => items.includes(i)))
       fail(`picker items wrong: ${items.join(',')}`);
     else ok(`auto compose variants listed: ${items.join(', ')}`);
     // a second real click on the button must CLOSE the picker (the backdrop
@@ -727,17 +727,21 @@ const main = async () => {
     );
     if (!noSummarizeBtn) fail('summarize button should not exist (command-only)');
     else ok('summarize is command-only (no button)');
-    // reopen and open the custom loop editor from the popover
+    // reopen and jump to the Auto Compose settings section from the popover
     await clickAt(c.x, c.y);
     await waitFor(menuInView, 10000, 'picker reopened for editor');
     await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .autonomy-item')].find((b) => b.textContent.trim() === 'edit custom…')?.click(); true`);
-    const editorOpen = await waitFor(`document.querySelector('.pane-reviewer-column .dialog-textarea') !== null`, 5000, 'custom loop editor');
-    if (!editorOpen) fail('custom loop editor did not open');
-    else ok('custom loop editor opens from the popover');
-    await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .dialog .btn')].find((b) => b.textContent.trim() === 'cancel')?.click(); true`);
-    const editorClosed = await waitFor(`document.querySelector('.pane-reviewer-column .dialog-textarea') === null`, 5000, 'editor closed');
-    if (!editorClosed) fail('custom loop editor did not close');
-    else ok('custom loop editor closes');
+    const editorOpen = await waitFor(
+      `document.querySelector('.settings-view') !== null && [...document.querySelectorAll('.settings-view .settings-nav-item')].some((b) => b.classList.contains('settings-nav-item-active') && b.textContent.includes('Auto Compose'))`,
+      5000,
+      'custom loop editor',
+    );
+    if (!editorOpen) fail('edit custom… did not open the Auto Compose settings section');
+    else ok('edit custom… opens the Auto Compose settings section');
+    await evalJs(`document.querySelector('.settings-view .settings-header .btn')?.click(); true`);
+    const editorClosed = await waitFor(`document.querySelector('.settings-view') === null`, 5000, 'editor closed');
+    if (!editorClosed) fail('Auto Compose settings section did not close');
+    else ok('Auto Compose settings section closes');
   }
 
   const rowColors = await evalJs(`(() => {
@@ -822,12 +826,20 @@ const main = async () => {
   else ok('type_into_tile turn completed (safe-yolo tool wired)');
 
   // ---- manual provider picker (search + grouped select + keyless local) ----
-  // open the config dialog (a real user click path)
-  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'config')?.click(); true`);
-  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') !== null`, 10000, 'config dialog for picker');
+  // open the settings center at the Model section (a real user click path)
+  const openModelSettings = async (label) => {
+    await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'model')?.click(); true`);
+    await waitFor(`document.querySelector('.settings-view') !== null`, 10000, `settings view ${label}`);
+  };
+  const closeSettings = async (label) => {
+    await evalJs(`document.querySelector('.settings-view .settings-header .btn')?.click(); true`);
+    await waitFor(`document.querySelector('.settings-view') === null`, 10000, `settings closed ${label}`);
+  };
+  const settingsSave = `[...document.querySelectorAll('.settings-view .settings-actions .btn')].find((b) => b.textContent.trim() === 'save')?.click(); true`;
+  await openModelSettings('for picker');
 
   // 1) catalog breadth: the provider <select> renders the whole catalog
-  const optionCount = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-config-wide select')?.options.length ?? 0`);
+  const optionCount = await evalJs(`document.querySelector('.settings-view .settings-content select')?.options.length ?? 0`);
   // 100 providers + the empty "auto-detect" default option
   if (optionCount < 101) fail(`provider <select> has only ${optionCount} options`);
   else ok(`provider <select> lists ${optionCount - 1} catalog providers`);
@@ -835,11 +847,11 @@ const main = async () => {
   // 2) search filter narrows the options (find the provider label's search input)
   const setReactValue = (el, v) =>
     `(() => { const e = ${el}; const proto = e.tagName === 'SELECT' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype; const set = Object.getOwnPropertyDescriptor(proto, 'value').set; set.call(e, '${v}'); e.dispatchEvent(new Event(e.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); return true; })()`;
-  const searchBox = `document.querySelector('.pane-reviewer-column .reviewer-config-wide input[placeholder^="search providers"]')`;
-  const providerSel = `document.querySelector('.pane-reviewer-column .reviewer-config-wide select')`;
+  const searchBox = `document.querySelector('.settings-view .settings-content input[placeholder^="search providers"]')`;
+  const providerSel = `document.querySelector('.settings-view .settings-content select')`;
   await evalJs(setReactValue(searchBox, 'gro'));
   await sleep(400);
-  const afterFilter = await evalJs(`([...document.querySelectorAll('.pane-reviewer-column .reviewer-config-wide select option')].map((o) => o.value))`);
+  const afterFilter = await evalJs(`([...document.querySelectorAll('.settings-view .settings-content select option')].map((o) => o.value))`);
   if (!afterFilter.includes('groq')) fail(`search 'gro' lost the groq option: ${afterFilter.join(',')}`);
   else ok(`search 'gro' keeps Groq`);
   if (afterFilter.includes('openai')) fail(`search 'gro' kept the unfiltered openai option`);
@@ -851,11 +863,12 @@ const main = async () => {
   await evalJs(setReactValue(providerSel, 'deepseek'));
   await sleep(300);
   // the pick's keyHint lands in the api key field placeholder
-  const keyHint = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-config-wide input[type="password"]')?.placeholder ?? ''`);
+  const keyHint = await evalJs(`document.querySelector('.settings-view .settings-content input[type="password"]')?.placeholder ?? ''`);
   if (keyHint !== 'sk-… (DeepSeek key)') fail(`key hint after picking deepseek: "${keyHint}"`);
   else ok('provider pick autofills the api key hint');
-  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-config-actions button')].find((b) => b.textContent.includes('save'))?.click(); true`);
-  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') === null`, 10000, 'dialog closed after provider save');
+  await evalJs(settingsSave);
+  await sleep(500);
+  await closeSettings('after provider save');
   await sleep(1500);
   const persisted = await evalJs(`window.fraktole.getSettings().then((s) => s.reviewer.providerId ?? '')`);
   if (persisted !== 'deepseek') fail(`providerId not persisted after UI pick: ${persisted}`);
@@ -888,27 +901,28 @@ const main = async () => {
   }
 
   // 5) keyless local provider: picking ollama disables the api key field
-  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'config')?.click(); true`);
-  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') !== null`, 10000, 'config dialog for ollama');
+  await openModelSettings('for ollama');
   await evalJs(setReactValue(searchBox, 'ollama'));
   await sleep(300);
   await evalJs(setReactValue(providerSel, 'ollama'));
   await sleep(300);
-  const keyDisabled = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-config-wide input[type="password"]')?.disabled ?? false`);
+  const keyDisabled = await evalJs(`document.querySelector('.settings-view .settings-content input[type="password"]')?.disabled ?? false`);
   if (!keyDisabled) fail('api key field is not disabled for the keyless ollama provider');
   else ok('keyless local provider disables the api key field');
-  // the advanced knobs section exposes the ollama knob fields in the dialog
-  await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-advanced summary')?.click(); true`);
-  await sleep(300);
-  const advLabels = await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-advanced label')].map((l) => l.textContent)`);
+  // save the ollama pick, then the Sampling & Context section resolves the
+  // ollama adapter and exposes its knob fields
+  await evalJs(settingsSave);
+  await sleep(500);
+  await evalJs(`[...document.querySelectorAll('.settings-view .settings-nav-item')].find((b) => b.textContent.includes('Sampling'))?.click(); true`);
+  await sleep(400);
+  const advLabels = await evalJs(`[...document.querySelectorAll('.settings-view .settings-knob-grid label')].map((l) => l.textContent)`);
   if (advLabels.length === 0) fail('advanced knobs section has no fields');
   else {
     const has = (p) => advLabels.some((t) => t.includes(p));
     if (!has('context window') || !has('keep_alive') || !has('thinking (ollama)')) fail(`advanced fields missing ollama knobs: ${advLabels.join(' | ')}`);
     else ok(`advanced knobs render for ollama (${advLabels.length} fields)`);
   }
-  await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-config-actions button')].find((b) => b.textContent.includes('save'))?.click(); true`);
-  await waitFor(`document.querySelector('.pane-reviewer-column .dialog') === null`, 10000, 'dialog closed after ollama save');
+  await closeSettings('after ollama pick');
   const persistedLocal = await evalJs(`window.fraktole.getSettings().then((s) => s.reviewer.providerId ?? '')`);
   if (persistedLocal !== 'ollama') fail(`ollama providerId not persisted: ${persistedLocal}`);
   else ok('keyless local provider pick persisted (providerId=ollama)');

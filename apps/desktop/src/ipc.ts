@@ -4,6 +4,8 @@ import type {
   FraktoleMessage,
   FsEntry,
   FsStat,
+  GitStatus,
+  MenuSettingsAction,
   ProjectFile,
   MenuSessionAction,
   OpenedSession,
@@ -17,6 +19,7 @@ import type {
   ReviewerQuestion,
   ReviewerSpawnRequest,
   ReviewerStatus,
+  SearchResult,
   SubGoal,
   ReviewerStreamEvent,
   ReviewerUsageEvent,
@@ -29,7 +32,9 @@ import type {
   SessionSummary,
   SessionSnapshot,
   Settings,
+  SettingsSection,
   SamplerKnobs,
+  UsageSample,
 } from './shared/ipc.js';
 
 export type {
@@ -38,6 +43,8 @@ export type {
   FraktoleMessage,
   FsEntry,
   FsStat,
+  GitStatus,
+  MenuSettingsAction,
   MenuSessionAction,
   OpenedSession,
   Project,
@@ -62,8 +69,11 @@ export type {
   SessionSavePayload,
   SessionSummary,
   SessionSnapshot,
+  SearchResult,
   Settings,
+  SettingsSection,
   SamplerKnobs,
+  UsageSample,
 };
 export type SessionStatus = 'running' | 'idle' | 'stopped';
 
@@ -80,6 +90,30 @@ export interface FraktoleBridge {
   applyTheme(id: string): Promise<void>;
   onMenuSession(cb: (action: MenuSessionAction) => void): () => void;
   onMenuHelp(cb: (topic: string) => void): () => void;
+  /** Native Settings menu pick — open the Settings view, optionally at a section. */
+  onMenuSettings(cb: (action: MenuSettingsAction) => void): () => void;
+  /** Broadcast after every successful settings:set (full merged settings). */
+  onSettingsChanged(cb: (settings: Settings) => void): () => void;
+  /** Reveal the userData directory in the system file manager. */
+  revealDataDir(): Promise<void>;
+  /** Watch an open editor file for out-of-app changes (agent edits). */
+  watchFile(path: string): Promise<void>;
+  unwatchFile(path: string): Promise<void>;
+  /** Fired when a watched file changes on disk. */
+  onFileChanged(cb: (path: string) => void): () => void;
+  /** Explorer file operations; throw an Error message on failure. */
+  mkdir(dirPath: string): Promise<void>;
+  createFile(path: string): Promise<void>;
+  renamePath(from: string, to: string): Promise<void>;
+  /** Move to the OS trash (never a hard delete). */
+  trashPath(path: string): Promise<void>;
+  /** Git branch + change marks for a project root; null when not a repo. */
+  gitStatus(projectPath: string): Promise<GitStatus | null>;
+  /** Project-wide text search (ripgrep when available, bounded JS walk
+   *  fallback). */
+  searchProject(root: string, query: string): Promise<SearchResult>;
+  /** Per-turn token usage samples for a session's reviewer (deltas). */
+  usageHistory(sessionId: string): Promise<UsageSample[]>;
   listProjects(): Promise<Project[]>;
   addProject(path: string): Promise<Project>;
   removeProject(path: string): Promise<boolean>;

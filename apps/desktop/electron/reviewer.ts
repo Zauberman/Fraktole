@@ -20,6 +20,7 @@ import { ReviewerTools, type ReviewerToolContext } from './reviewer-tools.js';
 import { AUTONOMY_MISSIONS, AUTONOMY_PLUGINS, type AutonomyVariant } from './reviewer-plugins.js';
 import { forkExists, type ForkResult } from './fork.js';
 import { emptyState, isGoalMet, loadState, persistState } from './reviewer-state.js';
+import { UsageLog } from './usage-log.js';
 import { createProvider, type ProviderClient, type ProviderMsg, type ProviderResult, type SamplerKnobs } from './reviewer/providers.js';
 import { probeLocalServer, type ProbeFn } from './reviewer/local-probe.js';
 import type { TileRecorder } from './tile-recorder.js';
@@ -244,6 +245,7 @@ export class ReviewerHost {
   private readonly tools: ReviewerTools;
   private readonly conversationFile: string;
   private readonly stateFile: string;
+  private readonly usageLog: UsageLog;
   private agentCommand = '';
   private reasoningEffort: ReviewerConfig['reasoningEffort'] = undefined;
   /** Model-tuning knobs (context window, output cap, samplers) captured at
@@ -319,6 +321,7 @@ export class ReviewerHost {
     this.tools = opts.tools ?? new ReviewerTools();
     this.conversationFile = opts.conversationFile ?? join(opts.sessionDir, 'reviewer', 'conversation.jsonl');
     this.stateFile = opts.stateFile ?? join(opts.sessionDir, 'reviewer', 'state.json');
+    this.usageLog = new UsageLog(dirname(this.stateFile));
     this.toolContext = {
       ...opts.toolContext,
       getState: () => this.state,
@@ -1108,9 +1111,20 @@ export class ReviewerHost {
             // overwrite would only keep the last iteration's marginal
             this.pendingUsageDelta = (this.pendingUsageDelta ?? 0) + Math.max(1, total - this.lastUsageTotal);
             this.lastUsageTotal = total;
+            const usageBefore = { ...this.state.usage };
             this.state.usage.inputTokens += response.usage.inputTokens;
             this.state.usage.cachedTokens += response.usage.cachedTokens;
             this.state.usage.outputTokens += response.usage.outputTokens;
+            // per-turn usage history (usage.jsonl): the delta vs the
+            // previously appended sample; a log failure never breaks a turn
+            void this.usageLog
+              .append({
+                at: Date.now(),
+                inputTokens: this.state.usage.inputTokens - usageBefore.inputTokens,
+                cachedTokens: this.state.usage.cachedTokens - usageBefore.cachedTokens,
+                outputTokens: this.state.usage.outputTokens - usageBefore.outputTokens,
+              })
+              .catch(() => undefined);
             await persistState(this.stateFile, this.state, this.opts.logger);
             this.opts.emit.usage({ at: Date.now(), ...this.state.usage });
           }

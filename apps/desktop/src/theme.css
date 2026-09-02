@@ -77,7 +77,6 @@
   --text-md: 16px;
   --text-lg: 17px;
   --track-wide: 0.08em;
-  --track-tight: -0.02em;
   --lh-tight: 1.15;
   --lh-body: 1.55;
 
@@ -88,10 +87,8 @@
   --s4: 16px;
   --s5: 24px;
   --s6: 32px;
-  --s8: 64px;
 
   /* radii */
-  --r0: 0;
   --r-xs: 6px;
   --r-sm: 10px;
   --r-md: 14px;
@@ -99,7 +96,6 @@
 
   /* motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-in: cubic-bezier(0.65, 0, 0.35, 1);
   --dur-fast: 150ms;
   --dur-med: 240ms;
   --dur-slow: 500ms;
@@ -245,16 +241,8 @@ button:active:not(:disabled) {
 }
 
 .session-view.session-view-hidden,
-.session-view-tab.session-view-hidden,
 .app-main-tab.app-main-tab-hidden {
   display: none;
-}
-
-.session-view-tab {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
 }
 
 .app-main-tab {
@@ -421,10 +409,6 @@ button:active:not(:disabled) {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 180px;
-}
-
-.reviewer-model-label-inline {
-  text-transform: none;
 }
 
 .orch-judge-running .reviewer-status-dot {

@@ -1,0 +1,111 @@
+/* ————— unified command palette (files + commands) —————
+   .dialog.palette compound overrides are order-independent against
+   theme.css; everything else is token-only. */
+
+.dialog.palette {
+  width: 560px;
+  max-width: 90vw;
+  max-height: 70vh;
+  padding: var(--s3);
+  gap: var(--s2);
+}
+
+.palette-inputrow {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.palette-mode {
+  flex: none;
+  padding: 2px var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--accent-strong);
+  background: var(--accent-tint);
+  border-radius: var(--r-pill);
+}
+
+.palette-inputrow .dialog-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.palette-count {
+  padding: 0 var(--s1);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 120px;
+}
+
+.palette-section {
+  padding: var(--s2) var(--s2) var(--s1);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.palette-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s1);
+  width: 100%;
+  padding: var(--s1) var(--s2);
+  border-radius: var(--r-xs);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.palette-row:hover {
+  background: var(--hover-surface);
+}
+
+.palette-row-selected,
+.palette-row-selected:hover {
+  background: var(--selection-bg);
+  color: var(--accent-strong);
+}
+
+.palette-row-dir {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-row-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.palette-row-keys {
+  margin-left: auto;
+  padding-left: var(--s3);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+}
+
+.palette-empty {
+  padding: var(--s4);
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}

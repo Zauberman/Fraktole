@@ -3,7 +3,7 @@ import { Workspace } from './Workspace.js';
 import { Divider } from './Divider.js';
 import { ReviewerTab } from './ReviewerTab.js';
 import { useSessionState, type SessionState } from '../session-state.js';
-import { bridge, type SessionStatus } from '../ipc.js';
+import { bridge, type SessionStatus, type SettingsSection } from '../ipc.js';
 import type { AppTab } from './TopBar.js';
 
 export interface ActiveInfo {
@@ -23,6 +23,8 @@ interface SessionViewProps {
   onActivate(sessionId: string): void;
   registerState(sessionId: string, state: SessionState): () => void;
   onActiveInfo(info: ActiveInfo): void;
+  /** Opens the Settings Center (Settings menu, reviewer model button). */
+  onOpenSettings(section: SettingsSection): void;
 }
 
 /**
@@ -40,6 +42,7 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
     onDragRight,
     registerState,
     onActiveInfo,
+    onOpenSettings,
   } = props;
   const ws = useSessionState(sessionId);
   // (re)activate when this view becomes the active session
@@ -119,7 +122,7 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
         style={{ width: `${sideRightPct}%` }}
         onMouseDown={() => ws.setReviewerFocused(true)}
       >
-        <ReviewerTab sessionId={sessionId} />
+        <ReviewerTab sessionId={sessionId} onOpenSettings={onOpenSettings} />
       </section>
     </>
   );

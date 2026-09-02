@@ -1,7 +1,22 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { SamplerKnobs, Settings } from '../src/shared/ipc.js';
+import type {
+  EditorSettings,
+  ExplorerSettings,
+  NotificationSettings,
+  SamplerKnobs,
+  Settings,
+} from '../src/shared/ipc.js';
 import { sanitizeAllowedLaunchers } from '../src/shared/launchers.js';
+
+const DEFAULT_EDITOR: EditorSettings = { wrap: true, autoSave: false };
+const DEFAULT_NOTIFICATIONS: NotificationSettings = { enabled: true };
+const DEFAULT_EXPLORER: ExplorerSettings = { hideHidden: true };
+
+/** Boolean settings flag: a real boolean wins, anything else falls back. */
+function boolFlag(v: unknown, fallback: boolean): boolean {
+  return typeof v === 'boolean' ? v : fallback;
+}
 
 /** Numeric range validator for the sampler knobs: any non-finite or
  *  out-of-range value is dropped (never coerced) — a bad bump in a
@@ -48,6 +63,26 @@ function parseKnobs(raw: Record<string, unknown> | undefined): SamplerKnobs | un
   return Object.keys(k).length > 0 ? k : undefined;
 }
 
+/** Parses the file-editor preferences; defaults fill absent flags, an
+ *  out-of-range font size is dropped (never coerced). */
+function parseEditor(raw: Record<string, unknown> | undefined): EditorSettings {
+  const out: EditorSettings = {
+    wrap: boolFlag(raw?.wrap, DEFAULT_EDITOR.wrap),
+    autoSave: boolFlag(raw?.autoSave, DEFAULT_EDITOR.autoSave),
+  };
+  const fontSize = knobInt(raw?.fontSize, 10, 20);
+  if (fontSize !== undefined) out.fontSize = fontSize;
+  return out;
+}
+
+function parseNotifications(raw: Record<string, unknown> | undefined): NotificationSettings {
+  return { enabled: boolFlag(raw?.enabled, DEFAULT_NOTIFICATIONS.enabled) };
+}
+
+function parseExplorer(raw: Record<string, unknown> | undefined): ExplorerSettings {
+  return { hideHidden: boolFlag(raw?.hideHidden, DEFAULT_EXPLORER.hideHidden) };
+}
+
 /**
  * App preferences, persisted as JSON under userData: the color theme and the
  * reviewer harness config. The reviewer derives provider/endpoint from the
@@ -68,6 +103,9 @@ export class SettingsStore {
       const provider = parsed.reviewer?.provider;
       return {
         theme: typeof parsed.theme === 'string' ? parsed.theme : 'midnight',
+        editor: parseEditor(parsed.editor as Record<string, unknown> | undefined),
+        notifications: parseNotifications(parsed.notifications as Record<string, unknown> | undefined),
+        explorer: parseExplorer(parsed.explorer as Record<string, unknown> | undefined),
         reviewer: {
           apiKey: typeof parsed.reviewer?.apiKey === 'string' ? parsed.reviewer.apiKey : undefined,
           apiKeyEnv: typeof parsed.reviewer?.apiKeyEnv === 'string' ? parsed.reviewer.apiKeyEnv : undefined,
@@ -102,14 +140,27 @@ export class SettingsStore {
         },
       };
     } catch {
-      return { theme: 'midnight', reviewer: {} };
+      return { theme: 'midnight', editor: DEFAULT_EDITOR, notifications: DEFAULT_NOTIFICATIONS, explorer: DEFAULT_EXPLORER, reviewer: {} };
     }
   }
 
   async set(patch: Partial<Settings>): Promise<Settings> {
     const run = this.setQueue.then(async () => {
       const current = await this.get();
-      const next: Settings = { ...current, ...patch, reviewer: { ...current.reviewer, ...patch.reviewer } };
+      const next: Settings = {
+        ...current,
+        ...patch,
+        reviewer: { ...current.reviewer, ...patch.reviewer },
+        editor: patch.editor
+          ? { ...DEFAULT_EDITOR, ...current.editor, ...patch.editor }
+          : current.editor ?? { ...DEFAULT_EDITOR },
+        notifications: patch.notifications
+          ? { enabled: patch.notifications.enabled ?? current.notifications?.enabled ?? DEFAULT_NOTIFICATIONS.enabled }
+          : current.notifications ?? { ...DEFAULT_NOTIFICATIONS },
+        explorer: patch.explorer
+          ? { hideHidden: patch.explorer.hideHidden ?? current.explorer?.hideHidden ?? DEFAULT_EXPLORER.hideHidden }
+          : current.explorer ?? { ...DEFAULT_EXPLORER },
+      };
       await mkdir(dirname(this.file), { recursive: true });
       const tmp = `${this.file}.tmp`;
       await writeFile(tmp, JSON.stringify(next, null, 2), 'utf8');
