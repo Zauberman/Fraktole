@@ -35,12 +35,24 @@ function BootOverlay({ leaving }: { leaving: boolean }): React.JSX.Element {
   );
 }
 
-/** Shown via Help → Reviewer commands… — the Reviewer prompt-box commands. */
-const REVIEWER_COMMANDS = `Reviewer commands — type these in the Reviewer prompt box:
-/goal <text>   arm the loop carrier goal (bare /goal clears it)
-/compact       force a context compaction now
-/summarize     ask the model for a session recap, then compact the context
-/kill <id>     kill the running agent tile <id>`;
+/** Shown via Help → Reviewer commands… — grouped for the command codex. */
+const REVIEWER_COMMANDS = [
+  {
+    label: 'goals',
+    items: [{ cmd: '/goal <text>', desc: 'arm the loop carrier goal (bare /goal clears it)' }],
+  },
+  {
+    label: 'context',
+    items: [
+      { cmd: '/compact', desc: 'force a context compaction now' },
+      { cmd: '/summarize', desc: 'ask the model for a session recap, then compact the context' },
+    ],
+  },
+  {
+    label: 'control',
+    items: [{ cmd: '/kill <id>', desc: 'kill the running agent tile <id>' }],
+  },
+];
 
 export function App(): React.JSX.Element {
   // session + tab orchestration
@@ -83,7 +95,7 @@ export function App(): React.JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState<SettingsSection | null>(null);
   /** Project-wide search panel (editor tab, Ctrl+Shift+F). */
   const [searchOpen, setSearchOpen] = useState(false);
-  const [help, setHelp] = useState<string | null>(null);
+  const [help, setHelp] = useState<typeof REVIEWER_COMMANDS | null>(null);
   /** URL pushed by the reviewer's open_test_page; forwarded to the TestTab. */
   const [pendingTestUrl, setPendingTestUrl] = useState<string | null>(null);
   const defaultCwd = useRef('');
@@ -726,7 +738,7 @@ export function App(): React.JSX.Element {
           {notice}
         </div>
       )}
-      {help && <HelpDialog body={help} onClose={() => setHelp(null)} />}
+      {help && <HelpDialog sections={help} onClose={() => setHelp(null)} />}
       {!bootGone && <BootOverlay leaving={bootLeaving} />}
       </div>
     </ThemeProvider>
