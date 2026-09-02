@@ -43,14 +43,20 @@ async function layerFiles(): Promise<string[]> {
 
 describe('theme token coverage', () => {
   it('every var() used in the CSS layers is a defined token', async () => {
+    const files = await layerFiles();
+    const contents = await Promise.all(files.map((f) => readFile(f, 'utf8')));
+    const definedInLayers = new Set(
+      contents.flatMap((c) => [...c.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]!)),
+    );
     const missing = new Set<string>();
-    for (const file of await layerFiles()) {
-      const css = await readFile(file, 'utf8');
+    contents.forEach((css) => {
       const used = [...css.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]!);
       for (const name of used) {
-        if (!CSS_NATIVE.has(name) && !THEME_TOKENS.has(name)) missing.add(name);
+        if (!CSS_NATIVE.has(name) && !THEME_TOKENS.has(name) && !definedInLayers.has(name)) {
+          missing.add(name);
+        }
       }
-    }
+    });
     expect([...missing], `undefined tokens referenced by CSS: ${[...missing].join(', ')}`).toEqual([]);
   });
 

@@ -583,7 +583,7 @@ export function App(): React.JSX.Element {
   return (
     <ThemeProvider themeId={themeId} setTheme={setTheme}>
       <div className="app-shell">
-        <TopBar tab={tab} onTabChange={setTab} />
+        <TopBar tab={tab} onTabChange={setTab} sessionCount={opened.length} />
         <div ref={bodyRef} className="app-body">
         <section className="pane pane-side" style={{ width: `${sidePct.left}%` }}>
           <Explorer
