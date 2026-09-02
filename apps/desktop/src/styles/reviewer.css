@@ -440,9 +440,10 @@
 .reviewer-empty-mark {
   font-family: var(--font-display);
   font-weight: 400;
-  font-size: clamp(1.5rem, 3vw, 2.75rem);
+  font-size: clamp(2rem, 4vw, 3.5rem);
   letter-spacing: -0.01em;
-  color: var(--mark-ghost);
+  color: var(--rgn-reviewer);
+  opacity: 0.55;
 }
 
 .reviewer-empty-hint {
@@ -662,9 +663,14 @@
   padding: var(--s3);
   margin: var(--s2) 0 0;
   border: 1px solid var(--line-strong);
+  border-left: 2px solid var(--rgn-reviewer);
   border-radius: var(--r-md);
-  background: var(--bg-raised);
+  background: var(--rgn-reviewer-soft);
   animation: reviewer-in 200ms var(--ease-out);
+}
+
+.reviewer-question-card .reviewer-question-mark {
+  color: var(--rgn-reviewer);
 }
 
 .reviewer-question-meta {

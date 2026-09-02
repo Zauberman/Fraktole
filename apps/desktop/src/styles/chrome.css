@@ -114,9 +114,42 @@
   overflow: hidden;
   flex: 0 0 auto;
   flex-shrink: 0;
+  position: relative;
   transition:
     border-color var(--dur-fast) var(--ease-out),
     box-shadow var(--dur-fast) var(--ease-out);
+}
+
+/* THE ambient element of the app: a slow regional breath behind the
+   reviewer column (the one decorative loop; caret/status blinks are
+   functional indicators, not ambience) */
+.pane-reviewer-column::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse 90% 60% at 50% 0%, var(--rgn-reviewer-soft), transparent 70%);
+  animation: reviewer-breathe 8s ease-in-out infinite;
+}
+
+@keyframes reviewer-breathe {
+  0%, 100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-reviewer-column::before {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+.pane-reviewer-column > * {
+  position: relative;
 }
 
 .reviewer-column-focused {
