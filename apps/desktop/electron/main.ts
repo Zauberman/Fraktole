@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron';
 import { copyFile, existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -18,6 +18,12 @@ import { forkProject } from './fork.js';
 import { ReviewerTools, validateLauncherKind } from './reviewer-tools.js';
 import { commandIsPlainLaunch } from '../src/shared/launchers.js';
 import { exportSessionBundle, importSessionBundle, type BundleResult } from './session-bundle.js';
+import { createFileForUser, mkdirForUser, renameForUser, trashForUser, writeAtomic } from './fs-ops.js';
+import { FileWatchRegistry } from './fs-watch.js';
+import { collectGitStatus } from './git-status.js';
+import { searchProject } from './project-search.js';
+import { UsageLog } from './usage-log.js';
+import { initNotify, notifyReviewer } from './notify.js';
 import { SessionRegistry, SessionRuntime } from './session-runtime.js';
 import { SessionStore } from './sessions.js';
 import { SettingsStore } from './settings.js';
@@ -129,10 +135,11 @@ function wireGuestPolicy(): void {
   });
 }
 
-/** Custom application menu: File → New Tile/Sessions/Quit, View → Theme.
- *  The default Electron menu would expose Reload (orphaning every PTY) and
- *  DevTools in production. Session actions are forwarded to the renderer,
- *  which owns the save/switch flows (it holds the live workspace state). */
+/** Custom application menu: File → New Tile/Quit, Session actions, and the
+ *  Settings menu (sections jump into the in-app Settings Center; Theme lives
+ *  there too). The default Electron menu would expose Reload (orphaning every
+ *  PTY) and DevTools in production. Session actions are forwarded to the
+ *  renderer, which owns the save/switch flows (it holds the live state). */
 function buildMenu(currentTheme: ThemeId, sessions: Array<{ id: string; name: string }>): Menu {
   const sessionItems: Electron.MenuItemConstructorOptions[] = [
     { label: 'New Session…', click: () => mainWindow?.webContents.send(IPC.menuSession, { action: 'new' }) },
@@ -175,8 +182,23 @@ function buildMenu(currentTheme: ThemeId, sessions: Array<{ id: string; name: st
       submenu: sessionItems,
     },
     {
-      label: 'View',
+      label: 'Settings',
       submenu: [
+        {
+          label: 'Settings…',
+          accelerator: 'CmdOrCtrl+,',
+          click: () => mainWindow?.webContents.send(IPC.menuSettings, { section: 'general' }),
+        },
+        { type: 'separator' },
+        { label: 'Model…', click: () => mainWindow?.webContents.send(IPC.menuSettings, { section: 'model' }) },
+        { label: 'Sampling & Context…', click: () => mainWindow?.webContents.send(IPC.menuSettings, { section: 'sampling' }) },
+        { label: 'Agents & Launchers…', click: () => mainWindow?.webContents.send(IPC.menuSettings, { section: 'agents' }) },
+        { label: 'Auto Compose…', click: () => mainWindow?.webContents.send(IPC.menuSettings, { section: 'compose' }) },
+        { label: 'Editor…', click: () => mainWindow?.webContents.send(IPC.menuSettings, { section: 'editor' }) },
+        { label: 'Shortcuts…', click: () => mainWindow?.webContents.send(IPC.menuSettings, { section: 'shortcuts' }) },
+        { label: 'Usage…', click: () => mainWindow?.webContents.send(IPC.menuSettings, { section: 'usage' }) },
+        { label: 'Advanced…', click: () => mainWindow?.webContents.send(IPC.menuSettings, { section: 'advanced' }) },
+        { type: 'separator' },
         {
           label: 'Theme',
           submenu: THEME_IDS.map((id) => ({
@@ -487,14 +509,26 @@ if (!app.requestSingleInstanceLock()) {
           },
           tools,
           emit: {
-            status: (status, error, model, variant) =>
-              mainWindow?.webContents.send(IPC.reviewerStatus, session.id, { status, error, model, variant }),
+            status: (status, error, model, variant) => {
+              mainWindow?.webContents.send(IPC.reviewerStatus, session.id, { status, error, model, variant });
+              if (status === 'error' && error) {
+                void notifyReviewer({ sessionId: session.id, title: 'Reviewer error', body: error.slice(0, 160) });
+              }
+            },
             stream: (ev) => mainWindow?.webContents.send(IPC.reviewerStream, session.id, ev),
             toolCall: (ev: ReviewerToolCallEvent) =>
               mainWindow?.webContents.send(IPC.reviewerToolCall, session.id, ev),
             message: (entry) => mainWindow?.webContents.send(IPC.reviewerMessage, session.id, entry),
-            goal: (ev) => mainWindow?.webContents.send(IPC.reviewerGoal, session.id, ev),
-            question: (ev) => mainWindow?.webContents.send(IPC.reviewerQuestion, session.id, ev),
+            goal: (ev) => {
+              mainWindow?.webContents.send(IPC.reviewerGoal, session.id, ev);
+              if (ev.goal?.state === 'met') {
+                void notifyReviewer({ sessionId: session.id, title: 'Goal met', body: ev.goal.text.slice(0, 160) });
+              }
+            },
+            question: (ev) => {
+              mainWindow?.webContents.send(IPC.reviewerQuestion, session.id, ev);
+              void notifyReviewer({ sessionId: session.id, title: 'Reviewer needs input', body: ev.question.slice(0, 160) });
+            },
             usage: (ev) => mainWindow?.webContents.send(IPC.reviewerUsage, session.id, ev),
             recap: (recap) => mainWindow?.webContents.send(IPC.reviewerRecap, session.id, recap),
             budget: (info) => mainWindow?.webContents.send(IPC.reviewerBudget, session.id, info),
@@ -752,7 +786,17 @@ if (!app.requestSingleInstanceLock()) {
         currentTheme = next.theme as ThemeId;
         refreshMenu();
       }
+      // every live consumer (editor prefs, explorer filter, notification
+      // toggle) re-reads from this broadcast instead of re-fetching
+      mainWindow?.webContents.send(IPC.settingsChanged, next);
       return next;
+    });
+    ipcMain.handle(IPC.settingsRevealData, async () => {
+      await shell.openPath(app.getPath('userData'));
+    });
+    initNotify({
+      getWindow: () => mainWindow,
+      isEnabled: async () => (await settings.get()).notifications?.enabled ?? true,
     });
     // programmatic theme switch — persists and re-broadcasts through the
     // exact native-menu path (used by the E2E driver's theme walk)
@@ -1154,11 +1198,27 @@ if (!app.requestSingleInstanceLock()) {
       return { content: await readFile(path, 'utf8'), size: st.size };
     });
     ipcMain.handle(IPC.fsWriteFile, async (_e, path: string, content: string): Promise<void> => {
-      await writeFile(path, content, 'utf8');
+      await writeAtomic(path, content);
     });
     ipcMain.handle(IPC.fsStat, async (_e, path: string): Promise<FsStat> => {
       const st = await stat(path);
       return { path, isDir: st.isDirectory(), isFile: st.isFile(), size: st.size, mtimeMs: st.mtimeMs };
+    });
+    const fileWatches = new FileWatchRegistry((path) => mainWindow?.webContents.send(IPC.fsFileChanged, path));
+    ipcMain.handle(IPC.fsWatchFile, (_e, path: string) => fileWatches.watch(path));
+    ipcMain.handle(IPC.fsUnwatchFile, (_e, path: string) => fileWatches.unwatch(path));
+    ipcMain.handle(IPC.fsMkdir, (_e, dirPath: string) => mkdirForUser(dirPath));
+    ipcMain.handle(IPC.fsCreateFile, (_e, path: string) => createFileForUser(path));
+    ipcMain.handle(IPC.fsRename, (_e, from: string, to: string) => renameForUser(from, to));
+    ipcMain.handle(IPC.fsTrash, (_e, path: string) => trashForUser(path));
+    ipcMain.handle(IPC.gitStatus, (_e, projectPath: string) => collectGitStatus(projectPath));
+    ipcMain.handle(IPC.searchProject, (_e, root: string, query: string) => searchProject(root, query));
+    ipcMain.handle(IPC.usageHistory, async (_e, sessionId: string) => {
+      try {
+        return await new UsageLog(join(sessionsRoot, sessionId, 'reviewer')).read();
+      } catch {
+        return [];
+      }
     });
 
     ipcMain.handle(IPC.pickFolder, async () => {

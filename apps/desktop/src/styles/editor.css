@@ -1,0 +1,167 @@
+/* ————— file editor: tab bar, overflow menu, stale banner —————
+   complements the editor rules in theme.css (pane/pane-body/host). */
+
+/* a pane hosts the stale banner above the editor surface */
+.file-editor-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.file-editor-host {
+  flex: 1;
+  min-height: 0;
+}
+
+/* tab bar: scrollable strip plus trailing actions */
+.editor-tabbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: var(--s3) 0 var(--s2);
+  flex-shrink: 0;
+}
+
+.editor-tabstrip {
+  display: flex;
+  gap: var(--s1);
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.editor-saveall {
+  flex-shrink: 0;
+}
+
+.editor-tabbar-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 var(--s1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.editor-tabbar-more:hover {
+  color: var(--text);
+  background: var(--hover-surface);
+}
+
+/* overflow dropdown, same skeleton as the terminal context menu */
+.editor-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+}
+
+.editor-menu {
+  position: fixed;
+  z-index: 81;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  max-height: min(420px, 60vh);
+  padding: var(--s1);
+  background: var(--bg-overlay);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-dialog);
+}
+
+.editor-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.editor-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono-alt);
+  font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.editor-menu-item:hover:not(:disabled) {
+  background: var(--hover-surface);
+}
+
+.editor-menu-item:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: -1px;
+}
+
+.editor-menu-item:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.editor-menu-item-active {
+  color: var(--accent);
+}
+
+.editor-menu-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-menu-sep {
+  height: 1px;
+  margin: var(--s1) var(--s2);
+  background: var(--line);
+}
+
+/* changed-on-disk banner inside the pane */
+.editor-stale {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-shrink: 0;
+  padding: var(--s2) var(--s3);
+  background: var(--warn-tint);
+  border-bottom: 1px solid var(--line);
+}
+
+.editor-stale-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono-alt);
+  font-size: var(--text-xs);
+  color: var(--warn);
+}
+
+.editor-stale-actions {
+  display: flex;
+  gap: var(--s1);
+  flex-shrink: 0;
+}
+
+/* discard-dialog body text */
+.editor-dialog-text {
+  font-family: var(--font-mono-alt);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}

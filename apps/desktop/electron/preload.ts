@@ -6,7 +6,9 @@ import {
   type FraktoleMessage,
   type FsEntry,
   type FsStat,
+  type GitStatus,
   type MenuSessionAction,
+  type MenuSettingsAction,
   type OpenedSession,
   type Project,
   type PtyExitPayload,
@@ -20,6 +22,7 @@ import {
   type ReviewerStreamEvent,
   type ReviewerToolCallEvent,
   type RemoteStatus,
+  type SearchResult,
   type SendMessageArgs,
   type SessionFile,
   type SessionSavePayload,
@@ -27,6 +30,7 @@ import {
   type SessionSnapshot,
   type Settings,
   type TestPageState,
+  type UsageSample,
 } from '../src/shared/ipc.js';
 import type { AutonomyVariant } from '../src/shared/autonomy.js';
 
@@ -77,6 +81,34 @@ const api = {
     ipcRenderer.on(IPC.menuHelp, listener);
     return () => ipcRenderer.removeListener(IPC.menuHelp, listener);
   },
+  onMenuSettings: (cb: (action: MenuSettingsAction) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, action: MenuSettingsAction): void => cb(action);
+    ipcRenderer.on(IPC.menuSettings, listener);
+    return () => ipcRenderer.removeListener(IPC.menuSettings, listener);
+  },
+  onSettingsChanged: (cb: (settings: Settings) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, settings: Settings): void => cb(settings);
+    ipcRenderer.on(IPC.settingsChanged, listener);
+    return () => ipcRenderer.removeListener(IPC.settingsChanged, listener);
+  },
+  revealDataDir: (): Promise<void> => ipcRenderer.invoke(IPC.settingsRevealData),
+
+  watchFile: (path: string): Promise<void> => ipcRenderer.invoke(IPC.fsWatchFile, path),
+  unwatchFile: (path: string): Promise<void> => ipcRenderer.invoke(IPC.fsUnwatchFile, path),
+  onFileChanged: (cb: (path: string) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, path: string): void => cb(path);
+    ipcRenderer.on(IPC.fsFileChanged, listener);
+    return () => ipcRenderer.removeListener(IPC.fsFileChanged, listener);
+  },
+  mkdir: (dirPath: string): Promise<void> => ipcRenderer.invoke(IPC.fsMkdir, dirPath),
+  createFile: (path: string): Promise<void> => ipcRenderer.invoke(IPC.fsCreateFile, path),
+  renamePath: (from: string, to: string): Promise<void> => ipcRenderer.invoke(IPC.fsRename, from, to),
+  trashPath: (path: string): Promise<void> => ipcRenderer.invoke(IPC.fsTrash, path),
+
+  gitStatus: (projectPath: string): Promise<GitStatus | null> => ipcRenderer.invoke(IPC.gitStatus, projectPath),
+  searchProject: (root: string, query: string): Promise<SearchResult> =>
+    ipcRenderer.invoke(IPC.searchProject, root, query),
+  usageHistory: (sessionId: string): Promise<UsageSample[]> => ipcRenderer.invoke(IPC.usageHistory, sessionId),
 
   listProjects: (): Promise<Project[]> => ipcRenderer.invoke(IPC.projectsList),
   addProject: (path: string): Promise<Project> => ipcRenderer.invoke(IPC.projectsAdd, path),

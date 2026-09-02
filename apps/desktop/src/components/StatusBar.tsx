@@ -1,5 +1,6 @@
 import React from 'react';
 import type { SessionStatus } from '../ipc.js';
+import { statusHints } from '../shortcuts.js';
 
 interface StatusBarProps {
   sessionName: string | null;
@@ -7,10 +8,16 @@ interface StatusBarProps {
   tileCount: number;
   focusedCwd: string | null;
   info: string;
+  /** Git branch of the active project (null = no repo / no project). */
+  branch: string | null;
+  /** Open editor tabs with unsaved changes. */
+  dirtyCount: number;
+  /** Clicking the hint strip opens the shortcuts reference. */
+  onOpenShortcuts: () => void;
 }
 
 export function StatusBar(props: StatusBarProps): React.JSX.Element {
-  const { sessionName, sessionState, tileCount, focusedCwd, info } = props;
+  const { sessionName, sessionState, tileCount, focusedCwd, info, branch, dirtyCount, onOpenShortcuts } = props;
   return (
     <footer className="status-bar">
       <span>
@@ -27,12 +34,17 @@ export function StatusBar(props: StatusBarProps): React.JSX.Element {
         {focusedCwd ? ` · ${focusedCwd}` : ''}
       </span>
       <span className="status-right">
-        <span className="status-hints">
-          <span>ctrl+shift T tile</span>
-          <span>W close</span>
-          <span>enter zoom</span>
-          <span>0 reviewer</span>
-          <span>alt+1/2/3 tabs</span>
+        {dirtyCount > 0 && <span className="status-dirty">● {dirtyCount} unsaved</span>}
+        {branch && <span className="status-branch" title="git branch">{branch}</span>}
+        <span
+          className="status-hints"
+          title="keyboard shortcuts — click for the full list"
+          onClick={onOpenShortcuts}
+          role="button"
+        >
+          {statusHints().map((h) => (
+            <span key={h}>{h}</span>
+          ))}
         </span>
         <span className="status-info">{info}</span>
       </span>

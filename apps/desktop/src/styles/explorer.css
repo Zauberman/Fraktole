@@ -1,0 +1,263 @@
+/* explorer sidebar + project search — color comes exclusively from theme
+   tokens (var(--*)); this file adds layout and state styling only */
+
+/* ————— header tools: branch chip + hidden-files toggle ————— */
+
+.explorer-header-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.explorer-branch {
+  padding: 1px var(--s2);
+  border-radius: var(--r-pill);
+  background: var(--hover-surface);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.explorer-filter {
+  width: 22px;
+  height: 22px;
+}
+
+.explorer-filter-on {
+  color: var(--accent);
+}
+
+/* ————— tree rows: icons + git change dots ————— */
+
+.explorer-icon {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.explorer-tree .tree-row {
+  gap: var(--s1);
+}
+
+.explorer-tree .tree-chevron + .explorer-icon {
+  margin-left: calc(var(--s1) * -1);
+}
+
+.git-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.git-m {
+  background: var(--warn);
+}
+
+.git-a {
+  background: var(--ok);
+}
+
+.git-d {
+  background: var(--err);
+}
+
+.git-u {
+  background: var(--text-faint);
+}
+
+/* ————— transient error line at the tree bottom ————— */
+
+.explorer-error {
+  position: sticky;
+  bottom: 0;
+  margin-top: var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--err-tint);
+  color: var(--err);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: var(--lh-tight);
+  border-radius: var(--r-xs);
+  overflow-wrap: anywhere;
+}
+
+/* ————— inline dialog error + confirm copy ————— */
+
+.explorer-form-error {
+  color: var(--err);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.explorer-confirm-text {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* ————— project search overlay ————— */
+
+.search-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--overlay-scrim);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh var(--s5) var(--s5);
+}
+
+.search-panel {
+  width: min(680px, 92vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s4);
+  background: var(--bg-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-dialog);
+}
+
+.search-inputrow {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--s2) var(--s3);
+  background: var(--bg-tile);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  outline: none;
+  user-select: text;
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--focus-ring);
+}
+
+.search-count {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.search-engine {
+  padding: 1px var(--s2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.search-close {
+  flex-shrink: 0;
+}
+
+.search-results {
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.search-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.search-group-path {
+  padding: var(--s1) 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  width: 100%;
+  padding: var(--s1) var(--s2);
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--lh-tight);
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-row:hover,
+.search-row-active {
+  background: var(--hover-surface);
+  color: var(--text);
+}
+
+.search-row-active {
+  outline: 1px solid var(--line-strong);
+  outline-offset: -1px;
+}
+
+.search-line {
+  flex-shrink: 0;
+  min-width: 28px;
+  text-align: right;
+  color: var(--text-faint);
+}
+
+.search-text {
+  overflow-wrap: anywhere;
+}
+
+.search-hit-mark {
+  background: var(--mark-ghost);
+  color: var(--accent-strong);
+  border-radius: 2px;
+}
+
+.search-empty {
+  padding: var(--s4);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--lh-tight);
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}
+
+.search-truncated {
+  padding: var(--s2) 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  color: var(--warn);
+}

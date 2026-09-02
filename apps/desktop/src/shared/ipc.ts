@@ -78,7 +78,71 @@ export const IPC = {
   remoteSetPort: 'remote:set-port',
   remoteRevokeDevice: 'remote:revoke-device',
   remoteStatus: 'remote:status',
+  menuSettings: 'menu:settings',
+  settingsChanged: 'settings:changed',
+  settingsRevealData: 'settings:reveal-data',
+  fsWatchFile: 'fs:watch-file',
+  fsUnwatchFile: 'fs:unwatch-file',
+  fsFileChanged: 'fs:file-changed',
+  fsMkdir: 'fs:mkdir',
+  fsCreateFile: 'fs:create-file',
+  fsRename: 'fs:rename',
+  fsTrash: 'fs:trash',
+  gitStatus: 'git:status',
+  searchProject: 'search:project',
+  usageHistory: 'usage:history',
 } as const;
+
+/** Sections of the in-app Settings view — the native Settings menu jumps to
+ *  one of these, the palette can open any of them. */
+export type SettingsSection =
+  | 'general'
+  | 'model'
+  | 'sampling'
+  | 'agents'
+  | 'compose'
+  | 'editor'
+  | 'shortcuts'
+  | 'usage'
+  | 'advanced';
+
+/** menu:settings payload — open the Settings view, optionally at a section. */
+export interface MenuSettingsAction {
+  section?: SettingsSection;
+}
+
+/** git:status result for a project root (null when not a git repo). */
+export type GitMark = 'M' | 'A' | 'D' | 'R' | '?';
+
+export interface GitStatus {
+  branch: string | null;
+  /** Path (relative to the project root) → change mark. */
+  entries: Record<string, GitMark>;
+}
+
+/** One search hit in the project-search panel. */
+export interface SearchHit {
+  path: string;
+  line: number;
+  text: string;
+}
+
+/** search:project result. `engine` reports whether ripgrep or the JS
+ *  fallback walk produced the hits. */
+export interface SearchResult {
+  hits: SearchHit[];
+  truncated: boolean;
+  engine: 'rg' | 'walk';
+}
+
+/** One per-turn token usage sample, appended to the session's usage log
+ *  after each completed turn (deltas, not cumulative). */
+export interface UsageSample {
+  at: number;
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+}
 
 export interface MenuSessionAction {
   action: 'new' | 'save-as' | 'rename' | 'open' | 'delete' | 'stop' | 'start' | 'export-bundle' | 'import-bundle';
@@ -159,6 +223,12 @@ export interface SamplerKnobs {
 
 export interface Settings {
   theme: string;
+  /** File-editor preferences (defaults filled by the store on read). */
+  editor?: EditorSettings;
+  /** Desktop-notification preferences. */
+  notifications?: NotificationSettings;
+  /** Explorer sidebar preferences. */
+  explorer?: ExplorerSettings;
   /** The reviewer harness model config. Everything except the key is
    *  derived by resolveProvider: the key alone decides provider/endpoint,
    *  with optional explicit overrides for ambiguous sk- keys. */
@@ -193,7 +263,23 @@ export interface Settings {
   /** The user's custom autonomous loop: name + full directive. When the
    *  custom variant is picked, this prompt replaces the placeholder. */
   customAutonomy?: { name?: string; prompt?: string };
-};
+  };
+}
+
+/** File-editor preferences. Always present after settings:get (defaults
+ *  filled by the store); fontSize unset = CodeMirror default size. */
+export interface EditorSettings {
+  fontSize?: number;
+  wrap: boolean;
+  autoSave: boolean;
+}
+
+export interface NotificationSettings {
+  enabled: boolean;
+}
+
+export interface ExplorerSettings {
+  hideHidden: boolean;
 }
 
 /** The harness reviewer's lifecycle status. */
