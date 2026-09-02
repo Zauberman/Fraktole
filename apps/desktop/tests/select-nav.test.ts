@@ -35,7 +35,7 @@ describe('selectReduce', () => {
   });
 
   it('typeahead jumps to the first prefix match', () => {
-    let s = selectReduce(selectInit, { t: 'type', ch: 'g', now: 1000 }, OPTS);
+    const s = selectReduce(selectInit, { t: 'type', ch: 'g', now: 1000 }, OPTS);
     expect(s.active).toBe(3);
     expect(s.typed).toBe('g');
   });
@@ -52,7 +52,7 @@ describe('selectReduce', () => {
   });
 
   it('typeahead keeps the buffer when nothing matches', () => {
-    let s = selectReduce(selectInit, { t: 'type', ch: 'z', now: 1000 }, OPTS);
+    const s = selectReduce(selectInit, { t: 'type', ch: 'z', now: 1000 }, OPTS);
     expect(s.typed).toBe('z');
     expect(s.active).toBe(0);
   });
