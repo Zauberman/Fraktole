@@ -3,6 +3,7 @@ import type { ReviewerEntry, ReviewerGoal, ReviewerQuestion, ReviewerStatus, Rev
 import { bridge } from '../ipc.js';
 import { AUTONOMY_NAMES, AUTONOMY_VARIANTS, type AutonomyVariant } from '../shared/autonomy.js';
 import { sanitizeChatText } from '../shared/sanitize.js';
+import { Dialog } from './Dialog.js';
 import { ReviewerToolCard } from './ReviewerToolCard.js';
 
 /** One row of the unified transcript timeline: a message or a tool call.
@@ -603,59 +604,58 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       )}
 
       {resumeOffer && (
-        <div className="dialog-backdrop" onMouseDown={() => setResumeOffer(null)}>
-          <section className="dialog" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="dialog-title">resume previous run?</div>
-            <div className="reviewer-resume-text">
-              A previous autonomous run for this variant has an active goal and an existing fork. Resume it in place,
-              or discard the fork and start fresh.
-            </div>
-            <div className="reviewer-resume-goal">{sanitizeChatText(resumeOffer.goalText)}</div>
-            <div className="reviewer-config-actions">
-              <button
-                type="button"
-                className="btn btn-sm btn-primary"
-                onClick={() => {
-                  const v = resumeOffer.variant;
-                  setResumeOffer(null);
-                  startingRef.current = 'planning';
-                  setStarting('planning');
-                  void bridge.setReviewerAutonomy(sessionId, v, 'auto').then((res) => {
-                    if (!res.ok) {
-                      startingRef.current = null;
-                      setStarting(null);
-                      setComposeError(res.error ?? 'could not resume the run');
-                    }
-                  });
-                }}
-              >
-                resume in place
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm"
-                onClick={() => {
-                  const v = resumeOffer.variant;
-                  setResumeOffer(null);
-                  startingRef.current = 'planning';
-                  setStarting('planning');
-                  void bridge.setReviewerAutonomy(sessionId, v, 'fresh').then((res) => {
-                    if (!res.ok) {
-                      startingRef.current = null;
-                      setStarting(null);
-                      setComposeError(res.error ?? 'could not start fresh');
-                    }
-                  });
-                }}
-              >
-                start fresh
-              </button>
-              <button type="button" className="btn btn-sm" onClick={() => setResumeOffer(null)}>
-                cancel
-              </button>
-            </div>
-          </section>
-        </div>
+        <Dialog title="resume previous run?" onClose={() => setResumeOffer(null)} accent="reviewer" size="md" footer={
+          <button type="button" className="btn btn-sm" onClick={() => setResumeOffer(null)}>
+            cancel
+          </button>
+        }>
+          <div className="reviewer-resume-text">
+            A previous autonomous run for this variant has an active goal and an existing fork.
+          </div>
+          <div className="reviewer-resume-goal">{sanitizeChatText(resumeOffer.goalText)}</div>
+          <div className="fork-cards">
+            <button
+              type="button"
+              className="fork-card fork-card-resume"
+              onClick={() => {
+                const v = resumeOffer.variant;
+                setResumeOffer(null);
+                startingRef.current = 'planning';
+                setStarting('planning');
+                void bridge.setReviewerAutonomy(sessionId, v, 'auto').then((res) => {
+                  if (!res.ok) {
+                    startingRef.current = null;
+                    setStarting(null);
+                    setComposeError(res.error ?? 'could not resume the run');
+                  }
+                });
+              }}
+            >
+              <span className="fork-card-title">resume in place</span>
+              <span className="fork-card-desc">continue the existing fork from its last state</span>
+            </button>
+            <button
+              type="button"
+              className="fork-card fork-card-fresh"
+              onClick={() => {
+                const v = resumeOffer.variant;
+                setResumeOffer(null);
+                startingRef.current = 'planning';
+                setStarting('planning');
+                void bridge.setReviewerAutonomy(sessionId, v, 'fresh').then((res) => {
+                  if (!res.ok) {
+                    startingRef.current = null;
+                    setStarting(null);
+                    setComposeError(res.error ?? 'could not start fresh');
+                  }
+                });
+              }}
+            >
+              <span className="fork-card-title">start fresh</span>
+              <span className="fork-card-desc">discard the fork and begin a new run</span>
+            </button>
+          </div>
+        </Dialog>
       )}
 
       <footer className="reviewer-input">

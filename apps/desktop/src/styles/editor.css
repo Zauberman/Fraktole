@@ -165,3 +165,96 @@
   font-size: var(--text-sm);
   color: var(--text-muted);
 }
+
+/* ————— file editor ————— */
+
+.file-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 0 var(--s3) var(--s3);
+}
+
+.file-editor-tabs {
+  display: flex;
+  gap: var(--s1);
+  padding: var(--s3) 0 var(--s2);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.file-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+.file-tab-active {
+  color: var(--rgn-editor);
+  border-color: var(--rgn-editor);
+  background: var(--rgn-editor-soft);
+}
+
+.file-tab:hover {
+  color: var(--text);
+  background: var(--hover-surface);
+}
+
+.file-tab-dirty {
+  color: var(--warn);
+}
+
+.file-tab-ro {
+  color: var(--text-faint);
+  font-size: var(--text-2xs);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-xs);
+  padding: 0 2px;
+}
+
+.file-tab-close {
+  color: var(--text-faint);
+  padding: 0 var(--s1);
+}
+
+.file-tab-close:hover {
+  color: var(--err);
+}
+
+.file-editor-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--bg-tile);
+}
+
+.file-editor-pane {
+  position: absolute;
+  inset: 0;
+}
+
+.file-editor-pane-hidden {
+  display: none;
+}
+
+.file-editor-host {
+  height: 100%;
+}
+
+.file-editor-host .cm-editor {
+  height: 100%;
+}

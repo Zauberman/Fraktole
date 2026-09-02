@@ -12,15 +12,8 @@
   gap: var(--s2);
 }
 
-.usage-select {
+.usage-picker .select {
   min-width: 240px;
-  padding: var(--s1) var(--s2);
-  background: var(--bg-raised);
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: var(--r-xs);
-  font-family: var(--font-ui);
-  font-size: var(--text-sm);
 }
 
 .usage-totals {
@@ -56,7 +49,7 @@
   font-size: var(--text-2xs);
   letter-spacing: var(--track-wide);
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--rgn-settings);
   margin-bottom: var(--s2);
 }
 

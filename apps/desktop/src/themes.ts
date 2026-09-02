@@ -1,3 +1,5 @@
+import { contrastOklch, oklchParts } from './color.js';
+
 export const THEME_IDS = ["sable", "midnight", "gold", "amber", "forest", "neon", "paper", "ember", "ocean", "violet", "slate", "rose", "ivory"] as const;
 export type ThemeId = (typeof THEME_IDS)[number];
 
@@ -26,6 +28,39 @@ export interface XtermPalette {
 }
 
 /**
+ * Regional chrome families (vibrant-chrome architecture): each chrome
+ * region carries its own per-theme hue anchor + premixed soft tint.
+ * Tiles/terminals never consume these — chrome only.
+ */
+export type RegionId = 'explorer' | 'editor' | 'reviewer' | 'palette' | 'settings';
+export const REGION_IDS: readonly RegionId[] = ['explorer', 'editor', 'reviewer', 'palette', 'settings'];
+
+/**
+ * Explorer file-kind tints (replace icons): semantic categories, one hue
+ * per kind, neutral files fall back to --text-faint.
+ */
+export type CategoryId = 'folder' | 'code' | 'doc' | 'config' | 'style' | 'data';
+export const CATEGORY_IDS: readonly CategoryId[] = ['folder', 'code', 'doc', 'config', 'style', 'data'];
+
+export type SurfaceColors = {
+  [K in RegionId as `--rgn-${K}`]: string;
+} & {
+  [K in RegionId as `--rgn-${K}-soft`]: string;
+} & {
+  [K in CategoryId as `--cat-${K}`]: string;
+};
+
+/** The hand-authored per-theme tokens (everything except the derived surfaces). */
+export type BaseTokens = { [K in Exclude<keyof ThemeTokens, keyof SurfaceColors>]: string };
+
+export interface BaseTheme {
+  id: ThemeId;
+  name: string;
+  tokens: BaseTokens;
+  xterm: XtermPalette;
+}
+
+/**
  * Theme token contract. Every color a component can use lives here — a
  * component styles itself exclusively through these names. Rules enforced
  * by the test suite (tests/themes.test.ts + tests/token-coverage.test.ts):
@@ -36,8 +71,10 @@ export interface XtermPalette {
  *   - shadows are hue-tinted near-black, never pure black
  *   - hairlines keep a perceptual lightness gap over the base
  *   - --chrome-bg (bars) keeps every chrome text level readable
+ *   - regional anchors ≥ 3:1 on bg, pairwise ΔE-distinct
+ *   - category tints ≥ 4.5:1 on bg (they color file names)
  */
-export interface ThemeTokens {
+export interface ThemeTokens extends SurfaceColors {
   // surfaces — six levels from deepest well to overlay
   '--bg': string;
   '--bg-sunken': string;
@@ -94,7 +131,7 @@ export const DEFAULT_THEME: ThemeId = 'sable';
  * theme's hue family. Sable is the flagship warm default; slate is the
  * quietest (lowest chroma) and neon the loudest (divergent chrome).
  */
-export const THEMES: readonly FraktoleTheme[] = [
+const BASE_THEMES: readonly BaseTheme[] = [
   {
     id: "sable",
     name: "Sable",
@@ -889,6 +926,84 @@ export const THEMES: readonly FraktoleTheme[] = [
     },
   }
 ];
+
+/* ------------------------------------------------------------------ *
+ * Regional + category color derivation
+ *
+ * Each theme rotates five chrome-region hues and six file-category hues
+ * around its accent hue on an exact 60° wheel. Perceptual safety against
+ * the fixed status hues (ok/warn/err) is achieved by shifting a theme's
+ * whole category wheel (CATEGORY_BASE_SHIFT, hand-curated) when a slot
+ * would land perceptually on a status color, and by nudging lightness
+ * per hue until the WCAG target holds (categories ≥ 4.5:1 — they color
+ * file names — and regional anchors ≥ 3:1). tests/themes.test.ts enforces
+ * the outcome with ΔE(oklab) rules.
+ * ------------------------------------------------------------------ */
+
+export const REGION_OFFSETS: Record<RegionId, number> = { explorer: 30, editor: 90, reviewer: 150, palette: 210, settings: 270 };
+export const CATEGORY_OFFSETS: Record<CategoryId, number> = { folder: 15, code: 75, doc: 135, config: 195, style: 255, data: 315 };
+
+/** Whole-wheel category shifts, hand-curated per theme to maximize the
+ *  worst-case perceptual distance from the fixed status hues (ok/warn/err).
+ *  Computed by exhaustive search over 15° steps; verified by the test suite
+ *  (category-vs-status ΔE ≥ 0.06, roughly 3× the just-noticeable difference). */
+const CATEGORY_BASE_SHIFT: Partial<Record<ThemeId, number>> = {
+  sable: 30,
+  midnight: 45,
+  amber: 30,
+  paper: 15,
+  ember: 30,
+  ocean: 30,
+  violet: 45,
+  slate: 45,
+  rose: 15,
+  ivory: 45,
+};
+
+const fmt = (l: number, c: number, h: number): string => `oklch(${l.toFixed(3)} ${c.toFixed(3)} ${h.toFixed(1)})`;
+const fmtSoft = (l: number, c: number, h: number): string => `oklch(${l.toFixed(3)} ${c.toFixed(3)} ${h.toFixed(1)} / 0.12)`;
+
+/** Nudges lightness (up on dark themes, down on light ones) until the
+ *  contrast target holds against the theme background. */
+function adjustForContrast(l: number, c: number, h: number, bg: string, target: number, light: boolean): number {
+  let L = l;
+  for (let i = 0; i < 60; i += 1) {
+    if (contrastOklch(fmt(L, c, h), bg) >= target) return L;
+    const next = light ? L - 0.01 : L + 0.01;
+    if ((light && next < 0.22) || (!light && next > 0.90)) return L;
+    L = next;
+  }
+  return L;
+}
+
+export function deriveSurfaceColors(base: BaseTokens, id: ThemeId): SurfaceColors {
+  const accent = oklchParts(base['--accent']);
+  const light = oklchParts(base['--bg']).l >= 0.5;
+  const regionC = Math.min(0.14, Math.max(0.10, accent.c + 0.02));
+  const categoryC = Math.min(0.15, Math.max(0.12, accent.c + 0.04));
+  const anchorL = light ? 0.46 : 0.72;
+  const categoryL = light ? 0.42 : 0.74;
+  const categoryShift = CATEGORY_BASE_SHIFT[id] ?? 0;
+
+  const out: Record<string, string> = {};
+  REGION_IDS.forEach((role) => {
+    const h = ((accent.h + REGION_OFFSETS[role]) % 360 + 360) % 360;
+    const L = adjustForContrast(anchorL, regionC, h, base['--bg'], 3, light);
+    out[`--rgn-${role}`] = fmt(L, regionC, h);
+    out[`--rgn-${role}-soft`] = fmtSoft(L, regionC, h);
+  });
+  CATEGORY_IDS.forEach((kind) => {
+    const h = ((accent.h + CATEGORY_OFFSETS[kind] + categoryShift) % 360 + 360) % 360;
+    const L = adjustForContrast(categoryL, categoryC, h, base['--bg'], 4.5, light);
+    out[`--cat-${kind}`] = fmt(L, categoryC, h);
+  });
+  return out as SurfaceColors;
+}
+
+export const THEMES: readonly FraktoleTheme[] = BASE_THEMES.map((t) => ({
+  ...t,
+  tokens: { ...t.tokens, ...deriveSurfaceColors(t.tokens, t.id) },
+}));
 
 export function themeById(id: string | null | undefined): FraktoleTheme {
   return THEMES.find((t) => t.id === id) ?? THEMES[0]!;

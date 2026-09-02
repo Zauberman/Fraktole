@@ -39,7 +39,7 @@ export function NameDialog(props: NameDialogProps): React.JSX.Element {
   };
 
   return (
-    <Dialog title={title} onClose={onCancel}>
+    <Dialog title={title} onClose={onCancel} accent="explorer" size="sm">
       <input
         className="dialog-input"
         autoFocus

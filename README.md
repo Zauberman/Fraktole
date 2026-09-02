@@ -30,7 +30,10 @@ The monorepo contains the desktop workstation (`apps/desktop`) and the Flutter A
 - **Goal Loop Carrier & Sub-Goals**: Break large initiatives into tracked sub-goals with self-healing loop carrier re-checks and automated progression upon reaching `GOAL-MET:`.
 - **Integrated Browser Testing**: Embedded webview Test tab that the AI can navigate, capture console errors from, screenshot, and verify after fixes.
 - **Mobile Remote Companion**: Flutter Android client connecting over end-to-end local TLS/WSS to monitor agents, stream tiles, and review tasks on the go.
-- **Settings Center**: A dedicated in-app settings surface (also under a native **Settings** menu, `Ctrl+,`) — model, sampling knobs, launchers, Auto Compose, editor prefs, shortcuts, and token-usage graphs in one themed ledger.
+- **Settings Center**: A dedicated full-window settings ledger (also under a native **Settings** menu, `Ctrl+,`) — model, sampling knobs, launchers, Auto Compose, editor prefs, shortcuts, and token-usage graphs in one themed surface.
+- **Vibrant Chrome**: A regional color architecture — every chrome region (explorer, editor, reviewer, palette, settings) carries its own perceptually-derived hue family per theme, derived at runtime and contrast-tested; terminal tiles stay calm and text-first.
+- **Semantic Explorer**: No icons — files and folders are color-coded by kind (folder / code / doc / config / style / data) with a leading tick and name tint, plus git change dots.
+- **Bespoke Popups**: Every modal, menu and dropdown has its own layout with personality — the tile launcher's card grid, the session namer's serif preview plate, the command codex, tri-state save/discard rows, the resume-vs-fresh fork card — and a custom keyboard-first listbox replaces every native `<select>`.
 - **Command Palette & Project Search**: `Ctrl+P` files, `Ctrl+Shift+P` commands — every tab, theme, setting and reviewer action reachable from one ranked palette; `Ctrl+Shift+F` searches the whole project.
 - **Git Awareness & Desktop Notifications**: Live branch + change markers in the Explorer and status bar; OS notifications when the reviewer needs input, a goal is met, or a run errors — click one to jump straight to the session.
 
@@ -55,7 +58,7 @@ The built-in Reviewer is an autonomous control loop supporting **OpenAI-compatib
 - **Model-Tuning Knobs**: Per-provider context window, output cap, and sampler overrides (temperature, top_p, top_k) for local servers.
 - **Provider Catalog**: Searchable catalog of OpenAI-compatible endpoints — keyless local servers included — with config validation.
 - **Thinking Replay**: Reasoning traces replay across providers on continuation turns; the system prompt persists across restarts.
-- **Usage Graphs**: Per-session token usage (input / cached / output, per turn and cumulative) charted in Settings▸Usage — pure tokens, no cost tracking.
+- **Usage Graphs**: Per-session token usage (input / cached / output, per turn and cumulative) charted in Settings▸Usage — pure tokens, no cost tracking. A single ambient element — the reviewer column's slow regional breath — keeps the shell alive without ever competing with terminal content.
 
 ### 3. Auto Compose (Autonomous Loops in Safe Forks)
 Auto Compose runs structured, autonomous development loops. Each run launches inside an **isolated project fork** (`.fraktole-auto/`), leaving the master repository untouched:

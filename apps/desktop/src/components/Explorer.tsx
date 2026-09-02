@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import '../styles/explorer.css';
 import { bridge, type FsEntry, type GitStatus, type Project } from '../ipc.js';
 import { Dialog } from './Dialog.js';
-import { FileIcon } from './explorer/FileIcon.js';
+import { classifyFile, nameClassFor } from '../file-kinds.js';
 import { NameDialog } from './explorer/NameDialog.js';
 import { gitMarkFor, useGitStatus } from './explorer/useGitStatus.js';
 
@@ -91,19 +91,20 @@ function TreeRow(props: TreeRowProps): React.JSX.Element {
     e.stopPropagation();
     onMenu(entry, e.clientX, e.clientY);
   };
+  const kind = classifyFile(entry.name, entry.isDir);
   if (entry.isDir) {
     return (
       <li>
         <button
           type="button"
-          className="tree-row"
+          className={`tree-row tree-row-${kind}`}
           style={pad}
           onClick={() => onToggleDir(entry.path)}
           onContextMenu={rowMenu}
         >
+          <span className="tree-tick" aria-hidden="true" />
           <span className={`tree-chevron${expanded ? ' tree-chevron-open' : ''}`}>{expanded ? '▾' : '▸'}</span>
-          <FileIcon entry={entry} />
-          <span className="tree-name">{entry.name}</span>
+          <span className={`tree-name ${nameClassFor(kind)}`}>{entry.name}</span>
           {loadingPaths.has(entry.path) && <span className="tree-loading">…</span>}
         </button>
         {expanded && kids !== null && (
@@ -135,13 +136,13 @@ function TreeRow(props: TreeRowProps): React.JSX.Element {
     <li>
       <button
         type="button"
-        className="tree-row tree-file"
+        className={`tree-row tree-file tree-row-${kind}`}
         style={pad}
         onClick={() => onOpenFile(entry.path)}
         onContextMenu={rowMenu}
       >
-        <FileIcon entry={entry} />
-        <span className="tree-name">{entry.name}</span>
+        <span className="tree-tick" aria-hidden="true" />
+        <span className={`tree-name ${nameClassFor(kind)}`}>{entry.name}</span>
         {dot}
       </button>
     </li>
@@ -401,18 +402,11 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
           )}
           <button
             type="button"
-            className={`tile-btn explorer-filter${hideHidden ? '' : ' explorer-filter-on'}`}
+            className={`explorer-chip${hideHidden ? '' : ' explorer-chip-on'}`}
             title={hideHidden ? 'show hidden files' : 'hide hidden files'}
             onClick={toggleHidden}
           >
-            <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
-              <path
-                d="M1 5.5 C2.4 3.2 3.9 2.3 5.5 2.3 C7.1 2.3 8.6 3.2 10 5.5 C8.6 7.8 7.1 8.7 5.5 8.7 C3.9 8.7 2.4 7.8 1 5.5 Z M5.5 4.1 A1.4 1.4 0 1 0 5.5 6.9 A1.4 1.4 0 1 0 5.5 4.1 Z"
-                stroke="currentColor"
-                strokeWidth="1.1"
-                fill="none"
-              />
-            </svg>
+            hidden
           </button>
           <button type="button" className="tile-btn explorer-add" title="add folder" onClick={onAddFolder}>
             <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
@@ -527,15 +521,14 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
         />
       )}
       {confirmDelete !== null && (
-        <Dialog title="delete" onClose={() => setConfirmDelete(null)}>
-          <p className="explorer-confirm-text">move {confirmDelete.name} to trash?</p>
-          <div className="dialog-actions">
+        <Dialog title="move to trash" onClose={() => setConfirmDelete(null)} accent="err" size="sm" footer={
+          <>
             <button type="button" className="btn btn-sm" onClick={() => setConfirmDelete(null)}>
               cancel
             </button>
             <button
               type="button"
-              className="btn btn-sm btn-primary"
+              className="btn btn-sm btn-danger"
               onClick={() => {
                 const entry = confirmDelete;
                 setConfirmDelete(null);
@@ -544,7 +537,11 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
             >
               move to trash
             </button>
-          </div>
+          </>
+        }>
+          <p className="explorer-confirm-text">
+            move <span className="reckoning-name">{confirmDelete.name}</span> to trash?
+          </p>
         </Dialog>
       )}
     </div>
