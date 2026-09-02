@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Select } from '../Select.js';
 import { bridge } from '../../ipc.js';
 import type { SessionSummary, UsageSample } from '../../shared/ipc.js';
 import { fmtTokens } from './tokens.js';
@@ -70,14 +71,13 @@ export function UsageSection(): React.JSX.Element {
   return (
     <div className="usage-section">
       <div className="usage-picker">
-        <select className="usage-select" value={sessionId} onChange={(e) => pick(e.target.value)} aria-label="session">
-          {sessions?.length === 0 && <option value="">no sessions yet</option>}
-          {sessions?.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
+        <Select
+          ariaLabel="session"
+          value={sessionId}
+          placeholder="no sessions yet"
+          onChange={pick}
+          options={(sessions ?? []).map((sess) => ({ value: sess.id, label: sess.name }))}
+        />
         <button type="button" className="btn btn-sm" onClick={refresh}>
           refresh
         </button>

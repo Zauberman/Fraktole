@@ -201,6 +201,14 @@
   white-space: nowrap;
 }
 
+.status-dirty {
+  color: var(--warn);
+}
+
+.status-branch {
+  color: var(--text-muted);
+}
+
 /* ————— boot ————— */
 
 .boot-overlay {

@@ -286,3 +286,130 @@
     animation: none;
   }
 }
+
+/* ————— custom select (replaces native <select>) ————— */
+
+.select {
+  position: relative;
+  width: 100%;
+}
+
+.select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  width: 100%;
+  text-align: left;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-xs);
+  padding: var(--s1) var(--s2);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.select-trigger:hover,
+.select-trigger:focus-visible {
+  border-color: var(--rgn-settings);
+  outline: none;
+}
+
+.select-placeholder {
+  color: var(--text-faint);
+}
+
+.select-caret {
+  color: var(--text-faint);
+  font-size: var(--text-2xs);
+}
+
+.select-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+}
+
+.select-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 81;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--bg-overlay);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-dialog);
+  padding: var(--s1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  animation: select-pop-in var(--dur-fast) var(--ease-out);
+}
+
+@keyframes select-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .select-pop {
+    animation: none;
+  }
+}
+
+.select-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.select-section-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--rgn-settings);
+  padding: var(--s1) var(--s2) 2px;
+}
+
+.select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-xs);
+  padding: var(--s1) var(--s2);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.select-option-active {
+  background: var(--hover-surface);
+}
+
+.select-option[aria-selected='true'] {
+  color: var(--rgn-settings);
+}
+
+.select-option-hint {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+}

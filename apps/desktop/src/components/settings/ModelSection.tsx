@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Select, type SelectOption } from '../Select.js';
 import { bridge } from '../../ipc.js';
 import type { Settings } from '../../shared/ipc.js';
 import {
@@ -51,6 +52,13 @@ export function ModelSection(props: ModelSectionProps): React.JSX.Element {
         entries: g.entries.filter((p) => p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)),
       }))
     : PROVIDER_GROUPS;
+
+  const providerOptions: SelectOption[] = [
+    { value: '', label: filter.trim() ? 'matched provider…' : 'auto-detect from the key' },
+    ...filteredGroups.flatMap((g) =>
+      g.entries.map((p) => ({ value: p.id, label: p.name, section: `${g.label} (${g.entries.length})` })),
+    ),
+  ];
 
   // live model list (debounced) — same policy as the old modal: keyless
   // local servers fetch too, a key-demanded entry with no key stays offline
@@ -113,28 +121,18 @@ export function ModelSection(props: ModelSectionProps): React.JSX.Element {
           placeholder="search providers…"
           autoComplete="off"
         />
-        <select
+        <Select
+          ariaLabel="provider"
           value={providerId}
-          onChange={(e) => {
+          placeholder={filter.trim() ? 'matched provider…' : 'auto-detect from the key'}
+          onChange={(v) => {
             setFilter('');
-            const entry = getProvider(e.target.value || undefined);
+            const entry = getProvider(v || undefined);
             if (entry) applyProviderDefaults(entry);
             else setProviderId('');
           }}
-        >
-          <option value="">{filter.trim() ? 'matched provider…' : 'auto-detect from the key'}</option>
-          {filteredGroups.map((g) =>
-            g.entries.length > 0 ? (
-              <optgroup key={g.group} label={`${g.label} (${g.entries.length})`}>
-                {g.entries.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </optgroup>
-            ) : null,
-          )}
-        </select>
+          options={providerOptions}
+        />
         {selEntry?.notes && <span className="settings-hint">{selEntry.notes}</span>}
       </label>
       <label className="settings-field settings-field-wide">
@@ -165,12 +163,17 @@ export function ModelSection(props: ModelSectionProps): React.JSX.Element {
       </div>
       <label className="settings-field settings-field-narrow">
         reasoning effort
-        <select value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value)}>
-          <option value="">auto (high on deepseek/openai)</option>
-          <option value="high">high</option>
-          <option value="medium">medium</option>
-          <option value="low">low</option>
-        </select>
+        <Select
+          ariaLabel="reasoning effort"
+          value={reasoningEffort}
+          onChange={setReasoningEffort}
+          options={[
+            { value: '', label: 'auto', hint: 'high on deepseek/openai' },
+            { value: 'high', label: 'high' },
+            { value: 'medium', label: 'medium' },
+            { value: 'low', label: 'low' },
+          ]}
+        />
       </label>
       <div className="settings-badge-row">
         <span className="orch-judge-status orch-judge-running">{derived}</span>

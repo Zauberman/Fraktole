@@ -838,30 +838,45 @@ const main = async () => {
   const settingsSave = `[...document.querySelectorAll('.settings-view .settings-actions .btn')].find((b) => b.textContent.trim() === 'save')?.click(); true`;
   await openModelSettings('for picker');
 
-  // 1) catalog breadth: the provider <select> renders the whole catalog
-  const optionCount = await evalJs(`document.querySelector('.settings-view .settings-content select')?.options.length ?? 0`);
+  // the provider picker is the custom Select: trigger opens the popover,
+  // options are buttons committed on mousedown
+  const providerTrigger = `document.querySelector('.settings-view .settings-content .select-trigger')`;
+  const openProviderPop = async () => {
+    await evalJs(`${providerTrigger}?.click(); true`);
+    await sleep(250);
+  };
+  const popOptionLabels = async () =>
+    evalJs(`[...document.querySelectorAll('.settings-view .settings-content .select-option-label')].map((o) => o.textContent.trim())`);
+  const pickProvider = async (label) => {
+    const isOpen = await evalJs(`document.querySelector('.settings-view .settings-content .select-pop') !== null`);
+    if (!isOpen) await openProviderPop();
+    await evalJs(`[...document.querySelectorAll('.settings-view .settings-content .select-option')].find((o) => o.textContent.trim() === '${label}')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); true`);
+    await sleep(250);
+  };
+
+  // 1) catalog breadth: the open popover lists the whole catalog
+  await openProviderPop();
+  const optionCount = await evalJs(`document.querySelectorAll('.settings-view .settings-content .select-option').length`);
   // 100 providers + the empty "auto-detect" default option
-  if (optionCount < 101) fail(`provider <select> has only ${optionCount} options`);
-  else ok(`provider <select> lists ${optionCount - 1} catalog providers`);
+  if (optionCount < 101) fail(`provider popover lists only ${optionCount} options`);
+  else ok(`provider picker lists ${optionCount - 1} catalog providers`);
 
   // 2) search filter narrows the options (find the provider label's search input)
   const setReactValue = (el, v) =>
-    `(() => { const e = ${el}; const proto = e.tagName === 'SELECT' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype; const set = Object.getOwnPropertyDescriptor(proto, 'value').set; set.call(e, '${v}'); e.dispatchEvent(new Event(e.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); return true; })()`;
+    `(() => { const e = ${el}; const proto = window.HTMLInputElement.prototype; const set = Object.getOwnPropertyDescriptor(proto, 'value').set; set.call(e, '${v}'); e.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`;
   const searchBox = `document.querySelector('.settings-view .settings-content input[placeholder^="search providers"]')`;
-  const providerSel = `document.querySelector('.settings-view .settings-content select')`;
   await evalJs(setReactValue(searchBox, 'gro'));
   await sleep(400);
-  const afterFilter = await evalJs(`([...document.querySelectorAll('.settings-view .settings-content select option')].map((o) => o.value))`);
-  if (!afterFilter.includes('groq')) fail(`search 'gro' lost the groq option: ${afterFilter.join(',')}`);
+  const afterFilter = await popOptionLabels();
+  if (!afterFilter.some((t) => t.toLowerCase().includes('groq'))) fail(`search 'gro' lost the Groq option: ${afterFilter.join(',')}`);
   else ok(`search 'gro' keeps Groq`);
-  if (afterFilter.includes('openai')) fail(`search 'gro' kept the unfiltered openai option`);
+  if (afterFilter.some((t) => t.toLowerCase().includes('openai'))) fail(`search 'gro' kept the unfiltered OpenAI option`);
   else ok('search filter removes unrelated providers');
   await evalJs(setReactValue(searchBox, ''));
   await sleep(300);
 
   // 3) manual pick drives resolution + autofill, then persists on save
-  await evalJs(setReactValue(providerSel, 'deepseek'));
-  await sleep(300);
+  await pickProvider('DeepSeek');
   // the pick's keyHint lands in the api key field placeholder
   const keyHint = await evalJs(`document.querySelector('.settings-view .settings-content input[type="password"]')?.placeholder ?? ''`);
   if (keyHint !== 'sk-… (DeepSeek key)') fail(`key hint after picking deepseek: "${keyHint}"`);
@@ -904,8 +919,7 @@ const main = async () => {
   await openModelSettings('for ollama');
   await evalJs(setReactValue(searchBox, 'ollama'));
   await sleep(300);
-  await evalJs(setReactValue(providerSel, 'ollama'));
-  await sleep(300);
+  await pickProvider('Ollama');
   const keyDisabled = await evalJs(`document.querySelector('.settings-view .settings-content input[type="password"]')?.disabled ?? false`);
   if (!keyDisabled) fail('api key field is not disabled for the keyless ollama provider');
   else ok('keyless local provider disables the api key field');
