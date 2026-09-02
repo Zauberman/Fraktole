@@ -1,6 +1,6 @@
 /* ————— unified command palette (files + commands) —————
-   .dialog.palette compound overrides are order-independent against
-   theme.css; everything else is token-only. */
+   the palette speaks with the palette-region voice: frame, selection and
+   mode tab all carry --rgn-palette. Rows enter in a short stagger. */
 
 .dialog.palette {
   width: 560px;
@@ -8,6 +8,11 @@
   max-height: 70vh;
   padding: var(--s3);
   gap: var(--s2);
+  border-top: 2px solid var(--rgn-palette);
+}
+
+.dialog.palette .dialog-title {
+  color: var(--rgn-palette);
 }
 
 .palette-inputrow {
@@ -23,9 +28,10 @@
   font-size: var(--text-2xs);
   letter-spacing: var(--track-wide);
   text-transform: uppercase;
-  color: var(--accent-strong);
-  background: var(--accent-tint);
-  border-radius: var(--r-pill);
+  color: var(--rgn-palette);
+  background: var(--rgn-palette-soft);
+  border: 1px solid var(--rgn-palette);
+  border-radius: var(--r-xs);
 }
 
 .palette-inputrow .dialog-input {
@@ -78,8 +84,37 @@
 
 .palette-row-selected,
 .palette-row-selected:hover {
-  background: var(--selection-bg);
-  color: var(--accent-strong);
+  background: var(--rgn-palette-soft);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--rgn-palette);
+}
+
+/* rows cascade in (stagger within each section, capped for long lists) */
+.palette-row {
+  animation: palette-row-in var(--dur-fast) var(--ease-out) backwards;
+}
+
+.palette-row:nth-of-type(2) { animation-delay: 20ms; }
+.palette-row:nth-of-type(3) { animation-delay: 40ms; }
+.palette-row:nth-of-type(4) { animation-delay: 60ms; }
+.palette-row:nth-of-type(5) { animation-delay: 80ms; }
+.palette-row:nth-of-type(n + 6) { animation-delay: 100ms; }
+
+@keyframes palette-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .palette-row {
+    animation: none;
+  }
 }
 
 .palette-row-dir {

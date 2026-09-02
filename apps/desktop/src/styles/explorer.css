@@ -194,14 +194,27 @@
 }
 
 .search-group-path {
-  padding: var(--s1) 0;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  padding: var(--s1) var(--s2);
+  margin: 0 calc(var(--s2) * -1);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
   letter-spacing: var(--track-wide);
-  color: var(--accent);
+  color: var(--rgn-editor);
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.search-group-count {
+  flex-shrink: 0;
+  color: var(--text-faint);
 }
 
 .search-row {

@@ -197,12 +197,13 @@
   font-size: var(--text-xs);
   cursor: pointer;
   white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
 }
 
 .file-tab-active {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-tint);
+  color: var(--rgn-editor);
+  border-color: var(--rgn-editor);
+  background: var(--rgn-editor-soft);
 }
 
 .file-tab:hover {

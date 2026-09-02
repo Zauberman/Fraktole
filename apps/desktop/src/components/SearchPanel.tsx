@@ -193,6 +193,7 @@ export function SearchPanel(props: SearchPanelProps): React.JSX.Element {
               <div key={g.path} className="search-group">
                 <div className="search-group-path" title={g.path}>
                   {relativePath(g.path, root)}
+                  <span className="search-group-count">{g.hits.length}</span>
                 </div>
                 {g.hits.map((h, hi) => {
                   const idx = groupStarts[gi]! + hi;
