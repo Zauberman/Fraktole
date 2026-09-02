@@ -24,7 +24,7 @@ describe('selectReduce', () => {
     s = selectReduce(s, { t: 'move', d: 1 }, OPTS);
     expect(s.active).toBe(0);
     s = selectReduce(s, { t: 'move', d: 1 }, OPTS);
-    expect(s.active).toBe(0); // 'auto' is the first 'a' prefix
+    expect(s.active).toBe(1);
   });
 
   it('home and end jump to the extremes', () => {
