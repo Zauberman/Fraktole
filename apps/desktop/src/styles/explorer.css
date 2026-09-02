@@ -261,3 +261,147 @@
   letter-spacing: var(--track-wide);
   color: var(--warn);
 }
+
+/* ————— explorer file tree ————— */
+
+.explorer-tree {
+  border-top: 1px solid var(--line);
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+}
+
+.tree-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: var(--s1) var(--s2);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.tree-row:hover {
+  color: var(--text);
+  background: var(--hover-surface);
+}
+
+.tree-chevron {
+  color: var(--text-faint);
+  font-size: var(--text-2xs);
+  width: 10px;
+  flex-shrink: 0;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-file:hover {
+  color: var(--accent);
+}
+
+.tree-loading {
+  color: var(--text-faint);
+}
+
+/* ————— explorer ————— */
+
+.explorer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.explorer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.explorer-count {
+  color: var(--text-faint);
+}
+
+.explorer-add {
+  width: 22px;
+  height: 22px;
+}
+
+.explorer-empty {
+  padding: var(--s4);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--lh-tight);
+  color: var(--text-faint);
+}
+
+.explorer-list {
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+  padding: 0 var(--s2);
+}
+
+.explorer-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.explorer-item:hover {
+  background: var(--hover-surface);
+}
+
+.explorer-item-active {
+  background: var(--accent-tint);
+}
+
+.explorer-item-main {
+  min-width: 0;
+}
+
+.explorer-item-name {
+  font-size: var(--text-sm);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explorer-item-path {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explorer-item-remove {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.explorer-item:hover .explorer-item-remove {
+  opacity: 1;
+}

@@ -34,16 +34,11 @@ const DERIVED_PENDING = new Set([
 const THEME_TOKENS = new Set(THEMES[0]!.tokens ? Object.keys(THEMES[0]!.tokens) : []);
 const THEME_TOKENS_ARR = THEMES[0]!.tokens ? Object.keys(THEMES[0]!.tokens) : [];
 
+const STYLES_DIR = join(import.meta.dirname, '..', 'src', 'styles');
+
 async function layerFiles(): Promise<string[]> {
-  const files = [join(import.meta.dirname, '..', 'src', 'theme.css')];
-  try {
-    const dir = join(import.meta.dirname, '..', 'src', 'styles');
-    const names = (await readdir(dir)).filter((f) => f.endsWith('.css')).sort();
-    files.push(...names.map((n) => join(dir, n)));
-  } catch {
-    // styles/ layer directory may not exist yet (pre-split phases)
-  }
-  return files;
+  const names = (await readdir(STYLES_DIR)).filter((f) => f.endsWith('.css')).sort();
+  return names.map((n) => join(STYLES_DIR, n));
 }
 
 describe('theme token coverage', () => {
@@ -68,27 +63,20 @@ describe('theme token coverage', () => {
     expect(dead, `theme tokens never used: ${dead.join(', ')}`).toEqual([]);
   });
 
-  it('theme.css contains no raw colors outside the :root token block', async () => {
-    const css = await readFile(join(import.meta.dirname, '..', 'src', 'theme.css'), 'utf8');
-    // strip the :root block (and anything before it) — only the native token
-    // block may hold raw oklch/hex/rgb values
-    const afterRoot = css.split('}').slice(1).join('}');
-    const raw = afterRoot.match(/(?:oklch\(|#[0-9a-fA-F]{3,8}\b|rgba?\()/g);
-    expect(raw ?? [], 'raw colors outside the token block').toEqual([]);
-  });
-
-  it('component CSS layers contain no raw colors at all (tokens only)', async () => {
-    const dir = join(import.meta.dirname, '..', 'src', 'styles');
-    let names: string[] = [];
-    try {
-      names = (await readdir(dir)).filter((f) => f.endsWith('.css')).sort();
-    } catch {
-      return; // no layer directory yet
-    }
-    for (const name of names) {
-      const css = await readFile(join(dir, name), 'utf8');
-      const raw = css.match(/(?:oklch\(|#[0-9a-fA-F]{3,8}\b|rgba?\()/g);
-      expect(raw ?? [], `${name} must use tokens only`).toEqual([]);
+  it('tokens.css holds the only raw values; every other layer is tokens-only', async () => {
+    for (const file of await layerFiles()) {
+      const name = file.split('/').pop()!;
+      const css = await readFile(file, 'utf8');
+      if (name === 'tokens.css') {
+        // tokens.css may hold raw oklch ONLY inside @font-face / :root —
+        // strip everything up to and including the :root block, then forbid
+        const afterRoot = css.split('}').slice(1).join('}');
+        const raw = afterRoot.match(/(?:oklch\(|#[0-9a-fA-F]{3,8}\b|rgba?\()/g);
+        expect(raw ?? [], 'raw colors outside the token block').toEqual([]);
+      } else {
+        const raw = css.match(/(?:oklch\(|#[0-9a-fA-F]{3,8}\b|rgba?\()/g);
+        expect(raw ?? [], `${name} must use tokens only`).toEqual([]);
+      }
     }
   });
 });

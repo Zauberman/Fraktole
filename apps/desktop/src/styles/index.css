@@ -1,0 +1,14 @@
+/* Layer entry — order matters: tokens → primitives → frame → views →
+ * overlays. Each layer styles one family and consumes tokens only. */
+@import './tokens.css';
+@import './base.css';
+@import './chrome.css';
+@import './workspace.css';
+@import './explorer.css';
+@import './editor.css';
+@import './reviewer.css';
+@import './dialogs.css';
+@import './menus.css';
+@import './palette.css';
+@import './settings.css';
+@import './usage.css';

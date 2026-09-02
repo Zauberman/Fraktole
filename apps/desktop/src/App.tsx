@@ -21,7 +21,7 @@ import { bridge, type Project, type SessionSummary, type SettingsSection } from 
 import type { SessionState } from './session-state.js';
 import { listIds } from './window-tree.js';
 import { AUTONOMY_NAMES } from './shared/autonomy.js';
-import './theme.css';
+import './styles/index.css';
 
 function BootOverlay({ leaving }: { leaving: boolean }): React.JSX.Element {
   return (

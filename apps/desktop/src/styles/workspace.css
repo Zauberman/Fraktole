@@ -1,0 +1,138 @@
+/* ————— workspace / tiling ————— */
+
+.workspace-host {
+  position: absolute;
+  inset: 0;
+}
+
+.workspace-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+}
+
+.workspace-empty-mark {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  letter-spacing: -0.01em;
+  color: var(--mark-ghost);
+}
+
+.workspace-empty-hint {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.tile {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-tile);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  will-change: transform;
+  animation: tile-in 180ms var(--ease-out);
+}
+
+@keyframes tile-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.tile:hover {
+  border-color: var(--line-strong);
+}
+
+.tile-focused {
+  border-color: var(--focus-border);
+  box-shadow: 0 0 0 1px var(--focus-ring);
+}
+
+.tile-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  height: 30px;
+  padding: 0 var(--s2) 0 var(--s3);
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  letter-spacing: var(--track-wide);
+}
+
+.tile-focused .tile-title {
+  background: var(--bg-overlay);
+  color: var(--text);
+}
+
+.tile-title-id {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+
+.tile-title-actions {
+  display: flex;
+  gap: var(--s1);
+  flex-shrink: 0;
+}
+
+.tile-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.tile-btn:hover {
+  color: var(--text);
+  background: var(--bg-tile);
+}
+
+.tile-btn:active {
+  transform: translateY(1px);
+}
+
+.tile-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.tile-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.terminal-host {
+  position: absolute;
+  inset: 0;
+}
