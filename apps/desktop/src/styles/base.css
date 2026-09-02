@@ -133,3 +133,14 @@ button:active:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent-strong);
 }
+
+/* destructive primary — err family, used by reckoning cards */
+.btn-danger {
+  background: var(--err);
+  color: var(--btn-primary-fg);
+}
+
+.btn-danger:hover {
+  background: var(--err);
+  filter: brightness(1.1);
+}

@@ -379,3 +379,111 @@
   color: var(--text-muted);
   line-height: var(--lh-body);
 }
+
+/* ————— tri-state choice rows (save / discard / cancel as described rows) ————— */
+
+.choice-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.choice-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  background: var(--bg-overlay);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: var(--s2) var(--s3);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+.choice-row:hover:not(:disabled) {
+  border-color: var(--rgn-editor);
+  background: var(--rgn-editor-soft);
+}
+
+.choice-row-warn:hover:not(:disabled) {
+  border-color: var(--err);
+  background: var(--err-tint);
+}
+
+.choice-row-quiet:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--hover-surface);
+}
+
+.choice-row:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.choice-label {
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text);
+}
+
+.choice-desc {
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: var(--lh-body);
+}
+
+/* ————— reckoning (delete confirm) ————— */
+
+.reckoning-name {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  color: var(--err);
+}
+
+/* ————— fork cards (resume vs fresh) ————— */
+
+.fork-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s2);
+}
+
+.fork-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  text-align: left;
+  background: var(--bg-overlay);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: var(--s3);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+.fork-card-resume:hover {
+  border-color: var(--ok);
+  background: var(--ok-tint);
+}
+
+.fork-card-fresh:hover {
+  border-color: var(--err);
+  background: var(--err-tint);
+}
+
+.fork-card-title {
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text);
+}
+
+.fork-card-desc {
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: var(--lh-body);
+}

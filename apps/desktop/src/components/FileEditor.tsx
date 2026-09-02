@@ -258,27 +258,45 @@ export function FileEditor(props: FileEditorProps): React.JSX.Element {
         <Dialog
           title={pending.reloadPath !== null ? 'reload file' : 'unsaved changes'}
           onClose={() => setPending(null)}
-          footer={
-            <>
-              <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => void resolvePending(true)}>
-                save
-              </button>
-              <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void resolvePending(false)}>
-                discard
-              </button>
-              <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setPending(null)}>
-                cancel
-              </button>
-            </>
-          }
+          accent={pending.reloadPath !== null ? 'editor' : 'err'}
+          size="sm"
         >
           <p className="editor-dialog-text">
             {pending.reloadPath !== null
-              ? 'discard local changes and reload?'
+              ? `"${pendingNames[0]?.name ?? 'this file'}" changed on disk.`
               : pendingNames.length === 1
-                ? `discard unsaved changes in "${pendingNames[0]?.name ?? ''}"?`
-                : `discard unsaved changes in ${pendingNames.length} files?`}
+                ? `"${pendingNames[0]?.name ?? ''}" has unsaved changes.`
+                : `${pendingNames.length} files have unsaved changes.`}
           </p>
+          <div className="choice-rows">
+            {pending.reloadPath !== null ? (
+              <>
+                <button type="button" className="choice-row" disabled={busy} onClick={() => void resolvePending(true)}>
+                  <span className="choice-label">reload from disk</span>
+                  <span className="choice-desc">discard the local copy and load the file as it is on disk</span>
+                </button>
+                <button type="button" className="choice-row" disabled={busy} onClick={() => setPending(null)}>
+                  <span className="choice-label">keep mine</span>
+                  <span className="choice-desc">leave the editor buffer untouched — the file stays marked dirty</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" className="choice-row" disabled={busy} onClick={() => void resolvePending(true)}>
+                  <span className="choice-label">save</span>
+                  <span className="choice-desc">write the buffer to disk, then continue</span>
+                </button>
+                <button type="button" className="choice-row choice-row-warn" disabled={busy} onClick={() => void resolvePending(false)}>
+                  <span className="choice-label">discard</span>
+                  <span className="choice-desc">throw away the unsaved changes</span>
+                </button>
+              </>
+            )}
+            <button type="button" className="choice-row choice-row-quiet" disabled={busy} onClick={() => setPending(null)}>
+              <span className="choice-label">cancel</span>
+              <span className="choice-desc">go back — nothing changes</span>
+            </button>
+          </div>
         </Dialog>
       )}
       {menuOpen && (

@@ -521,15 +521,14 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
         />
       )}
       {confirmDelete !== null && (
-        <Dialog title="delete" onClose={() => setConfirmDelete(null)}>
-          <p className="explorer-confirm-text">move {confirmDelete.name} to trash?</p>
-          <div className="dialog-actions">
+        <Dialog title="move to trash" onClose={() => setConfirmDelete(null)} accent="err" size="sm" footer={
+          <>
             <button type="button" className="btn btn-sm" onClick={() => setConfirmDelete(null)}>
               cancel
             </button>
             <button
               type="button"
-              className="btn btn-sm btn-primary"
+              className="btn btn-sm btn-danger"
               onClick={() => {
                 const entry = confirmDelete;
                 setConfirmDelete(null);
@@ -538,7 +537,11 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
             >
               move to trash
             </button>
-          </div>
+          </>
+        }>
+          <p className="explorer-confirm-text">
+            move <span className="reckoning-name">{confirmDelete.name}</span> to trash?
+          </p>
         </Dialog>
       )}
     </div>
