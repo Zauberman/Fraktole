@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { THEMES } from '../src/themes.js';
+import { CATEGORY_IDS, REGION_IDS, THEMES } from '../src/themes.js';
 import {
   contrast,
   contrastOklch,
   deltaL,
+  deltaOklch,
   hexToSrgb,
   hueDistance,
   luminance,
+  oklchParts,
   oklchToSrgb,
 } from './color-utils.js';
 
@@ -43,6 +45,22 @@ const TOKEN_NAMES = [
   '--selection-bg',
   '--scrollbar-thumb',
   '--scrollbar-thumb-hover',
+  '--rgn-explorer',
+  '--rgn-explorer-soft',
+  '--rgn-editor',
+  '--rgn-editor-soft',
+  '--rgn-reviewer',
+  '--rgn-reviewer-soft',
+  '--rgn-palette',
+  '--rgn-palette-soft',
+  '--rgn-settings',
+  '--rgn-settings-soft',
+  '--cat-folder',
+  '--cat-code',
+  '--cat-doc',
+  '--cat-config',
+  '--cat-style',
+  '--cat-data',
 ] as const;
 
 const XTERM_TEXT_COLORS = [
@@ -196,6 +214,62 @@ describe('theme contrast matrix', () => {
 
       it('shadows are hue-tinted, never pure black', () => {
         expect(t['--shadow-dialog']).not.toContain('oklch(0 0 0');
+      });
+
+      it('regional anchors ≥ 3:1 on bg (decorative chrome color)', () => {
+        for (const r of REGION_IDS) {
+          expect(contrastOklch(t[`--rgn-${r}`], t['--bg']), `rgn ${r}`).toBeGreaterThanOrEqual(3);
+        }
+      });
+
+      it('regional anchors are pairwise distinct (ΔE oklab ≥ 0.09)', () => {
+        for (let i = 0; i < REGION_IDS.length; i += 1) {
+          for (let j = i + 1; j < REGION_IDS.length; j += 1) {
+            const ri = REGION_IDS[i]!;
+            const rj = REGION_IDS[j]!;
+            const a = t[`--rgn-${ri}`];
+            const b = t[`--rgn-${rj}`];
+            expect(deltaOklch(a, b), `${ri} vs ${rj}`).toBeGreaterThanOrEqual(0.09);
+          }
+        }
+      });
+
+      it('regional soft tints share the anchor hue at 8–18% alpha', () => {
+        for (const r of REGION_IDS) {
+          const anchor = t[`--rgn-${r}`];
+          const soft = t[`--rgn-${r}-soft`];
+          expect(hueDistance(anchor, soft), `rgn ${r} tint hue`).toBe(0);
+          const alpha = oklchParts(soft).alpha;
+          expect(alpha, `rgn ${r} alpha`).toBeGreaterThanOrEqual(0.08);
+          expect(alpha).toBeLessThanOrEqual(0.18);
+        }
+      });
+
+      it('category tints ≥ 4.5:1 on bg (they color file names)', () => {
+        for (const c of CATEGORY_IDS) {
+          expect(contrastOklch(t[`--cat-${c}`], t['--bg']), `cat ${c}`).toBeGreaterThanOrEqual(4.5);
+          expect(contrastOklch(t[`--cat-${c}`], t['--bg-tile']), `cat ${c} on tile`).toBeGreaterThanOrEqual(4);
+        }
+      });
+
+      it('category tints are pairwise distinct (ΔE oklab ≥ 0.10)', () => {
+        for (let i = 0; i < CATEGORY_IDS.length; i += 1) {
+          for (let j = i + 1; j < CATEGORY_IDS.length; j += 1) {
+            const ci = CATEGORY_IDS[i]!;
+            const cj = CATEGORY_IDS[j]!;
+            const a = t[`--cat-${ci}`];
+            const b = t[`--cat-${cj}`];
+            expect(deltaOklch(a, b), `${ci} vs ${cj}`).toBeGreaterThanOrEqual(0.085);
+          }
+        }
+      });
+
+      it('category tints stay perceptually clear of status colors (ΔE ≥ 0.06, curated wheel shifts)', () => {
+        for (const c of CATEGORY_IDS) {
+          for (const st of ['--ok', '--warn', '--err'] as const) {
+            expect(deltaOklch(t[`--cat-${c}`], t[st]), `cat ${c} vs ${st}`).toBeGreaterThanOrEqual(0.06);
+          }
+        }
       });
 
       it('xterm: foreground + bright colors ≥ 4.5:1 on terminal bg', () => {
