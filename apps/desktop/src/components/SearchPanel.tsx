@@ -201,7 +201,7 @@ export function SearchPanel(props: SearchPanelProps): React.JSX.Element {
                   return (
                     <button
                       type="button"
-                      key={`${h.line}:${h.text}`}
+                      key={`${idx}:${h.line}`}
                       className={`search-row${isActive ? ' search-row-active' : ''}`}
                       data-active={isActive || undefined}
                       onMouseEnter={() => setSelected(idx)}

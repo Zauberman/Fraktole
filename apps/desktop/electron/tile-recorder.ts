@@ -29,22 +29,43 @@ export interface TileRecorderOpts {
   maxLines?: number;
   /** Per-line cap; longer lines are truncated with a marker. */
   maxLineLen?: number;
+  /** Diagnostics sink (main's logger). */
+  logger?: (line: string) => void;
 }
 
 export class TileRecorder {
   private readonly maxLines: number;
   private readonly maxLineLen: number;
+  private readonly logger: ((line: string) => void) | undefined;
   private readonly buffers = new Map<string, string[]>();
   private readonly emulators = new Map<string, TileEmulator>();
   private readonly lastAt = new Map<string, number>();
+  /** Tiles whose emulator threw — chunk data is skipped rather than letting
+   *  a throw escape onto the PTY output path. */
+  private readonly broken = new Set<string>();
 
   constructor(opts: TileRecorderOpts = {}) {
     this.maxLines = opts.maxLines ?? 5000;
     this.maxLineLen = opts.maxLineLen ?? 4096;
+    this.logger = opts.logger;
   }
 
-  /** Feeds one ptyData chunk into the tile's recording. */
+  /** Feeds one ptyData chunk into the tile's recording. Never throws: the
+   *  headless emulator sits on the PTY output hot path (inside a
+   *  setImmediate flush), so a throw here would stall output for every
+   *  tile of the session — the chunk is dropped instead. */
   record(tileId: string, chunk: string): void {
+    try {
+      this.recordInner(tileId, chunk);
+    } catch (err) {
+      this.logger?.(`tile-recorder: emulator failed for ${tileId} (${(err as Error).message})`);
+      this.emulators.delete(tileId);
+      this.broken.add(tileId);
+    }
+  }
+
+  private recordInner(tileId: string, chunk: string): void {
+    if (this.broken.has(tileId)) return;
     let emu = this.emulators.get(tileId);
     if (!emu) {
       emu = new TileEmulator(undefined, undefined, this.maxLines);

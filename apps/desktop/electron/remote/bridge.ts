@@ -548,7 +548,7 @@ export class RemoteBridge {
           conn.subs.set(`${p.sessionId}/${p.tileId}`, { sessionId: p.sessionId, clientTileId: p.tileId, liveTileId });
           // stream one snapshot of the recent scrollback tail (§4) — tagged
           // with the LIVE tile id so the client can match streamed events
-          const snapshot = await this.backend.snapshot(p.tileId);
+          const snapshot = await this.backend.snapshot(p.tileId, p.sessionId);
           sendJson(conn.socket, { type: 'tile.snapshot', params: { tileId: liveTileId ?? p.tileId, data: snapshot } });
           ok({ ok: true, liveTileId: liveTileId ?? p.tileId });
           return;
@@ -571,7 +571,10 @@ export class RemoteBridge {
             return;
           }
           const tail = typeof p.tail === 'number' ? p.tail : undefined;
-          ok({ data: await this.backend.readScrollback(p.tileId, tail) });
+          // optional sessionId scoping: agent/tile ids are per-session, so
+          // the lookup must not wander into another session
+          const scope = typeof p.sessionId === 'string' && p.sessionId.length > 0 ? p.sessionId : undefined;
+          ok({ data: await this.backend.readScrollback(p.tileId, tail, scope) });
           return;
         }
         case 'task.send': {

@@ -44,11 +44,11 @@ export interface RemoteBackend {
   listSessions(): Promise<SessionRow[]>;
   listTiles(sessionId: string): Promise<TileRow[]>;
   /** Raw scrollback bytes for a client-facing tile id ('' = none). */
-  readScrollback(tileId: string, tail?: number): Promise<string>;
+  readScrollback(tileId: string, tail?: number, sessionId?: string): Promise<string>;
   /** Resolves a client-facing tile id to its live tile id (null = not live). */
   liveTileOf(sessionId: string, tileId: string): Promise<string | null>;
   /** Scrollback snapshot for a subscription (≤ 200 lines). */
-  snapshot(tileId: string): Promise<string>;
+  snapshot(tileId: string, sessionId?: string): Promise<string>;
   /** Delivers a task/note from the phone into the orchestrator mailbox. */
   sendTask(args: { agentId: string; kind: 'task' | 'note'; body: string }): Promise<{
     ok: boolean;

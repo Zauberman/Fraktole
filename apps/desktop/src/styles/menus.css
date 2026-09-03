@@ -413,3 +413,9 @@
   font-size: var(--text-2xs);
   color: var(--text-faint);
 }
+
+.select-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

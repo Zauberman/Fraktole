@@ -101,6 +101,16 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     return () => window.clearTimeout(t);
   }, [composeError]);
 
+  // the autonomy popover closes on Escape like every other transient menu
+  useEffect(() => {
+    if (!autonomyOpen) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setAutonomyOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [autonomyOpen]);
+
   const nextSeq = (): number => {
     seqRef.current += 1;
     return seqRef.current;

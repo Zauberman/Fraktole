@@ -122,4 +122,5 @@ echo "portable installer:"
 echo "  ${OUT}  ($(du -h "${OUT}" | cut -f1))"
 echo "  ${OUT}.sha256"
 echo
+echo "verify with: sha256sum -c ${OUT}.sha256"
 echo "copy it to any machine and run: bash ${OUT}"

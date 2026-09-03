@@ -269,6 +269,9 @@ export class ReviewerHost {
   /** Total tokens across the whole conversation from the last usage event
    *  (used to derive per-turn marginals when the provider reports usage). */
   private lastUsageTotal = 0;
+  /** Bumped by stop()/idleOut() so an in-flight doStart() cannot resurrect
+   *  the harness after the user (or a session teardown) stopped it. */
+  private startGeneration = 0;
   /** Marginal tokens of the current turn, accumulated across every
    *  complete() call of that turn (consumed by recordTurnCost at the turn
    *  boundary). */
@@ -363,6 +366,7 @@ export class ReviewerHost {
   }
 
   private async doStart(): Promise<boolean> {
+    const gen = this.startGeneration;
     const cfg = await this.opts.getConfig();
     // `||` (not `??`): an empty pasted key must fall back to the env var too
     const key = (cfg.apiKey?.trim() || (cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] ?? '' : '')).trim();
@@ -424,6 +428,8 @@ export class ReviewerHost {
         this.persistedCount = this.messages.length;
       }
     }
+    // a stop()/idleOut() that landed mid-start wins: never go live after it
+    if (gen !== this.startGeneration) return false;
     this.pollsSinceWake = 0;
     this.staleWakes = 0;
     this.warnedStale = false;
@@ -450,6 +456,7 @@ export class ReviewerHost {
     // a persisted recap is durable (state.json) — resurface it on every load
     // so the renderer shows it even after a restart
     if (this.state.recap) this.opts.emit.recap?.(this.state.recap);
+    if (gen !== this.startGeneration) return false;
     this.drainQueue();
     return true;
   }
@@ -484,6 +491,7 @@ export class ReviewerHost {
 
   /** Explicit off switch (session stopped). */
   stop(): void {
+    this.startGeneration += 1;
     this.cancel();
     this.stopWatch();
     this.rejectPendingAsk();
@@ -494,6 +502,7 @@ export class ReviewerHost {
   /** Idle shutdown: aborts the run, stops the loop carrier, keeps the
    *  conversation and ledger for later. */
   idleOut(): void {
+    this.startGeneration += 1;
     this.cancel();
     this.stopWatch();
     this.rejectPendingAsk();
@@ -575,6 +584,10 @@ export class ReviewerHost {
       this.state.subGoals = []; // goal cleared or replaced — the subdivision is stale
     }
     this.pollsSinceWake = 0;
+    // a re-armed goal must also clear a stall stand-down, or the autonomous
+    // run would stay quietly dead forever after one stall
+    this.staleWakes = 0;
+    this.warnedStale = false;
     this.lastLines = new Map([...this.opts.recorder.list()].map(([id, s]) => [id, s.lines]));
     await persistState(this.stateFile, this.state, this.opts.logger);
     this.opts.emit.goal({ goal, subGoals: this.state.subGoals });
@@ -1213,9 +1226,13 @@ export class ReviewerHost {
             // a mid-batch cancel must never leave an unanswered tool_calls
             // block behind (every provider rejects it): roll back the
             // assistant reply and any partial tool results, keeping the
-            // (already persisted) user prompt so the question survives
-            this.messages.length = turnStart + 1;
-            this.persistedCount = turnStart + 1;
+            // (already persisted) user prompt so the question survives.
+            // A restart()/idleOut() that refilled the array while this run
+            // was parked means the coordinates are foreign — do not truncate.
+            if (this.messages.length > turnStart) {
+              this.messages.length = turnStart + 1;
+              this.persistedCount = Math.min(this.persistedCount, turnStart + 1);
+            }
             break;
           }
           await this.persist();
@@ -1319,8 +1336,26 @@ export class ReviewerHost {
   /** Estimated total tokens currently in the conversation. */
   private estimateTokens(): number {
     let total = 400; // system prompt constant
-    for (const t of this.turnTokens) total += t;
+    if (this.turnTokens.length > 0) {
+      for (const t of this.turnTokens) total += t;
+      return total;
+    }
+    // a freshly loaded conversation has no per-turn usage history yet —
+    // estimate from content size so compaction can still fire (an
+    // over-estimate is safe: it compacts early, never too late)
+    for (const m of this.messages) {
+      const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+      total += Math.ceil(text.length / 4);
+    }
     return total;
+  }
+
+  /** After any context shrink the cumulative provider total no longer
+   *  compares against the previous one — without this reset the next delta
+   *  clamps to 1 and the estimator undercounts forever. */
+  private resetUsageBaseline(): void {
+    this.lastUsageTotal = 0;
+    this.pendingUsageDelta = null;
   }
 
   /** Drops whole oldest turns while the conversation exceeds 80% of the
@@ -1336,9 +1371,11 @@ export class ReviewerHost {
     }
     const doForce = force || this.pendingCompact;
     this.pendingCompact = false;
-    // the user's context knob drives the budget (80% of the window); the
-    // per-model guesses stay as the fallback for knob-less configs
-    const budget = Math.floor(contextBudgetTokens(this.resolved?.model ?? '', this.knobs?.contextTokens ?? this.opts.contextBudgetTokens) * 0.8);
+    // contextBudget() already prefers the probed server window over the
+    // per-model guess and is capped by the user's knob — compaction must
+    // honor it, not the raw guess (a probed 8K local server would otherwise
+    // never auto-compact)
+    const budget = Math.floor(this.contextBudget() * 0.8);
     let dropped = 0;
     let userIdx: number[] = [];
     for (;;) {
@@ -1355,6 +1392,7 @@ export class ReviewerHost {
       dropped += 1;
     }
     if (dropped > 0) {
+      this.resetUsageBaseline();
       // role user + position right after the oldest kept user turn: the
       // note joins that turn's content and never looks like a second
       // system — or, on a reloaded conversation (no system prompt at
@@ -1416,9 +1454,11 @@ export class ReviewerHost {
     try {
       await mkdir(dirname(this.conversationFile), { recursive: true });
       const lines = this.messages.map((m) => JSON.stringify(m));
-      const tmp = `${this.conversationFile}.tmp`;
+      const tmp = `${this.conversationFile}.${process.pid}.${Date.now()}.tmp`;
       await writeFile(tmp, lines.length > 0 ? `${lines.join('\n')}\n` : '', 'utf8');
       await rename(tmp, this.conversationFile);
+      // the whole conversation was replaced — usage deltas must restart
+      this.resetUsageBaseline();
       return true;
     } catch (err) {
       this.opts.logger?.(`reviewer: conversation rewrite failed (${(err as Error).message})`);
@@ -1569,9 +1609,10 @@ function isRetryableError(err: unknown): boolean {
 /** A context-overflow error from an OpenAI-compatible or native server
  *  (llama.cpp's 400 "exceed_context_size_error" / "larger than the max
  *  context size", "n_ctx", ollama's "context length exceeded", etc.). */
-function isContextError(err: unknown): boolean {
+/** Exported for tests: overflow wording coverage per provider. */
+export function isContextError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  return /\bexceed.*context\b|\bbeyond\s+context\b|larger than the max context|exceeds the available context|context (size|window|length|limit)|n_ctx|n_prompt_tokens/i.test(
+  return /\bexceed.*context\b|\bbeyond\s+context\b|larger than the max context|exceeds the available context|context (size|window|length|limit)|n_ctx|n_prompt_tokens|prompt is too long|too many input tokens|input length and `max_tokens` exceed/i.test(
     err.message,
   );
 }

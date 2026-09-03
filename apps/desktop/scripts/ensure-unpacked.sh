@@ -17,6 +17,7 @@ stale() {
   # dist-electron/dist-renderer are outputs and deliberately not checked;
   # installer scripts don't reach the asar either.
   find src electron scripts/build-main.mjs build package.json vite.config.ts tsconfig.json \
+    electron-builder.yml index.html \
     -type f -newer "${APP_ASAR}" | grep -q . && return 0
   return 1
 }

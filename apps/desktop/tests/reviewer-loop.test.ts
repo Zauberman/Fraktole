@@ -2332,3 +2332,15 @@ describe('ReviewerHost — local-provider hardening (context, truncation, readin
     expect(provider.complete.mock.calls.length).toBe(calls);
   });
 });
+
+describe('context-overflow classification', () => {
+  it('recognizes the real overflow wordings of every provider family', async () => {
+    const { isContextError } = await import('../electron/reviewer.js');
+    expect(isContextError(new Error('anthropic API error 400: prompt is too long: 203846 tokens > 200000 maximum'))).toBe(true);
+    expect(isContextError(new Error('400 This model requires a minimum of 1 token, too many input tokens'))).toBe(true);
+    expect(isContextError(new Error("This model's maximum context length is 8192 tokens"))).toBe(true);
+    expect(isContextError(new Error('n_ctx is full'))).toBe(true);
+    expect(isContextError(new Error('unauthorized'))).toBe(false);
+    expect(isContextError(new Error('connection reset'))).toBe(false);
+  });
+});

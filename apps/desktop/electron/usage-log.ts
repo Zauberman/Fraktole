@@ -13,14 +13,22 @@ const KEEP_LINES = 4000;
 
 export class UsageLog {
   private count: number | null = null;
+  /** Serializes append+trim: an append landing inside the trim's
+   *  read→rename window would be lost, and two trims would share a tmp. */
+  private queue: Promise<void> = Promise.resolve();
 
   constructor(private readonly dir: string) {}
 
-  async append(sample: UsageSample): Promise<void> {
-    await mkdir(this.dir, { recursive: true });
-    await appendFile(this.file, `${JSON.stringify(sample)}\n`, 'utf8');
-    this.count = (this.count ?? (await this.lineCount())) + 1;
-    if (this.count > MAX_LINES) await this.trim();
+  append(sample: UsageSample): Promise<void> {
+    const run = async (): Promise<void> => {
+      await mkdir(this.dir, { recursive: true });
+      await appendFile(this.file, `${JSON.stringify(sample)}\n`, 'utf8');
+      this.count = (this.count ?? (await this.lineCount())) + 1;
+      if (this.count > MAX_LINES) await this.trim();
+    };
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
   }
 
   async read(): Promise<UsageSample[]> {
@@ -58,7 +66,7 @@ export class UsageLog {
 
   private async trim(): Promise<void> {
     const kept = (await this.read()).slice(-KEEP_LINES);
-    const tmp = `${this.file}.tmp`;
+    const tmp = `${this.file}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmp, kept.length > 0 ? `${kept.map((s) => JSON.stringify(s)).join('\n')}\n` : '', 'utf8');
     await rename(tmp, this.file);
     this.count = kept.length;

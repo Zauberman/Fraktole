@@ -106,7 +106,10 @@ export function TestTab(props: TestTabProps): React.JSX.Element {
       wv.removeEventListener('did-fail-load', onFail);
       wv.removeEventListener('console-message', onConsole);
     };
-  }, [url]);
+    // `failed` is load-bearing: when it clears, the <webview> remounts and
+    // the effect must re-attach to the fresh element (retry would otherwise
+    // leave the toolbar permanently disabled)
+  }, [url, failed]);
 
   // push navigations into the guest (only after dom-ready)
   useEffect(() => {

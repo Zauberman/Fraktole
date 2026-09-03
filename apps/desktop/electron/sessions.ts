@@ -21,6 +21,31 @@ export function newSessionId(): string {
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** Monotonic counter for unique tmp names: two concurrent saves of the same
+ *  session share one tmp path with a fixed name and interleave on rename. */
+let persistSeq = 0;
+
+/** Index updater for installs that happen outside a store instance (bundle
+ *  imports): inserts/moves the entry to the front of index.json. Never
+ *  rewrites from a corrupt read — a broken index file is left for the
+ *  store's quarantine path to rebuild. */
+export async function touchSessionIndex(root: string, entry: { id: string; name: string; updatedAt: number }): Promise<void> {
+  const indexFile = join(root, 'index.json');
+  let entries: Array<{ id: string; name: string; updatedAt: number }> = [];
+  try {
+    const parsed = JSON.parse(await readFile(indexFile, 'utf8')) as { sessions?: Array<{ id: string; name: string; updatedAt: number }> };
+    if (Array.isArray(parsed.sessions)) entries = parsed.sessions;
+  } catch (err) {
+    // a missing index is fine (fresh install) — create it below; a CORRUPT
+    // one is left alone for SessionStore.readIndex() to quarantine+rebuild
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return;
+  }
+  const rest = entries.filter((e) => e.id !== entry.id);
+  const tmp = `${indexFile}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, JSON.stringify({ sessions: [{ id: entry.id, name: entry.name, updatedAt: entry.updatedAt }, ...rest] }, null, 2), 'utf8');
+  await rename(tmp, indexFile);
+}
+
 export class SessionStore {
   constructor(private readonly root: string) {}
 
@@ -42,31 +67,84 @@ export class SessionStore {
   }
 
   private async readIndex(): Promise<Array<{ id: string; name: string; updatedAt: number }>> {
+    let raw: string;
     try {
-      const raw = await readFile(this.indexFile(), 'utf8');
+      raw = await readFile(this.indexFile(), 'utf8');
+    } catch {
+      return []; // genuinely missing — a fresh install
+    }
+    try {
       const parsed = JSON.parse(raw) as { sessions?: Array<{ id: string; name: string; updatedAt: number }> };
-      if (!Array.isArray(parsed.sessions)) return [];
+      if (!Array.isArray(parsed.sessions)) throw new Error('bad index shape');
       return parsed.sessions;
+    } catch {
+      // A corrupt index must NEVER be rewritten from an empty read — that
+      // would orphan every session dir on disk. Quarantine the bad file and
+      // rebuild from the session dirs that actually exist.
+      await rename(this.indexFile(), `${this.indexFile()}.bad-${Date.now()}`).catch(() => undefined);
+      return this.rebuildIndex();
+    }
+  }
+
+  /** Rebuilds index.json from the session dirs on disk (valid session.json
+   *  required per dir) and persists it, newest first. */
+  private async rebuildIndex(): Promise<Array<{ id: string; name: string; updatedAt: number }>> {
+    let ids: string[] = [];
+    try {
+      ids = (await readdir(this.root, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
     } catch {
       return [];
     }
+    const entries: Array<{ id: string; name: string; updatedAt: number }> = [];
+    for (const id of ids) {
+      if (!SessionStore.ID_RE.test(id)) continue;
+      try {
+        const session = await this.load(id);
+        entries.push({ id, name: session.name, updatedAt: session.updatedAt });
+      } catch {
+        // unreadable session dir — leave it out of the index but keep the dir
+      }
+    }
+    entries.sort((a, b) => b.updatedAt - a.updatedAt);
+    await this.writeIndex(entries).catch(() => undefined);
+    return entries;
   }
 
   private async writeIndex(entries: Array<{ id: string; name: string; updatedAt: number }>): Promise<void> {
     await this.persist(this.indexFile(), { sessions: entries });
   }
 
+  /** Per-file write queues: serializes concurrent persist() calls targeting
+   *  the same file (renderer auto-save racing a spawn-time save). */
+  private readonly writeQueues = new Map<string, Promise<void>>();
+
   private async persist(file: string, data: unknown): Promise<void> {
-    await mkdir(dirname(file), { recursive: true });
-    const tmp = `${file}.tmp`;
-    await writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
-    await rename(tmp, file);
+    const run = async (): Promise<void> => {
+      await mkdir(dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.${(persistSeq += 1)}.tmp`;
+      await writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
+      await rename(tmp, file);
+    };
+    const prev = this.writeQueues.get(file) ?? Promise.resolve();
+    const next = prev.then(run, run);
+    this.writeQueues.set(
+      file,
+      next.catch(() => undefined),
+    );
+    void next.then(
+      () => {
+        if (this.writeQueues.get(file) === next) this.writeQueues.delete(file);
+      },
+      () => {
+        if (this.writeQueues.get(file) === next) this.writeQueues.delete(file);
+      },
+    );
+    return next;
   }
 
   async list(): Promise<SessionSummary[]> {
     const entries = await this.readIndex();
     const summaries: SessionSummary[] = [];
-    const corrupt: Array<{ id: string; name: string; updatedAt: number }> = [];
     for (const entry of entries) {
       try {
         const session = await this.load(entry.id);
@@ -78,14 +156,11 @@ export class SessionStore {
           projectPath: session.projectPath,
         });
       } catch {
-        // a corrupt/missing session.json must not hide every other session;
-        // drop its index entry so it does not linger undeletable forever
-        corrupt.push(entry);
+        // a corrupt/missing session.json must not hide every other session.
+        // The index entry STAYS — auto-deleting it would turn a transient
+        // read failure into permanent session loss; the dir is simply not
+        // listed while unreadable.
       }
-    }
-    if (corrupt.length > 0) {
-      const bad = new Set(corrupt.map((e) => e.id));
-      await this.writeIndex(entries.filter((e) => !bad.has(e.id))).catch(() => undefined);
     }
     return summaries;
   }

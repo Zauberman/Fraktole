@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { modalClosed, modalOpened } from '../../modal-guard.js';
 import { bridge, type AppInfo, type Settings, type SettingsSection } from '../../ipc.js';
 import { GeneralSection } from './GeneralSection.js';
 import { ModelSection } from './ModelSection.js';
@@ -50,11 +51,25 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     };
   }, []);
 
+  // role=dialog promises Escape-to-close and an initial focus; also counts
+  // toward the global modal depth so app shortcuts stand down behind it
+  useEffect(() => {
+    modalOpened();
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      modalClosed();
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [onClose]);
+
   return (
     <div className="settings-view" role="dialog" aria-label="settings">
       <header className="settings-header">
         <span className="pane-title">Settings</span>
-        <button type="button" className="btn btn-sm" onClick={onClose} aria-label="close settings">
+        <button type="button" className="btn btn-sm" onClick={onClose} aria-label="close settings" autoFocus>
           close
         </button>
       </header>

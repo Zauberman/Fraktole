@@ -1,6 +1,15 @@
 /* ————— file editor: tab bar, overflow menu, stale banner —————
    complements the editor rules in theme.css (pane/pane-body/host). */
 
+/* the editor tab's flex link: app-main-tab (flex) → this stack → the
+   workspace pane whose flex:1 is inert without it */
+.editor-tab-stack {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
 /* a pane hosts the stale banner above the editor surface */
 .file-editor-pane {
   display: flex;
@@ -176,12 +185,11 @@
   padding: 0 var(--s3) var(--s3);
 }
 
-.file-editor-tabs {
-  display: flex;
-  gap: var(--s1);
-  padding: var(--s3) 0 var(--s2);
-  overflow-x: auto;
-  flex-shrink: 0;
+
+.file-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
 }
 
 .file-tab {

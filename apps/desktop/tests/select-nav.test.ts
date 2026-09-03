@@ -78,3 +78,13 @@ describe('selectReduce', () => {
     expect(s.active).toBe(0);
   });
 });
+
+describe('typeahead from a non-initial highlight', () => {
+  it('a no-match typeahead keeps the current highlight instead of jumping to 0', () => {
+    const down = selectReduce(selectInit, { t: 'move', d: 1 }, OPTS);
+    expect(down.active).toBe(1);
+    const miss = selectReduce(down, { t: 'type', ch: 'z', now: 1000 }, OPTS);
+    expect(miss.active).toBe(1);
+    expect(miss.typed).toBe('z');
+  });
+});

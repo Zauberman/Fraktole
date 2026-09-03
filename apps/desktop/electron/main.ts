@@ -16,9 +16,10 @@ import { ReviewerHost, type ReviewerToolCallEvent } from './reviewer.js';
 import { AUTONOMY_VARIANTS, type AutonomyVariant } from './reviewer-plugins.js';
 import { forkProject } from './fork.js';
 import { ReviewerTools, validateLauncherKind } from './reviewer-tools.js';
-import { commandIsPlainLaunch } from '../src/shared/launchers.js';
+import { commandIsPlainLaunch, effectiveAllowlist, launcherFirstToken } from '../src/shared/launchers.js';
 import { exportSessionBundle, importSessionBundle, type BundleResult } from './session-bundle.js';
 import { createFileForUser, mkdirForUser, renameForUser, trashForUser, writeAtomic } from './fs-ops.js';
+import { confineOrThrow } from './fs-scope.js';
 import { FileWatchRegistry } from './fs-watch.js';
 import { collectGitStatus } from './git-status.js';
 import { searchProject } from './project-search.js';
@@ -38,10 +39,8 @@ import {
   type PtySpawnArgs,
   type PtySpawnResult,
   type RemoteStatus,
-  type SendMessageArgs,
   type SessionFile,
   type SessionSavePayload,
-  type SessionSnapshot,
   type Settings,
   type ReviewerEntry,
   type ReviewerSpawnRequest,
@@ -79,15 +78,18 @@ let mainWindow: BrowserWindow | null = null;
 let currentTheme: ThemeId = 'midnight';
 let registry: SessionRegistry | null = null;
 /** In-flight reviewer spawns awaiting the renderer's tile mount. */
-const pendingSpawns = new Map<string, { agentId: string; resolve(out: string): void }>();
+const pendingSpawns = new Map<string, { sessionId: string; agentId: string; resolve(out: string): void }>();
 /**
  * Settles the pending spawn for an agent with a final verdict. Called from
  * the ptySpawn outcome (success or failure) — never from the mount ack,
  * which only proves the renderer mounted a tile, not that the PTY lives.
+ * Identity is (sessionId, agentId): agent ids are per-session sequences, so
+ * matching on agentId alone would settle the wrong session's spawn.
  */
-function settlePendingSpawn(agentId: string, out: string): void {
+function settlePendingSpawn(sessionId: string, agentId: string | undefined, out: string): void {
+  if (typeof agentId !== 'string') return;
   for (const [requestId, pending] of pendingSpawns) {
-    if (pending.agentId === agentId) {
+    if (pending.sessionId === sessionId && pending.agentId === agentId) {
       pendingSpawns.delete(requestId);
       pending.resolve(out);
       return;
@@ -320,13 +322,24 @@ if (!app.requestSingleInstanceLock()) {
     const judgeCwdFor = (session: SessionFile): string =>
       session.projectPath ?? session.judge?.cwd ?? home;
 
+    /** Registered project roots — the only filesystem scope the app's own UI
+     *  ever uses. Every renderer-supplied path must confine to one of these
+     *  (fs-scope.ts); the renderer runs web content and is not trusted. */
+    const projectRoots = async (): Promise<string[]> => {
+      try {
+        return (await projects.list()).map((p) => p.path);
+      } catch {
+        return [];
+      }
+    };
+
     // one live runtime per session; created lazily on first visit
     registry = new SessionRegistry({
       sessionRoot: sessionsRoot,
       logger: (line) => console.log(line),
       makeRuntime: (session: SessionFile): SessionRuntime => {
         let rt: SessionRuntime | null = null;
-        const recorder = new TileRecorder();
+        const recorder = new TileRecorder({ logger: (line) => console.log(line) });
         const alive = new Set<string>();
         const tileOfAgent = (agentId: string): string | null =>
           agentId === ORCHESTRATOR_ID ? null : (rt?.agentToTile.get(agentId) ?? null);
@@ -348,6 +361,7 @@ if (!app.requestSingleInstanceLock()) {
         // ptyData chunks are coalesced per tile per tick: one IPC send and
         // one remote publish per tick instead of per chunk
         const pendingChunks = new Map<string, { sessionId: string; tileId: string; chunks: string[] }>();
+        const exitedTiles = new Map<string, string>();
         let flushScheduled = false;
         const flushTile = (key: string): void => {
           const entry = pendingChunks.get(key);
@@ -355,6 +369,12 @@ if (!app.requestSingleInstanceLock()) {
           pendingChunks.delete(key);
           const data = entry.chunks.join('');
           entry.chunks.length = 0;
+          // node-pty does not strictly order final output before exit: a
+          // chunk that arrives after tileExit must not resurrect recorder,
+          // persist or alive state for a dead tile
+          if (!alive.has(entry.tileId) && exitedTiles.get(entry.tileId) === entry.sessionId) {
+            return;
+          }
           recorder.record(entry.tileId, data);
           persist.note(entry.tileId);
           alive.add(entry.tileId);
@@ -392,6 +412,7 @@ if (!app.requestSingleInstanceLock()) {
               // the exit event that closes the tile
               flushTile(`${session.id}\u0000${tileId}`);
               alive.delete(tileId);
+              exitedTiles.set(tileId, session.id);
               // persist the final lines before the recorder drops them — the
               // exit flush must capture everything, even if the debounce had
               // not fired yet
@@ -424,7 +445,6 @@ if (!app.requestSingleInstanceLock()) {
           tileOfAgent,
           write: (tileId, text) => host.write(tileId, text),
           emit: (msg) => {
-            mainWindow?.webContents.send(IPC.messageEvent, session.id, msg);
             remote?.publish({
               type: 'message.new',
               sessionId: session.id,
@@ -460,6 +480,9 @@ if (!app.requestSingleInstanceLock()) {
             agentOfTile,
             cwdOfAgent,
             killAgent: async (tileId) => {
+              // a no-op kill must not read as success — the model would skip
+              // re-dispatching an agent that was never actually running
+              if (!host.has(tileId)) return `error: unknown or already-exited tile ${tileId}`;
               host.kill(tileId);
               return `killed ${tileId}`;
             },
@@ -611,8 +634,9 @@ if (!app.requestSingleInstanceLock()) {
         const timer = setTimeout(() => {
           pendingSpawns.delete(requestId);
           // roll back the phantom tile so a timed-out spawn cannot linger
-          // as a ghost agent that resurrects on the next save/restore
-          if (!persisted) rt.session.nextAgentSeq -= 1;
+          // as a ghost agent that resurrects on the next save/restore. The
+          // sequence number is NOT decremented: a late ptySpawn could then
+          // reallocate the same id and collide with the rolled-back record.
           rt.session.tiles = rt.session.tiles.filter((t) => t.agentId !== agentId);
           agentKinds.delete(agentId);
           void sessions
@@ -622,6 +646,7 @@ if (!app.requestSingleInstanceLock()) {
           resolve({ ok: false, error: `spawn timed out — the renderer never mounted tile for ${agentId}` });
         }, 20_000);
         pendingSpawns.set(requestId, {
+          sessionId: rt.session.id,
           agentId,
           resolve: (out) => {
             // the verdict arrives from the ptySpawn outcome (success or error)
@@ -684,57 +709,100 @@ if (!app.requestSingleInstanceLock()) {
       userData: app.getPath('userData'),
       home,
     }));
-    ipcMain.handle(IPC.ptySpawn, async (_e, args: PtySpawnArgs): Promise<PtySpawnResult> => {
-      const rt = registry?.get(args.sessionId) ?? null;
-      const session = rt?.session ?? null;
-      if (!rt || !session) throw new Error(`no runtime for session ${args.sessionId}`);
-      // agent ids are internally generated agent-<n>: anything else must
-      // never reach mailbox paths (agents dir, env contract)
-      if (args.agentId !== undefined && (typeof args.agentId !== 'string' || !/^agent-\d+$/.test(args.agentId))) {
-        throw new Error(`invalid agent id ${args.agentId}`);
-      }
-      // restore passes the persisted agentId; live spawns get a fresh one
-      let agentId = args.agentId ?? null;
-      if (agentId === null || !session.tiles.some((t) => t.agentId === agentId)) {
-        agentId = sessions.allocateAgentId(session);
-        session.tiles.push({ agentId, cwd: args.cwd });
-        try {
-          await sessions.save(session);
-        } catch (err) {
-          // the id was never persisted: roll the in-memory state back so a
-          // retry reuses it instead of burning the sequence
-          session.tiles = session.tiles.filter((t) => t.agentId !== agentId);
-          session.nextAgentSeq -= 1;
-          throw err;
-        }
-        rt.updateSession(session);
-      } else {
-        // restore: keep the tile record in sync with the spawn cwd and kind
-        session.tiles = session.tiles.map((t) =>
-          t.agentId === agentId ? { ...t, cwd: args.cwd, kind: args.command && args.command.trim().length > 0 ? 'agent' : t.kind } : t,
-        );
-        await sessions.save(session);
-        rt.updateSession(session);
-      }
-      // launcher command present ⇒ an agent tile, otherwise a plain shell
-      // (restored tiles fall back to their persisted kind)
-      const persistedKind = session.tiles.find((t) => t.agentId === agentId)?.kind;
-      agentKinds.set(agentId, args.command && args.command.trim().length > 0 ? 'agent' : (persistedKind ?? 'shell'));
-      await sessions.ensureAgentMailbox(session.id, agentId);
-      rt.agentToTile.set(agentId, args.tileId);
-      const env = buildAgentEnv(session.id, agentId, 'agent', rt.sessionDir());
-      try {
-        rt.host.spawn(args.tileId, { cwd: args.cwd, cols: args.cols, rows: args.rows, envExt: env });
-        sessionInfra.get(session.id)?.recorder.resize(args.tileId, args.cols, args.rows);
-        if (args.command && args.command.trim().length > 0) {
-          rt.host.write(args.tileId, `${args.command.trim()}\n`);
-        }
-        // the PTY is genuinely alive now — the reviewer's spawn verdict is real
-        settlePendingSpawn(agentId, `spawned agent ${agentId} (tile ${args.tileId})`);
-      } catch (err) {
-        // a failed spawn must surface as a spawn error to the reviewer, not
-        // a success that the renderer mount ack already reported
-        settlePendingSpawn(agentId, `error: pty spawn failed for ${args.tileId}: ${(err as Error).message}`);
+/** Closes a renderer tile synchronously after a refused pty:spawn so the
+ *  dead tile cannot linger and block session saves. */
+function failTile(sessionId: string, tileId: string): void {
+  mainWindow?.webContents.send(IPC.tileExit, sessionId, tileId, { code: -1 });
+}
+
+ipcMain.handle(IPC.ptySpawn, async (_e, args: PtySpawnArgs): Promise<PtySpawnResult> => {
+  // settle the reviewer's pending spawn fast (instead of a 20s timeout)
+  // and close the mounted tile so it cannot block future saves
+  const refuse = (why: string): Error => {
+    settlePendingSpawn(args.sessionId, args.agentId, `error: ${why}`);
+    failTile(args.sessionId, args.tileId);
+    return new Error(why);
+  };
+  const rt = registry?.get(args.sessionId) ?? null;
+  const session = rt?.session ?? null;
+  if (!rt || !session) throw refuse(`no runtime for session ${args.sessionId}`);
+  // a stopped session must not accept new PTYs — saves are suppressed for
+  // stopped runtimes, so a spawned tile would wedge the session half-alive
+  if (rt.state === 'stopped') throw refuse('session is stopped');
+  // agent ids are internally generated agent-<n>: anything else must
+  // never reach mailbox paths (agents dir, env contract)
+  if (args.agentId !== undefined && (typeof args.agentId !== 'string' || !/^agent-\d+$/.test(args.agentId))) {
+    throw refuse(`invalid agent id ${args.agentId}`);
+  }
+  // restore passes the persisted agentId; live spawns get a fresh one.
+  // An agentId that is neither a persisted tile nor a live spawn is STALE —
+  // e.g. it arrived after the reviewer spawn already timed out — and must
+  // not resurrect a record for an id the reviewer no longer knows about.
+  let agentId = args.agentId ?? null;
+  if (agentId !== null && !session.tiles.some((t) => t.agentId === agentId)) {
+    throw refuse(`stale spawn for ${agentId}`);
+  }
+  if (agentId === null) {
+    agentId = sessions.allocateAgentId(session);
+    session.tiles.push({ agentId, cwd: args.cwd });
+    try {
+      await sessions.save(session);
+    } catch (err) {
+      // the id was never persisted: roll the in-memory state back so a
+      // retry reuses it instead of burning the sequence
+      session.tiles = session.tiles.filter((t) => t.agentId !== agentId);
+      session.nextAgentSeq -= 1;
+      throw refuse(`session save failed: ${(err as Error).message}`);
+    }
+    rt.updateSession(session);
+  } else {
+    // restore: keep the tile record in sync with the spawn cwd and kind
+    session.tiles = session.tiles.map((t) =>
+      t.agentId === agentId ? { ...t, cwd: args.cwd, kind: args.command && args.command.trim().length > 0 ? 'agent' : t.kind } : t,
+    );
+    await sessions.save(session);
+    rt.updateSession(session);
+  }
+  // renderer-supplied launcher commands are gated exactly like the
+  // reviewer's own spawns: a plain invocation whose first token is on the
+  // effective allowlist. (Flag-level inspection is out of scope by design —
+  // allowlisted launchers may carry flags; see shared/launchers.ts.)
+  if (args.command !== undefined) {
+    if (typeof args.command !== 'string' || !commandIsPlainLaunch(args.command)) {
+      throw refuse('launcher command is not a plain invocation');
+    }
+    const s = await settings.get();
+    const allow = effectiveAllowlist(s.reviewer.allowedLaunchers ?? [], s.reviewer.agentCommand ?? '');
+    if (!allow.includes(launcherFirstToken(args.command))) {
+      throw refuse(`launcher ${launcherFirstToken(args.command)} is not on the allowed list`);
+    }
+  }
+  // the cwd must be a registered project root (or the home workspace the
+  // app offers when no project is open) — never an arbitrary directory
+  try {
+    await confineOrThrow([...(await projectRoots()), home], args.cwd);
+  } catch {
+    throw refuse('cwd is outside the registered projects');
+  }
+  // launcher command present ⇒ an agent tile, otherwise a plain shell
+  // (restored tiles fall back to their persisted kind)
+  const persistedKind = session.tiles.find((t) => t.agentId === agentId)?.kind;
+  agentKinds.set(agentId, args.command && args.command.trim().length > 0 ? 'agent' : (persistedKind ?? 'shell'));
+  await sessions.ensureAgentMailbox(session.id, agentId);
+  rt.agentToTile.set(agentId, args.tileId);
+  const env = buildAgentEnv(session.id, agentId, 'agent', rt.sessionDir());
+  try {
+    rt.host.spawn(args.tileId, { cwd: args.cwd, cols: args.cols, rows: args.rows, envExt: env });
+    sessionInfra.get(session.id)?.recorder.resize(args.tileId, args.cols, args.rows);
+    if (args.command && args.command.trim().length > 0) {
+      rt.host.write(args.tileId, `${args.command.trim()}\n`);
+    }
+    // the PTY is genuinely alive now — the reviewer's spawn verdict is real
+    settlePendingSpawn(args.sessionId, agentId, `spawned agent ${agentId} (tile ${args.tileId})`);
+  } catch (err) {
+    // a failed spawn must surface as a spawn error to the reviewer, not
+    // a success that the renderer mount ack already reported
+    settlePendingSpawn(args.sessionId, agentId, `error: pty spawn failed for ${args.tileId}: ${(err as Error).message}`);
         // a failed spawn must close the tile through the normal exit path,
         // otherwise the renderer would keep a dead tile forever — and the
         // phantom tile state must not linger to resurrect on the next save
@@ -840,9 +908,12 @@ if (!app.requestSingleInstanceLock()) {
       remote?.publish({ type: 'session.state', sessionId: id, alive: true });
     });
     ipcMain.handle(IPC.sessionExportBundle, async (_e, id: string): Promise<BundleResult> => {
+      // the id reaches stat()/tar argv — confine it to a real session id
+      if (typeof id !== 'string' || !/^s-[a-z0-9-]+$/.test(id)) return { ok: false, canceled: false, error: 'invalid session id' };
+      if (!mainWindow) return { ok: false, canceled: true, error: '' };
       const session = await sessions.load(id).catch(() => null);
       const base = (session?.name ?? id).replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 60);
-      const picked = await dialog.showSaveDialog(mainWindow!, {
+      const picked = await dialog.showSaveDialog(mainWindow, {
         title: 'Export session bundle',
         defaultPath: `fraktole-session-${base}.tar.gz`,
         filters: [{ name: 'Fraktole session bundle', extensions: ['tar.gz'] }],
@@ -851,7 +922,8 @@ if (!app.requestSingleInstanceLock()) {
       return exportSessionBundle(sessionsRoot, id, picked.filePath);
     });
     ipcMain.handle(IPC.sessionImportBundle, async (): Promise<BundleResult> => {
-      const picked = await dialog.showOpenDialog(mainWindow!, {
+      if (!mainWindow) return { ok: false, canceled: true, error: '' };
+      const picked = await dialog.showOpenDialog(mainWindow, {
         title: 'Import session bundle',
         filters: [{ name: 'Fraktole session bundle', extensions: ['tar.gz'] }],
         properties: ['openFile'],
@@ -890,6 +962,9 @@ if (!app.requestSingleInstanceLock()) {
       // a stopped session's view empties out as its PTYs die; its saves are
       // stop artifacts and must not clobber the persisted arrangement
       if (rt?.state === 'stopped') return session;
+      // validate the payload BEFORE mutating anything: a malformed save must
+      // not leave memory and disk diverging until the next save
+      if (!Array.isArray(payload.agents)) return session;
       session.tree = payload.tree;
       // null clears the persisted value (user unzoomed/unfocused), undefined
       // means "not part of this payload"
@@ -901,7 +976,6 @@ if (!app.requestSingleInstanceLock()) {
         session.judge = payload.judgeCwd && payload.judgeCwd.length > 0 ? { command: '', cwd: payload.judgeCwd } : null;
       }
       // prunes agents closed since the last save; mailboxes stay on disk
-      if (!Array.isArray(payload.agents)) return session;
       const kept = new Set(payload.agents);
       session.tiles = session.tiles.filter((t) => kept.has(t.agentId));
       for (const agentId of [...(rt?.agentToTile.keys() ?? [])]) {
@@ -916,6 +990,8 @@ if (!app.requestSingleInstanceLock()) {
         const recorder = infra?.recorder;
         await mkdir(join(sessionDir, 'scrollback'), { recursive: true });
         for (const [agentId, lines] of Object.entries(payload.scrollback)) {
+          // keys land in a path join — accept only internally-generated ids
+          if (!/^agent-\d+$/.test(agentId)) continue;
           // prefer the live recorder (the same source read_scrollback reads) so
           // the on-disk fallback matches the live view; fall back to the
           // renderer's captured lines only when the recorder has nothing.
@@ -934,61 +1010,6 @@ if (!app.requestSingleInstanceLock()) {
         }
       }
       return session;
-    });
-    ipcMain.handle(IPC.messageSend, async (_e, sessionId: string, args: SendMessageArgs): Promise<boolean> => {
-      const rt = registry?.get(sessionId) ?? null;
-      if (!rt) return false;
-      if (typeof args !== 'object' || args === null) return false;
-      if (typeof args.to !== 'string' || args.to.length === 0 || typeof args.body !== 'string') return false;
-      // cap the body so one oversized send cannot flood the log and terminal
-      const body = args.body.length > 64 * 1024 ? args.body.slice(0, 64 * 1024) : args.body;
-      return rt.router.sendFromOrchestrator({
-        id: messageId(),
-        from: ORCHESTRATOR_ID,
-        to: args.to,
-        kind: args.kind,
-        body,
-        ref: args.ref,
-        at: Date.now(),
-      });
-    });
-    ipcMain.handle(IPC.messageList, async (_e, sessionId: string) => {
-      const rt = registry?.get(sessionId) ?? null;
-      if (!rt) return [];
-      return rt.router.listMessages(rt.session.id);
-    });
-    ipcMain.handle(IPC.snapshotCreate, async (_e, sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot> => {
-      const rt = registry?.get(sessionId) ?? null;
-      if (!rt) throw new Error('no session runtime');
-      if (typeof args !== 'object' || args === null) throw new Error('invalid snapshot args');
-      if (typeof args.agentId !== 'string' || typeof args.text !== 'string') throw new Error('invalid snapshot args');
-      // cap the text so one oversized snapshot cannot bloat disk and memory
-      if (args.text.length > 512 * 1024) throw new Error('snapshot text too large');
-      const id = `snap-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-      const snapshot: SessionSnapshot = {
-        id,
-        agentId: args.agentId,
-        at: Date.now(),
-        lineCount: args.text.length > 0 ? args.text.split('\n').length : 0,
-        text: args.text,
-      };
-      await mkdir(join(rt.sessionDir(), 'snapshots'), { recursive: true });
-      await writeFile(
-        join(rt.sessionDir(), 'snapshots', `${id}.json`),
-        JSON.stringify(snapshot, null, 2),
-        'utf8',
-      );
-      return snapshot;
-    });
-    ipcMain.handle(IPC.snapshotGet, async (_e, sessionId: string, id: string): Promise<SessionSnapshot | null> => {
-      const rt = registry?.get(sessionId) ?? null;
-      if (!rt) return null;
-      try {
-        const raw = await readFile(join(rt.sessionDir(), 'snapshots', `${id}.json`), 'utf8');
-        return JSON.parse(raw) as SessionSnapshot;
-      } catch {
-        return null;
-      }
     });
     ipcMain.handle(IPC.reviewerEnsure, async (_e, sessionId: string): Promise<boolean> => {
       const rt = registry?.get(sessionId) ?? null;
@@ -1045,21 +1066,11 @@ if (!app.requestSingleInstanceLock()) {
       async (_e, sessionId: string, requestId: string, payload: { tileId: string | null; agentId: string | null }): Promise<void> => {
         const pending = pendingSpawns.get(requestId);
         if (!pending) {
-          // late mount for an already-timed-out spawn: drop the phantom
-          // tile so it cannot resurrect on the next save/restore
-          if (payload?.agentId && sessionId) {
-            const rt = registry?.get(sessionId) ?? null;
-            if (rt) {
-              rt.session.tiles = rt.session.tiles.filter((t) => t.agentId !== payload.agentId);
-              agentKinds.delete(payload.agentId);
-              try {
-                await sessions.save(rt.session);
-                rt.updateSession(rt.session);
-              } catch {
-                // best-effort cleanup
-              }
-            }
-          }
+          // No pending spawn for this requestId: the verdict was already
+          // settled by the real ptySpawn outcome, or the spawn timed out and
+          // the timeout path already rolled the phantom tile back. Filtering
+          // tiles here again would delete a LIVE agent whose ptySpawn simply
+          // won the race against this ack.
           return;
         }
         if (!payload?.tileId) {
@@ -1157,7 +1168,9 @@ if (!app.requestSingleInstanceLock()) {
     );
     ipcMain.handle(IPC.scrollbackGet, async (_e, sessionId: string, agentId: string): Promise<string[] | null> => {
       const rt = registry?.get(sessionId) ?? null;
-      if (!rt) return null;
+      // agentId lands in a path join — same single-component rule the remote
+      // bridge applies to phone-supplied ids (readDiskScrollback)
+      if (!rt || typeof agentId !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(agentId)) return null;
       try {
         const raw = await readFile(join(rt.sessionDir(), 'scrollback', `${agentId}.json`), 'utf8');
         const parsed = JSON.parse(raw) as { lines?: string[] };
@@ -1169,10 +1182,11 @@ if (!app.requestSingleInstanceLock()) {
 
     // file editor backend
     ipcMain.handle(IPC.fsListDir, async (_e, path: string): Promise<FsEntry[]> => {
-      const entries = await readdir(path, { withFileTypes: true });
+      const scoped = await confineOrThrow(await projectRoots(), path);
+      const entries = await readdir(scoped, { withFileTypes: true });
       const out: FsEntry[] = [];
       for (const e of entries) {
-        const full = join(path, e.name);
+        const full = join(scoped, e.name);
         let isDir = e.isDirectory();
         let size = 0;
         try {
@@ -1180,8 +1194,6 @@ if (!app.requestSingleInstanceLock()) {
             const st = await stat(full);
             isDir = st.isDirectory();
             size = st.size;
-          } else if (!isDir) {
-            size = (await stat(full)).size;
           }
         } catch {
           // broken symlink or unreadable entry — skip it
@@ -1193,27 +1205,47 @@ if (!app.requestSingleInstanceLock()) {
       return out;
     });
     ipcMain.handle(IPC.fsReadFile, async (_e, path: string): Promise<{ content: string; size: number }> => {
-      const st = await stat(path);
+      const scoped = await confineOrThrow(await projectRoots(), path);
+      const st = await stat(scoped);
       if (st.size > 4 * 1024 * 1024) throw new Error('file too large');
-      return { content: await readFile(path, 'utf8'), size: st.size };
+      return { content: await readFile(scoped, 'utf8'), size: st.size };
     });
     ipcMain.handle(IPC.fsWriteFile, async (_e, path: string, content: string): Promise<void> => {
-      await writeAtomic(path, content);
+      if (typeof content !== 'string') throw new Error('invalid file content');
+      const scoped = await confineOrThrow(await projectRoots(), path);
+      await writeAtomic(scoped, content);
     });
     ipcMain.handle(IPC.fsStat, async (_e, path: string): Promise<FsStat> => {
-      const st = await stat(path);
-      return { path, isDir: st.isDirectory(), isFile: st.isFile(), size: st.size, mtimeMs: st.mtimeMs };
+      const scoped = await confineOrThrow(await projectRoots(), path);
+      const st = await stat(scoped);
+      return { path: scoped, isDir: st.isDirectory(), isFile: st.isFile(), size: st.size, mtimeMs: st.mtimeMs };
     });
     const fileWatches = new FileWatchRegistry((path) => mainWindow?.webContents.send(IPC.fsFileChanged, path));
-    ipcMain.handle(IPC.fsWatchFile, (_e, path: string) => fileWatches.watch(path));
-    ipcMain.handle(IPC.fsUnwatchFile, (_e, path: string) => fileWatches.unwatch(path));
-    ipcMain.handle(IPC.fsMkdir, (_e, dirPath: string) => mkdirForUser(dirPath));
-    ipcMain.handle(IPC.fsCreateFile, (_e, path: string) => createFileForUser(path));
-    ipcMain.handle(IPC.fsRename, (_e, from: string, to: string) => renameForUser(from, to));
-    ipcMain.handle(IPC.fsTrash, (_e, path: string) => trashForUser(path));
-    ipcMain.handle(IPC.gitStatus, (_e, projectPath: string) => collectGitStatus(projectPath));
-    ipcMain.handle(IPC.searchProject, (_e, root: string, query: string) => searchProject(root, query));
+    ipcMain.handle(IPC.fsWatchFile, async (_e, path: string) => fileWatches.watch(await confineOrThrow(await projectRoots(), path)));
+    ipcMain.handle(IPC.fsUnwatchFile, async (_e, path: string) => {
+      const scoped = await confineOrThrow(await projectRoots(), path);
+      fileWatches.unwatch(scoped);
+    });
+    ipcMain.handle(IPC.fsMkdir, async (_e, dirPath: string) => mkdirForUser(await confineOrThrow(await projectRoots(), dirPath)));
+    ipcMain.handle(IPC.fsCreateFile, async (_e, path: string) => createFileForUser(await confineOrThrow(await projectRoots(), path)));
+    ipcMain.handle(IPC.fsRename, async (_e, from: string, to: string) => {
+      const roots = await projectRoots();
+      const fromScoped = await confineOrThrow(roots, from);
+      const toScoped = await confineOrThrow(roots, to);
+      return renameForUser(fromScoped, toScoped);
+    });
+    ipcMain.handle(IPC.fsTrash, async (_e, path: string) => trashForUser(await confineOrThrow(await projectRoots(), path)));
+    ipcMain.handle(IPC.gitStatus, async (_e, projectPath: string) => {
+      const scoped = await confineOrThrow(await projectRoots(), projectPath);
+      return collectGitStatus(scoped);
+    });
+    ipcMain.handle(IPC.searchProject, async (_e, root: string, query: string) => {
+      if (typeof query !== 'string') throw new Error('invalid search query');
+      const scoped = await confineOrThrow(await projectRoots(), root);
+      return searchProject(scoped, query);
+    });
     ipcMain.handle(IPC.usageHistory, async (_e, sessionId: string) => {
+      if (typeof sessionId !== 'string' || !/^s-[a-z0-9-]+$/.test(sessionId)) return [];
       try {
         return await new UsageLog(join(sessionsRoot, sessionId, 'reviewer')).read();
       } catch {
@@ -1250,8 +1282,12 @@ if (!app.requestSingleInstanceLock()) {
     /** Last bridge start failure, surfaced in the Remote tab. */
     let remoteError: string | null = null;
 
-    const liveTileOf = (agentId: string): { recorder: TileRecorder; tileId: string } | null => {
+    const liveTileOf = (agentId: string, sessionId?: string): { recorder: TileRecorder; tileId: string } | null => {
       for (const rt of registry?.all() ?? []) {
+        // scoped lookup: agent ids repeat across sessions (agent-1 exists in
+        // every session), so without a session filter this would return the
+        // first matching runtime's tile — often the wrong session's
+        if (sessionId !== undefined && rt.id !== sessionId) continue;
         const tileId = rt.agentToTile.get(agentId);
         if (tileId) {
           const infra = sessionInfra.get(rt.id);
@@ -1262,7 +1298,7 @@ if (!app.requestSingleInstanceLock()) {
     };
 
     /** On-disk scrollback fallback for tiles with no live runtime. */
-    const readDiskScrollback = async (agentId: string, tail: number): Promise<string> => {
+    const readDiskScrollback = async (agentId: string, tail: number, sessionId?: string): Promise<string> => {
       // agentId comes from the phone — keep it a single path component so it
       // can never traverse out of the session scrollback dir (the live path
       // above is a map lookup and cannot traverse, this one builds a path)
@@ -1271,6 +1307,7 @@ if (!app.requestSingleInstanceLock()) {
       }
       const list = await sessions.list();
       for (const s of list) {
+        if (sessionId !== undefined && s.id !== sessionId) continue;
         if (!(await sessions.listAgentIds(s.id)).includes(agentId)) continue;
         try {
           const raw = await readFile(join(sessionsRoot, s.id, 'scrollback', `${agentId}.json`), 'utf8');
@@ -1284,10 +1321,10 @@ if (!app.requestSingleInstanceLock()) {
       return '';
     };
 
-    const readScrollback = async (agentId: string, tail = 500): Promise<string> => {
-      const live = liveTileOf(agentId);
+    const readScrollback = async (agentId: string, tail = 500, sessionId?: string): Promise<string> => {
+      const live = liveTileOf(agentId, sessionId);
       if (live) return live.recorder.tail(live.tileId, tail).join('\n');
-      return readDiskScrollback(agentId, tail);
+      return readDiskScrollback(agentId, tail, sessionId);
     };
 
     const activeRuntime = (): SessionRuntime | null => {
@@ -1338,9 +1375,9 @@ if (!app.requestSingleInstanceLock()) {
         const rt = registry?.get(sessionId) ?? null;
         return rt?.agentToTile.get(agentId) ?? null;
       },
-      readScrollback: async (agentId: string, tail?: number): Promise<string> =>
-        readScrollback(agentId, typeof tail === 'number' && tail > 0 ? Math.min(tail, 2000) : 500),
-      snapshot: async (agentId: string): Promise<string> => readScrollback(agentId, 200),
+      readScrollback: async (agentId: string, tail?: number, sessionId?: string): Promise<string> =>
+        readScrollback(agentId, typeof tail === 'number' && tail > 0 ? Math.min(tail, 2000) : 500, sessionId),
+      snapshot: async (agentId: string, sessionId?: string): Promise<string> => readScrollback(agentId, 200, sessionId),
       sendTask: async ({ agentId, kind, body }) => {
         const rt = runtimeOfAgent(agentId);
         if (!rt) return { ok: false, error: `unknown agent ${agentId}` };
@@ -1514,10 +1551,34 @@ if (!app.requestSingleInstanceLock()) {
     }, 30_000);
     remoteHeartbeat.unref();
 
-    app.on('will-quit', () => {
-      registry?.killAll();
-      remote?.stop();
-      remote = null;
+    // quit flush: the renderer's beforeunload save is fire-and-forget async
+    // IPC that races window teardown, so the LAST writes must happen here —
+    // a final scrollback flush per live tile plus one session save — before
+    // any PTY dies. Best-effort: quitting is never blocked by a flush error.
+    let quitting = false;
+    app.on('will-quit', (event) => {
+      if (quitting) return;
+      event.preventDefault();
+      quitting = true;
+      void (async () => {
+        for (const rt of registry?.all() ?? []) {
+          try {
+            const infra = sessionInfra.get(rt.session.id);
+            for (const [, tileId] of rt.agentToTile) {
+              const lines = infra?.recorder.full(tileId) ?? [];
+              if (infra?.persist && lines.length > 0) await infra.persist.flushTile(tileId, lines);
+            }
+            await sessions.save(rt.session);
+          } catch {
+            // best-effort
+          }
+        }
+      })().finally(() => {
+        registry?.killAll();
+        remote?.stop();
+        remote = null;
+        app.quit();
+      });
     });
 
     // boot-time bridge start: persisted enable state (or FRAKTOLE_REMOTE_ENABLE)

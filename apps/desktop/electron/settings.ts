@@ -89,6 +89,40 @@ function parseExplorer(raw: Record<string, unknown> | undefined): ExplorerSettin
  * pasted API key (src/shared/reviewer-detect.ts); explicit overrides are
  * optional and only used for ambiguous sk- keys.
  */
+const KNOWN_TOP_KEYS = new Set(['theme', 'editor', 'notifications', 'explorer', 'reviewer']);
+const KNOWN_REVIEWER_KEYS = new Set([
+  'apiKey',
+  'apiKeyEnv',
+  'providerId',
+  'provider',
+  'model',
+  'baseUrl',
+  'agentCommand',
+  'allowedLaunchers',
+  'reasoningEffort',
+  'knobs',
+  'customAutonomy',
+]);
+
+/** Strips unknown keys from an incoming settings patch (prototype-safe:
+ *  spread only copies known fields). */
+function sanitizePatch(patch: Partial<Settings>): Partial<Settings> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (!KNOWN_TOP_KEYS.has(k)) continue;
+    if (k === 'reviewer' && typeof v === 'object' && v !== null) {
+      const rv: Record<string, unknown> = {};
+      for (const [rk, rvv] of Object.entries(v as Record<string, unknown>)) {
+        if (KNOWN_REVIEWER_KEYS.has(rk)) rv[rk] = rvv;
+      }
+      out[k] = rv;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out as Partial<Settings>;
+}
+
 export class SettingsStore {
   constructor(private readonly file: string) {}
 
@@ -144,9 +178,12 @@ export class SettingsStore {
     }
   }
 
-  async set(patch: Partial<Settings>): Promise<Settings> {
+  async set(rawPatch: Partial<Settings>): Promise<Settings> {
     const run = this.setQueue.then(async () => {
       const current = await this.get();
+      // key whitelist: unknown top-level and reviewer keys are dropped — the
+      // renderer is untrusted and must not persist arbitrary settings fields
+      const patch = sanitizePatch(rawPatch);
       const next: Settings = {
         ...current,
         ...patch,
@@ -162,7 +199,7 @@ export class SettingsStore {
           : current.explorer ?? { ...DEFAULT_EXPLORER },
       };
       await mkdir(dirname(this.file), { recursive: true });
-      const tmp = `${this.file}.tmp`;
+      const tmp = `${this.file}.${process.pid}.${Date.now()}.tmp`;
       await writeFile(tmp, JSON.stringify(next, null, 2), 'utf8');
       await rename(tmp, this.file);
       return next;

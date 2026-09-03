@@ -33,11 +33,6 @@ export const IPC = {
   fsReadFile: 'fs:read-file',
   fsWriteFile: 'fs:write-file',
   fsStat: 'fs:stat',
-  messageSend: 'message:send',
-  messageList: 'message:list',
-  messageEvent: 'message:event',
-  snapshotCreate: 'snapshot:create',
-  snapshotGet: 'snapshot:get',
   scrollbackGet: 'scrollback:get',
   reviewerEnsure: 'reviewer:ensure',
   reviewerPrompt: 'reviewer:prompt',
@@ -502,21 +497,6 @@ export interface FraktoleMessage {
   body: string;
   at: number;
   ref?: string; // snapshotId attached to a result
-}
-
-export interface SendMessageArgs {
-  to: string;
-  kind: FraktoleMessage['kind'];
-  body: string;
-  ref?: string;
-}
-
-export interface SessionSnapshot {
-  id: string;
-  agentId: string;
-  at: number;
-  lineCount: number;
-  text: string;
 }
 
 /** Renderer → main on every save: the live arrangement serialized as agent

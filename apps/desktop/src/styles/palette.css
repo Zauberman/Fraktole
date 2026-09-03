@@ -11,9 +11,6 @@
   border-top: 2px solid var(--rgn-palette);
 }
 
-.dialog.palette .dialog-title {
-  color: var(--rgn-palette);
-}
 
 .palette-inputrow {
   display: flex;

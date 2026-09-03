@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react';
+import { modalClosed, modalOpened } from '../modal-guard.js';
 
 export type DialogAccent = 'palette' | 'explorer' | 'reviewer' | 'settings' | 'editor' | 'err';
 export type DialogSize = 'sm' | 'md' | 'lg';
@@ -17,7 +18,7 @@ interface DialogProps {
   size?: DialogSize;
 }
 
-const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE = 'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
 
 /** The shared modal primitive. Every dialog in the app renders through this:
  *  backdrop click (self target only) closes, Escape closes capture-phase,
@@ -34,6 +35,13 @@ export function Dialog({ title, onClose, children, footer, wide, accent, size }:
     first?.focus();
   }, []);
 
+  // a Dialog counts toward the global modal depth for the whole time it is
+  // mounted — the global shortcut layer reads this and stands down
+  useEffect(() => {
+    modalOpened();
+    return () => modalClosed();
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
@@ -42,7 +50,9 @@ export function Dialog({ title, onClose, children, footer, wide, accent, size }:
         return;
       }
       if (e.key === 'Tab' && panelRef.current !== null) {
-        const items = [...panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE)];
+        const items = [...panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+          (el) => !(el as HTMLButtonElement).disabled,
+        );
         if (items.length === 0) return;
         const active = document.activeElement;
         const idx = items.indexOf(active as HTMLElement);

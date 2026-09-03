@@ -242,7 +242,10 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
         return new Map(prev).set(path, entries);
       });
     } catch {
-      setDirs((prev) => new Map(prev).set(path, []));
+      // a transient failure must not render the dir as empty — keep the
+      // previous listing and say something
+      setDirs((prev) => (prev.has(path) ? prev : new Map(prev).set(path, [])));
+      showError(`could not list ${path}`);
     } finally {
       loadingRef.current.delete(path);
       setLoadingPaths((prev) => {
@@ -289,14 +292,21 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
   );
 
   const forgetDir = useCallback((path: string): void => {
+    // purge the dir AND every cached descendant (a/b/c) — stale orphan keys
+    // would resurrect ghost rows under the old prefix
+    const prefix = `${path}/`;
     setDirs((prev) => {
       const next = new Map(prev);
-      next.delete(path);
+      for (const key of next.keys()) {
+        if (key === path || key.startsWith(prefix)) next.delete(key);
+      }
       return next;
     });
     setExpanded((prev) => {
       const next = new Set(prev);
-      next.delete(path);
+      for (const key of next) {
+        if (key === path || key.startsWith(prefix)) next.delete(key);
+      }
       return next;
     });
   }, []);
@@ -436,6 +446,14 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
                   if (isActiveProject) setTreeOpen((v) => !v);
                   else onOpenProject(p.path);
                 }}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter' && e.key !== ' ') return;
+                  e.preventDefault();
+                  if (isActiveProject) setTreeOpen((v) => !v);
+                  else onOpenProject(p.path);
+                }}
+                tabIndex={0}
+                role="button"
               >
                 <div className="explorer-item-main">
                   <div className="explorer-item-name">{p.name}</div>

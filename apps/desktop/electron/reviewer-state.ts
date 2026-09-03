@@ -115,7 +115,15 @@ export async function persistState(file: string, state: ReviewerState, logger?: 
     const exists = await readFile(file)
       .then(() => true)
       .catch(() => false);
-    if (!exists) await writeFile(file, `${JSON.stringify(state, null, 2)}\n`, 'utf8').catch(() => undefined);
+    if (!exists) {
+      // never fall back to a direct (torn-write-able) write — retry the
+      // atomic path with a fresh unique tmp name instead
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      const retry = `${file}.${process.pid}.${++stateWriteSeq}.tmp`;
+      await writeFile(retry, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+        .then(() => rename(retry, file))
+        .catch(() => undefined);
+    }
     logger?.(`reviewer: state persist failed (${(err as Error).message})`);
   }
 }

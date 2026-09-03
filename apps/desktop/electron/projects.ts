@@ -63,7 +63,9 @@ export class ProjectsStore {
   private async persist(projects: Project[]): Promise<void> {
     await mkdir(dirname(this.file), { recursive: true });
     const sorted = [...projects].sort((a, b) => b.lastUsed - a.lastUsed);
-    const tmp = `${this.file}.tmp`;
+    // unique tmp name: two concurrent IPC writes must not interleave on one
+    // fixed tmp path (the loser would die with ENOENT on rename)
+    const tmp = `${this.file}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmp, JSON.stringify({ projects: sorted }, null, 2), 'utf8');
     await rename(tmp, this.file);
   }

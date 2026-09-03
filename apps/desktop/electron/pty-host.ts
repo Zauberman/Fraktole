@@ -94,7 +94,17 @@ export class PtyHost {
     }
   }
 
+  /** Whether a live pty is registered for the tile (kill() is a no-op otherwise). */
+  has(tileId: string): boolean {
+    return this.sessions.has(tileId);
+  }
+
   kill(tileId: string): void {
+    const existing = this.sessions.get(tileId);
+    if (existing?.killTimer) {
+      clearTimeout(existing.killTimer);
+      existing.killTimer = null;
+    }
     const session = this.sessions.get(tileId);
     if (!session) return;
     const { pty: term } = session;

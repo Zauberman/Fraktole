@@ -8,31 +8,18 @@ import { THEMES } from '../src/themes.js';
  *  A component referencing a nonexistent theme token (--fg-dim, --danger…)
  *  silently inherits colors — this guard makes that bug class impossible. */
 const CSS_NATIVE = new Set([
-  '--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s8',
-  '--r0', '--r-xs', '--r-sm', '--r-md', '--r-pill',
+  '--s1', '--s2', '--s3', '--s4', '--s5', '--s6',
+  '--r-xs', '--r-sm', '--r-md', '--r-pill',
   '--text-2xs', '--text-xs', '--text-sm', '--text-md', '--text-lg',
   '--track-wide', '--track-tight',
   '--lh-tight', '--lh-body',
   '--dur-fast', '--dur-med', '--dur-slow',
-  '--ease-out', '--ease-in',
+  '--ease-out',
   '--font-ui', '--font-mono', '--font-mono-alt', '--font-display',
 ]);
 
-/** Derived surface tokens land in themes.ts before their consuming CSS
- *  layer does (Phase 2 of the vibrant-chrome rebase); this allowlist keeps
- *  the dead-token gate honest until then. Remove once every entry is
- *  referenced by a stylesheet. */
-const DERIVED_PENDING = new Set([
-  '--rgn-explorer', '--rgn-explorer-soft',
-  '--rgn-editor', '--rgn-editor-soft',
-  '--rgn-reviewer', '--rgn-reviewer-soft',
-  '--rgn-palette', '--rgn-palette-soft',
-  '--rgn-settings', '--rgn-settings-soft',
-  '--cat-folder', '--cat-code', '--cat-doc', '--cat-config', '--cat-style', '--cat-data',
-]);
-
-const THEME_TOKENS = new Set(THEMES[0]!.tokens ? Object.keys(THEMES[0]!.tokens) : []);
-const THEME_TOKENS_ARR = THEMES[0]!.tokens ? Object.keys(THEMES[0]!.tokens) : [];
+const THEME_TOKENS = new Set(Object.keys(THEMES[0]!.tokens));
+const THEME_TOKENS_ARR = Object.keys(THEMES[0]!.tokens);
 
 const STYLES_DIR = join(import.meta.dirname, '..', 'src', 'styles');
 
@@ -64,7 +51,7 @@ describe('theme token coverage', () => {
     let all = '';
     for (const file of await layerFiles()) all += await readFile(file, 'utf8');
     const dead = THEME_TOKENS_ARR.filter(
-      (name) => !all.includes(`var(${name}`) && !DERIVED_PENDING.has(name),
+      (name) => !all.includes(`var(${name}`),
     );
     expect(dead, `theme tokens never used: ${dead.join(', ')}`).toEqual([]);
   });
@@ -84,5 +71,28 @@ describe('theme token coverage', () => {
         expect(raw ?? [], `${name} must use tokens only`).toEqual([]);
       }
     }
+  });
+
+  it('every var() in TSX components is a defined token too', async () => {
+    const srcDir = join(import.meta.dirname, '..', 'src');
+    const roots = [srcDir];
+    const files: string[] = [];
+    while (roots.length > 0) {
+      const dir = roots.pop()!;
+      for (const e of await readdir(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) roots.push(p);
+        else if (/\.(tsx|ts)$/.test(e.name) && !e.name.endsWith('.test.ts')) files.push(p);
+      }
+    }
+    const missing = new Set<string>();
+    for (const file of files) {
+      const src = await readFile(file, 'utf8');
+      for (const m of src.matchAll(/var\((--[a-z0-9-]+)/g)) {
+        const name = m[1]!;
+        if (!CSS_NATIVE.has(name) && !THEME_TOKENS.has(name)) missing.add(name);
+      }
+    }
+    expect([...missing], `undefined tokens referenced by TSX: ${[...missing].join(', ')}`).toEqual([]);
   });
 });

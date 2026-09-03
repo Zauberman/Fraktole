@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { Rect, TileId, TileNode } from '../window-tree.js';
 import { listIds, rects } from '../window-tree.js';
 import { Tile, TILE_DRAG_TYPE } from './Tile.js';
@@ -26,7 +26,16 @@ interface WorkspaceProps {
 const GAP = 8;
 
 function useReducedMotion(): boolean {
-  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // reactive: a mid-session preference change takes effect without a rerender
+  return useSyncExternalStore(
+    (cb) => {
+      const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+      mq.addEventListener('change', cb);
+      return () => mq.removeEventListener('change', cb);
+    },
+    () => window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    () => false,
+  );
 }
 
 /**

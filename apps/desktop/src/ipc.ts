@@ -26,11 +26,9 @@ import type {
   RemoteStatus,
   TestPageState,
   ReviewerToolCallEvent,
-  SendMessageArgs,
   SessionFile,
   SessionSavePayload,
   SessionSummary,
-  SessionSnapshot,
   Settings,
   SettingsSection,
   SamplerKnobs,
@@ -64,11 +62,9 @@ export type {
   RemoteStatus,
   TestPageState,
   ReviewerToolCallEvent,
-  SendMessageArgs,
   SessionFile,
   SessionSavePayload,
   SessionSummary,
-  SessionSnapshot,
   SearchResult,
   Settings,
   SettingsSection,
@@ -134,9 +130,6 @@ export interface FraktoleBridge {
   exportSessionBundle(id: string): Promise<BundleResult>;
   importSessionBundle(): Promise<BundleResult>;
   openProject(path: string): Promise<OpenedSession>;
-  sendMessage(sessionId: string, args: SendMessageArgs): Promise<boolean>;
-  listMessages(sessionId: string): Promise<FraktoleMessage[]>;
-  onMessageEvent(sessionId: string, cb: (msg: FraktoleMessage) => void): () => void;
   ensureReviewer(sessionId: string): Promise<boolean>;
   promptReviewer(sessionId: string, text: string): Promise<boolean>;
   stopReviewer(sessionId: string): Promise<void>;
@@ -180,8 +173,6 @@ export interface FraktoleBridge {
   onTestScreenshotRequest(sessionId: string, cb: (ev: { requestId: string }) => void): () => void;
   testScreenshotResponse(sessionId: string, requestId: string, dataUrl: string | null): Promise<void>;
   onTestReload(sessionId: string, cb: () => void): () => void;
-  createSnapshot(sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot>;
-  getSnapshot(sessionId: string, id: string): Promise<SessionSnapshot | null>;
   getScrollback(sessionId: string, agentId: string): Promise<string[] | null>;
   listDir(path: string): Promise<FsEntry[]>;
   readFile(path: string): Promise<{ content: string; size: number }>;

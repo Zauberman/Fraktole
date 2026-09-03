@@ -168,6 +168,32 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
     };
     fitVisible();
 
+    // live data subscription comes BEFORE the spawn request (a fast shell
+    // banner would otherwise be lost) and buffers until the scrollback
+    // replay settles, so history never lands below the live prompt
+    let disposed = false;
+    const liveBuffer: string[] = [];
+    let replaySettled = agentIdRef.current === null || agentIdRef.current === undefined;
+    const writeToTerm = (data: string): void => {
+      if (!disposed) term.write(data);
+    };
+
+    // debug hook: lets the CDP smoke read the live terminal buffer. Keyed by
+    // session+tile: tile ids repeat across sessions, a bare tileId would
+    // collide (one session's capture would read another session's buffer)
+    const termKey = `${sessionId}:${tileId}`;
+    const terms = (window as unknown as { __fraktTerms?: Map<string, Xterm> }).__fraktTerms ?? new Map();
+    (window as unknown as { __fraktTerms: Map<string, Xterm> }).__fraktTerms = terms;
+    terms.set(termKey, term);
+
+    const unsubscribeData = bridge.onPtyData(sessionId, tileId, (data) => {
+      if (!replaySettled) {
+        liveBuffer.push(data);
+        return;
+      }
+      writeToTerm(data);
+    });
+
     const cols = term.cols;
     const rows = term.rows;
     void bridge
@@ -189,25 +215,21 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
 
     // restored tiles replay their captured buffer so the session looks like
     // where the user left; the live shell continues below the separator
-    if (agentIdRef.current !== null && agentIdRef.current !== undefined) {
+    if (!replaySettled) {
       void bridge
-        .getScrollback(sessionId, agentIdRef.current)
+        .getScrollback(sessionId, agentIdRef.current ?? '')
         .then((lines) => {
-          if (!lines || lines.length === 0) return;
-          term.write(replayText(lines, agentIdRef.current ?? ''));
+          if (lines && lines.length > 0 && !disposed) {
+            term.write(replayText(lines, agentIdRef.current ?? ''));
+          }
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => {
+          replaySettled = true;
+          for (const d of liveBuffer.splice(0)) writeToTerm(d);
+        });
     }
 
-    // debug hook: lets the CDP smoke read the live terminal buffer. Keyed by
-    // session+tile: tile ids repeat across sessions, a bare tileId would
-    // collide (one session's capture would read another session's buffer)
-    const termKey = `${sessionId}:${tileId}`;
-    const terms = (window as unknown as { __fraktTerms?: Map<string, Xterm> }).__fraktTerms ?? new Map();
-    (window as unknown as { __fraktTerms: Map<string, Xterm> }).__fraktTerms = terms;
-    terms.set(termKey, term);
-
-    const unsubscribeData = bridge.onPtyData(sessionId, tileId, (data) => term.write(data));
 
     // applying options.theme makes xterm emit the palette as OSC sequences
     // through onData — that would inject terminal input into the PTY (harmless
@@ -258,6 +280,7 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
     ro.observe(host);
 
     return () => {
+      disposed = true;
       ro.disconnect();
       host.removeEventListener('contextmenu', onContextMenu);
       termDisposable.dispose();

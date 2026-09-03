@@ -190,7 +190,9 @@ export function ModelSection(props: ModelSectionProps): React.JSX.Element {
             className="btn btn-sm"
             title="the running reviewer picks this up on its next start"
             onClick={() => {
-              void bridge.restartReviewer(sessionId).then(() => onNotice('reviewer restarted'));
+              void bridge.restartReviewer(sessionId)
+                .then((ok) => onNotice(ok ? 'reviewer restarted' : 'reviewer not running — nothing to restart'))
+                .catch(() => onNotice('restart failed'));
             }}
           >
             restart reviewer now

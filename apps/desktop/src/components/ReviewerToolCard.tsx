@@ -22,9 +22,12 @@ export function ReviewerToolCard(props: {
   onToggle(): void;
 }): React.JSX.Element {
   const { it, expanded: open, onToggle } = props;
+  // the transcript state is start|done|error; the CSS contract is
+  // running|done|error — map instead of emitting an unstyled -start class
+  const phase = it.state === 'start' || it.state === undefined ? 'running' : it.state;
   return (
-<div key={it.seq} className={`reviewer-item reviewer-item-tool reviewer-item-tool-${it.state ?? 'start'}`}>
-  <span className={`reviewer-tool-band reviewer-tool-band-${it.state ?? 'running'}`} aria-hidden="true" />
+<div key={it.seq} className={`reviewer-item reviewer-item-tool reviewer-item-tool-${phase}`}>
+  <span className={`reviewer-tool-band reviewer-tool-band-${phase}`} aria-hidden="true" />
   <div className="reviewer-tool-header">
     <div className="reviewer-tool-row">
       <button type="button" className="reviewer-tool-toggle" onClick={onToggle}>
@@ -40,8 +43,8 @@ export function ReviewerToolCard(props: {
         </svg>
         <span className="reviewer-tool-name">{it.name}</span>
       </button>
-      <span className={`reviewer-tool-state reviewer-tool-state-${it.state ?? 'start'}`}>
-        {it.state === 'start' ? 'running' : it.state}
+      <span className={`reviewer-tool-state reviewer-tool-state-${phase}`}>
+        {it.state === 'start' || it.state === undefined ? 'running' : it.state}
       </span>
       {it.state !== 'start' && it.durationMs !== undefined && (
         <span className="reviewer-item-time">{it.durationMs}ms</span>

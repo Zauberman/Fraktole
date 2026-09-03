@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useReducer, useRef } from 'react';
+import React, { useEffect, useId, useMemo, useReducer, useRef } from 'react';
 import { selectInit, selectReduce, type SelectAction, type SelectOption, type SelectState } from '../select-nav.js';
 
 export type { SelectOption };
@@ -48,6 +48,8 @@ export function Select(props: SelectProps): React.JSX.Element {
   );
   const rootRef = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef<HTMLButtonElement | null>(null);
+  // stable per-instance id namespace for aria-activedescendant
+  const idBase = useId();
 
   const selected = options.find((o) => o.value === value);
   const sections = useMemo(() => groupOptions(options), [options]);
@@ -96,6 +98,10 @@ export function Select(props: SelectProps): React.JSX.Element {
         e.preventDefault();
         dispatch({ t: 'close' });
         break;
+      case 'Tab':
+        // Tab leaves the listbox — close it rather than stranding focus
+        dispatch({ t: 'close' });
+        break;
       default:
         if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
           e.preventDefault();
@@ -125,7 +131,12 @@ export function Select(props: SelectProps): React.JSX.Element {
       {state.open && (
         <>
           <div className="select-backdrop" onMouseDown={() => dispatch({ t: 'close' })} />
-          <div className="select-pop" role="listbox" aria-label={ariaLabel}>
+          <div
+            className="select-pop"
+            role="listbox"
+            aria-label={ariaLabel}
+            aria-activedescendant={`${idBase}-opt-${state.active}`}
+          >
             {sections.map((sec) => (
               <div key={sec.label ?? '__ungrouped'} className="select-section">
                 {sec.label !== null && <div className="select-section-label">{sec.label}</div>}
@@ -134,6 +145,7 @@ export function Select(props: SelectProps): React.JSX.Element {
                     key={option.value}
                     ref={index === state.active ? activeRef : undefined}
                     type="button"
+                    id={`${idBase}-opt-${index}`}
                     role="option"
                     aria-selected={option.value === value}
                     className={`select-option${index === state.active ? ' select-option-active' : ''}`}

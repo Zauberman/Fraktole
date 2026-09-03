@@ -160,8 +160,8 @@ export class OpenAIProvider implements ProviderClient {
     let finishReason: string | undefined;
     let sawDone = false;
     let usage: ProviderUsage | undefined;
-    const calls = new Map<number, { id: string; name: string; args: string; lastFrag: string }>();
-    const ensure = (i: number): { id: string; name: string; args: string; lastFrag: string } => {
+    const calls = new Map<number | string, { id: string; name: string; args: string; lastFrag: string }>();
+    const ensure = (i: number | string): { id: string; name: string; args: string; lastFrag: string } => {
       const cur = calls.get(i) ?? { id: '', name: '', args: '', lastFrag: '' };
       calls.set(i, cur);
       return cur;
@@ -228,7 +228,10 @@ export class OpenAIProvider implements ProviderClient {
       }
       for (const tc of delta.tool_calls ?? []) {
         const raw = tc as { index?: number; id?: string; function?: { name?: string; arguments?: string } };
-        const cur = ensure(raw.index ?? 0);
+        // non-conformant gateways emit parallel calls without index — key
+        // by id when present so the calls do not collapse into bucket 0
+        const key = raw.index ?? (raw.id !== undefined ? `id:${raw.id}` : 0);
+        const cur = ensure(key);
         if (raw.id) cur.id = raw.id;
         if (raw.function?.name) cur.name = raw.function.name;
         if (raw.function?.arguments) {

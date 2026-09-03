@@ -196,8 +196,14 @@ async function main() {
   pass(`sessions.list (${rows.length})`);
 
   const target = rows[0];
+  if (!target) {
+    // 'paired but nothing to look at' cannot validate the data plane — the
+    // smoke test needs at least one session with one tile
+    fail('no sessions on the desktop — the data plane is unverified');
+    return;
+  }
   let tile = null;
-  if (target) {
+  {
     const tiles = await client.rpc(3, 'tiles.list', { sessionId: target.id });
     if (tiles.error) return fail(`tiles.list: ${tiles.error.message}`);
     console.log(`  tiles: ${tiles.result.map((t) => `${t.id}[${t.kind}]`).join(', ') || 'none'}`);

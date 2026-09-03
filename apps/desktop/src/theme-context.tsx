@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useMemo } from 'react';
+import React, { createContext, useCallback, useContext, useMemo } from 'react';
 import { DEFAULT_THEME, themeById, type ThemeId } from './themes.js';
 
 interface ThemeContextValue {
@@ -13,7 +13,9 @@ const ThemeContext = createContext<ThemeContextValue>({
 
 export function ThemeProvider(props: { themeId: ThemeId; setTheme: (id: ThemeId) => void; children: React.ReactNode }): React.JSX.Element {
   const { themeId, setTheme, children } = props;
-  const value = { themeId, setTheme };
+  // stable identity: every App render must not re-render all consumers
+  const setThemeStable = useCallback(setTheme, [setTheme]);
+  const value = useMemo(() => ({ themeId, setTheme: setThemeStable }), [themeId, setThemeStable]);
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
