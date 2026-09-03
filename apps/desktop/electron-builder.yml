@@ -7,6 +7,17 @@ files:
   - dist-electron/**
   - dist-renderer/**
   - package.json
+  # every prod dependency is bundled into dist-electron/main.cjs (esbuild)
+  # or dist-renderer (vite) except the native node-pty — shipping the rest
+  # of node_modules was ~12MB of dead weight (dev builds, .map files,
+  # darwin/win32 prebuilds) that runtime code never resolves
+  - '!node_modules/**'
+  - node_modules/node-pty/**
+  - '!node_modules/node-pty/prebuilds/darwin/**'
+  - '!node_modules/node-pty/prebuilds/win32/**'
+# 55 locale .pak files ship by default (~38MB unpacked); the UI is English
+electronLanguages:
+  - en-US
 linux:
   target:
     - dir

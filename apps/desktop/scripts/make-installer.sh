@@ -117,6 +117,15 @@ chmod +x "${OUT}"
 
 sha256sum "${OUT}" > "${OUT}.sha256"
 
+# prune artifacts of other versions: release/ otherwise accumulates ~225MB
+# per build (AppImage + installer) forever. linux-unpacked is kept — it is
+# the freshness input of ensure-unpacked.sh.
+PRUNED="$(find release -maxdepth 1 \( -name 'Fraktole-*.AppImage' -o -name 'fraktole-install-*.sh*' \) \
+  ! -name "Fraktole-${VERSION}-*" ! -name "fraktole-install-${VERSION}.sh*" -print -delete | wc -l)"
+if [ "${PRUNED}" -gt 0 ]; then
+  echo "pruned ${PRUNED} artifact(s) of other versions from release/"
+fi
+
 echo
 echo "portable installer:"
 echo "  ${OUT}  ($(du -h "${OUT}" | cut -f1))"

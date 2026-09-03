@@ -88,6 +88,8 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
   commandRef.current = command;
   const applyingThemeRef = useRef(false);
   const pendingThemeInput = useRef('');
+  /** Pending fit frame: coalesces ResizeObserver bursts to one fit per frame. */
+  const fitRaf = useRef<number | null>(null);
   // right-click context menu (copy/paste), positioned in viewport coords
   const [menu, setMenu] = useState<{ x: number; y: number; hasSel: boolean } | null>(null);
   // scrollback search overlay (Ctrl+Shift+F): open flag, query, and the
@@ -275,13 +277,23 @@ export function Terminal({ sessionId, tileId, cwd, agentId, command, onSpawned }
     host.addEventListener('contextmenu', onContextMenu);
 
     const ro = new ResizeObserver(() => {
-      fitVisible();
+      // one fit per frame: a drag fires RO continuously and fit() reads
+      // layout per terminal — coalescing keeps resize cheap
+      if (fitRaf.current !== null) return;
+      fitRaf.current = requestAnimationFrame(() => {
+        fitRaf.current = null;
+        fitVisible();
+      });
     });
     ro.observe(host);
 
     return () => {
       disposed = true;
       ro.disconnect();
+      if (fitRaf.current !== null) {
+        cancelAnimationFrame(fitRaf.current);
+        fitRaf.current = null;
+      }
       host.removeEventListener('contextmenu', onContextMenu);
       termDisposable.dispose();
       resizeDisposable.dispose();

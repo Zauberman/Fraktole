@@ -1,10 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import '../styles/explorer.css';
 import { bridge, type FsEntry, type GitStatus, type Project } from '../ipc.js';
 import { Dialog } from './Dialog.js';
 import { classifyFile, nameClassFor } from '../file-kinds.js';
 import { NameDialog } from './explorer/NameDialog.js';
-import { gitMarkFor, useGitStatus } from './explorer/useGitStatus.js';
+import { makeGitMarkLookup } from './explorer/useGitStatus.js';
 
 /** Poll cadence for the active project tree — new files/dirs created by an
  *  autonomous run appear within this window with no user action. Not fs.watch:
@@ -52,6 +52,8 @@ interface ExplorerProps {
   projects: Project[];
   activePath: string | null;
   activeProjectPath: string | null;
+  /** Shared feed from App's single useGitStatus poller (one poll, not two). */
+  gitStatus: GitStatus | null;
   onOpenProject(path: string): void;
   onRemoveProject(path: string): void;
   onAddFolder(): void;
@@ -66,8 +68,8 @@ interface TreeRowProps {
   dirs: Map<string, FsEntry[]>;
   expandedSet: Set<string>;
   loadingPaths: Set<string>;
-  gitRoot: string | null;
-  gitStatus: GitStatus | null;
+  /** Precomputed git-mark resolver for the active project root. */
+  markOf(path: string): string | null;
   hideHidden: boolean;
   onToggleDir(path: string): void;
   onOpenFile(path: string): void;
@@ -77,10 +79,10 @@ interface TreeRowProps {
 function TreeRow(props: TreeRowProps): React.JSX.Element {
   const {
     entry, depth, children, expanded, dirs, expandedSet, loadingPaths,
-    gitRoot, gitStatus, hideHidden, onToggleDir, onOpenFile, onMenu,
+    markOf, hideHidden, onToggleDir, onOpenFile, onMenu,
   } = props;
   const pad = { paddingLeft: `${10 + depth * 12}px` };
-  const mark = gitMarkFor(entry.path, gitRoot ?? '', gitStatus);
+  const mark = entry.isDir ? null : markOf(entry.path);
   const dot = mark !== null && !entry.isDir ? (
     <span className={`git-dot ${dotClassFor(mark)}`} title={GIT_MARK_TITLES[mark] ?? mark} />
   ) : null;
@@ -117,8 +119,7 @@ function TreeRow(props: TreeRowProps): React.JSX.Element {
                 dirs={dirs}
                 expandedSet={expandedSet}
                 loadingPaths={loadingPaths}
-                gitRoot={gitRoot}
-                gitStatus={gitStatus}
+                markOf={markOf}
                 hideHidden={hideHidden}
                 children={expandedSet.has(c.path) ? (dirs.get(c.path) ?? null) : null}
                 expanded={expandedSet.has(c.path)}
@@ -169,8 +170,8 @@ interface MenuState {
  * and per-row context menus (new / rename / trash). Clicking a file opens
  * it in the editor.
  */
-export function Explorer(props: ExplorerProps): React.JSX.Element {
-  const { projects, activePath, activeProjectPath, onOpenProject, onRemoveProject, onAddFolder, onOpenFile } = props;
+export const Explorer = React.memo(function Explorer(props: ExplorerProps): React.JSX.Element {
+  const { projects, activePath, activeProjectPath, gitStatus, onOpenProject, onRemoveProject, onAddFolder, onOpenFile } = props;
 
   const [treeOpen, setTreeOpen] = useState(false);
   const [dirs, setDirs] = useState<Map<string, FsEntry[]>>(new Map());
@@ -183,7 +184,11 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
   const [confirmDelete, setConfirmDelete] = useState<FsEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
   const errorTimer = useRef<number | null>(null);
-  const gitStatus = useGitStatus(activeProjectPath);
+  // one Map per status object: row lookups stop scanning every entry
+  const markOf = useMemo<(path: string) => string | null>(() => {
+    const lookup = makeGitMarkLookup(gitStatus);
+    return (absPath: string) => lookup(absPath, activeProjectPath ?? '');
+  }, [gitStatus, activeProjectPath]);
 
   const showError = useCallback((msg: string): void => {
     setError(msg);
@@ -249,6 +254,9 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
     } finally {
       loadingRef.current.delete(path);
       setLoadingPaths((prev) => {
+        // identity-stable when the path was not in the set: the poll tick
+        // must not re-render the tree through a fresh Set
+        if (!prev.has(path)) return prev;
         const next = new Set(prev);
         next.delete(path);
         return next;
@@ -492,8 +500,7 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
                             dirs={dirs}
                             expandedSet={expanded}
                             loadingPaths={loadingPaths}
-                            gitRoot={activeProjectPath}
-                            gitStatus={gitStatus}
+                            markOf={markOf}
                             hideHidden={hideHidden}
                             children={expanded.has(c.path) ? (dirs.get(c.path) ?? null) : null}
                             expanded={expanded.has(c.path)}
@@ -564,4 +571,4 @@ export function Explorer(props: ExplorerProps): React.JSX.Element {
       )}
     </div>
   );
-}
+});

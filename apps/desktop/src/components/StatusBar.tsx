@@ -16,7 +16,9 @@ interface StatusBarProps {
   onOpenShortcuts: () => void;
 }
 
-export function StatusBar(props: StatusBarProps): React.JSX.Element {
+/** Memoized: App re-renders per editor keystroke; the status bar only needs
+ *  to re-render when one of its primitive inputs actually changes. */
+export const StatusBar = React.memo(function StatusBar(props: StatusBarProps): React.JSX.Element {
   const { sessionName, sessionState, tileCount, focusedCwd, info, branch, dirtyCount, onOpenShortcuts } = props;
   return (
     <footer className="status-bar">
@@ -50,4 +52,4 @@ export function StatusBar(props: StatusBarProps): React.JSX.Element {
       </span>
     </footer>
   );
-}
+});

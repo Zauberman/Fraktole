@@ -267,6 +267,23 @@ export function App(): React.JSX.Element {
     await refreshSessions();
   }, [refreshSessions]);
 
+  const pickAndAddFolder = useCallback((): void => {
+    void bridge.pickFolder().then((p) => {
+      if (p) void bridge.addProject(p).then(() => refreshProjects()).catch(() => undefined);
+    });
+  }, [refreshProjects]);
+
+  const removeProject = useCallback((path: string): void => {
+    void bridge.removeProject(path).then(() => refreshProjects()).catch(() => undefined);
+  }, [refreshProjects]);
+
+  const openInEditor = useCallback((path: string): void => {
+    void editor.openFile(path);
+    setTab('editor');
+  }, [editor.openFile]);
+
+  const consumePendingTestUrl = useCallback((): void => setPendingTestUrl(null), []);
+
   const deleteSession = useCallback(
     async (sid: string): Promise<void> => {
       try {
@@ -385,9 +402,7 @@ export function App(): React.JSX.Element {
       if (key === 't') {
         openTileDialog();
       } else if (key === 'o') {
-        void bridge.pickFolder().then((p) => {
-          if (p) void bridge.addProject(p).then(() => refreshProjects()).catch(() => undefined);
-        });
+        pickAndAddFolder();
       } else if (key === 'w') {
         if (ws.reviewerFocusedRef.current) {
           // the reviewer column is focused — nothing to close
@@ -420,7 +435,7 @@ export function App(): React.JSX.Element {
     };
     window.addEventListener('keydown', onKey, { capture: true });
     return () => window.removeEventListener('keydown', onKey, { capture: true });
-  }, [openTileDialog, refreshProjects]);
+  }, [openTileDialog, pickAndAddFolder]);
 
   useEffect(() => {
     const unsubTile = bridge.onMenuNewTile(openTileDialog);
@@ -634,19 +649,11 @@ export function App(): React.JSX.Element {
             projects={projects}
             activePath={activeInfo.focusedCwd}
             activeProjectPath={activeInfo.projectPath}
-            onOpenProject={(path) => void openProject(path)}
-            onOpenFile={(path) => {
-              void editor.openFile(path);
-              setTab('editor');
-            }}
-            onRemoveProject={(path) => {
-              void bridge.removeProject(path).then(() => refreshProjects()).catch(() => undefined);
-            }}
-            onAddFolder={() => {
-              void bridge.pickFolder().then((p) => {
-                if (p) void bridge.addProject(p).then(() => refreshProjects()).catch(() => undefined);
-              });
-            }}
+            gitStatus={git}
+            onOpenProject={openProject}
+            onOpenFile={openInEditor}
+            onRemoveProject={removeProject}
+            onAddFolder={pickAndAddFolder}
           />
         </section>
         <Divider onDrag={dragLeft} />
@@ -698,7 +705,7 @@ export function App(): React.JSX.Element {
               <TestTab
                 sessionId={activeSessionId ?? ''}
                 pendingUrl={pendingTestUrl}
-                onPendingUrlConsumed={() => setPendingTestUrl(null)}
+                onPendingUrlConsumed={consumePendingTestUrl}
                 active={tab === 'test'}
               />
             </div>

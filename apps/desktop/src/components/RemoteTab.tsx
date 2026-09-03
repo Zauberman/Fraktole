@@ -25,7 +25,7 @@ function timeAgo(ts: number): string {
  * TOFU pin a careful user can cross-check), the live pairing code, and the
  * paired devices with revoke buttons.
  */
-export function RemoteTab(): React.JSX.Element {
+export const RemoteTab = React.memo(function RemoteTab(): React.JSX.Element {
   const [status, setStatus] = useState<RemoteStatus | null>(null);
   const [portInput, setPortInput] = useState('8833');
   const [busy, setBusy] = useState(false);
@@ -207,4 +207,4 @@ export function RemoteTab(): React.JSX.Element {
       </div>
     </div>
   );
-}
+});
