@@ -18,6 +18,15 @@ export class FileWatchRegistry {
     if (this.watchers.has(path)) return;
     try {
       const watcher = watch(path, { persistent: false }, (event) => {
+        // 'rename' covers atomic write-temp+rename (this app's own
+        // writeAtomic, vim, most agents) — treating it as a change keeps the
+        // stale banner honest; the inode binding is dead after a rename, so
+        // the watch is dropped and re-armed by the next watch() call
+        if (event === 'rename') {
+          this.unwatch(path);
+          this.onChange(path);
+          return;
+        }
         if (event !== 'change') return;
         this.pending.add(path);
         if (this.timers.has(path)) return;

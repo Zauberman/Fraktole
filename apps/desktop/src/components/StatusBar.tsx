@@ -36,16 +36,16 @@ export function StatusBar(props: StatusBarProps): React.JSX.Element {
       <span className="status-right">
         {dirtyCount > 0 && <span className="status-dirty">● {dirtyCount} unsaved</span>}
         {branch && <span className="status-branch" title="git branch">{branch}</span>}
-        <span
+        <button
+          type="button"
           className="status-hints"
           title="keyboard shortcuts — click for the full list"
           onClick={onOpenShortcuts}
-          role="button"
         >
           {statusHints().map((h) => (
             <span key={h}>{h}</span>
           ))}
-        </span>
+        </button>
         <span className="status-info">{info}</span>
       </span>
     </footer>

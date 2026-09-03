@@ -1,6 +1,6 @@
 import { watch, type FSWatcher } from 'node:fs';
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { FraktoleMessage, SessionFile } from '../src/shared/ipc.js';
 import { readMessagesJsonl } from './messages-log.js';
 
@@ -86,6 +86,13 @@ export class MailboxRouter {
     const agentsDir = join(this.opts.root, sessionId, 'agents');
     try {
       this.watcher = watch(agentsDir, { recursive: true }, () => this.scheduleScan());
+      // async watcher failures (EPERM/EMFILE, network fs, dir deleted) emit
+      // 'error' — unhandled, they would crash the main process
+      this.watcher.on('error', (err) => {
+        log(this.opts, `mailbox watcher error (${String(err)}); relying on the scan`);
+        this.watcher?.close();
+        this.watcher = null;
+      });
     } catch (err) {
       log(this.opts, `mailbox watcher unavailable (${String(err)}); relying on the scan`);
     }
@@ -152,6 +159,15 @@ export class MailboxRouter {
     }
   }
 
+  /** Moves an unreadable/rejected message file into quarantine/ next to its
+   *  mailbox instead of unlinking it — a partially-written producer must not
+   *  lose mail permanently. */
+  private async quarantine(file: string): Promise<void> {
+    const dir = join(dirname(file), '..', '..', 'quarantine');
+    await mkdir(dir, { recursive: true });
+    await rename(file, join(dir, `${basename(file)}.${Date.now()}.bad`)).catch(() => unlink(file).catch(() => undefined));
+  }
+
   /** Reads one outbox file, delivers it, then consumes it. */
   async ingestOutboxFile(file: string, sourceAgentId: string): Promise<void> {
     const session = this.opts.currentSession();
@@ -177,15 +193,15 @@ export class MailboxRouter {
       try {
         msg = JSON.parse(raw) as FraktoleMessage;
       } catch {
-        log(this.opts, `mailbox: dropping malformed ${file}`);
-        await unlink(file).catch(() => undefined);
+        log(this.opts, `mailbox: quarantining malformed ${file}`);
+        await this.quarantine(file).catch(() => undefined);
         return;
       }
     }
     const verdict = routeMessage(msg, sourceAgentId === ORCHESTRATOR_ID ? 'judge' : 'agent');
     if (verdict !== 'ok') {
       log(this.opts, `mailbox: ${file} rejected (${verdict})`);
-      await unlink(file).catch(() => undefined);
+      await this.quarantine(file).catch(() => undefined);
       return;
     }
     msg.from = sourceAgentId;

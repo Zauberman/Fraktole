@@ -3,7 +3,6 @@ import {
   IPC,
   type AppInfo,
   type BundleResult,
-  type FraktoleMessage,
   type FsEntry,
   type FsStat,
   type GitStatus,
@@ -23,11 +22,9 @@ import {
   type ReviewerToolCallEvent,
   type RemoteStatus,
   type SearchResult,
-  type SendMessageArgs,
   type SessionFile,
   type SessionSavePayload,
   type SessionSummary,
-  type SessionSnapshot,
   type Settings,
   type TestPageState,
   type UsageSample,
@@ -133,17 +130,6 @@ const api = {
   importSessionBundle: (): Promise<BundleResult> => ipcRenderer.invoke(IPC.sessionImportBundle),
   openProject: (path: string): Promise<OpenedSession> => ipcRenderer.invoke(IPC.projectOpen, path),
 
-  sendMessage: (sessionId: string, args: SendMessageArgs): Promise<boolean> =>
-    ipcRenderer.invoke(IPC.messageSend, sessionId, args),
-  listMessages: (sessionId: string): Promise<FraktoleMessage[]> =>
-    ipcRenderer.invoke(IPC.messageList, sessionId),
-  onMessageEvent: (sessionId: string, cb: (msg: FraktoleMessage) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, sid: string, msg: FraktoleMessage): void => {
-      if (sid === sessionId) cb(msg);
-    };
-    ipcRenderer.on(IPC.messageEvent, listener);
-    return () => ipcRenderer.removeListener(IPC.messageEvent, listener);
-  },
   ensureReviewer: (sessionId: string): Promise<boolean> => ipcRenderer.invoke(IPC.reviewerEnsure, sessionId),
   promptReviewer: (sessionId: string, text: string): Promise<boolean> =>
     ipcRenderer.invoke(IPC.reviewerPrompt, sessionId, text),
@@ -153,7 +139,7 @@ const api = {
   reviewerTranscript: (sessionId: string): Promise<ReviewerEntry[]> =>
     ipcRenderer.invoke(IPC.reviewerTranscript, sessionId),
 
-  onReviewerStatus: (sessionId: string, cb: (s: { status: string; error?: string; model?: string }) => void): (() => void) => {
+  onReviewerStatus: (sessionId: string, cb: (s: { status: string; error?: string; model?: string; variant?: string | null }) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, sid: string, s: { status: string; error?: string; model?: string }): void => {
       if (sid === sessionId) cb(s);
     };
@@ -277,10 +263,6 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.testReload, listener);
   },
 
-  createSnapshot: (sessionId: string, args: { agentId: string; text: string }): Promise<SessionSnapshot> =>
-    ipcRenderer.invoke(IPC.snapshotCreate, sessionId, args),
-  getSnapshot: (sessionId: string, id: string): Promise<SessionSnapshot | null> =>
-    ipcRenderer.invoke(IPC.snapshotGet, sessionId, id),
   getScrollback: (sessionId: string, agentId: string): Promise<string[] | null> =>
     ipcRenderer.invoke(IPC.scrollbackGet, sessionId, agentId),
 

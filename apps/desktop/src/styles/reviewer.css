@@ -620,21 +620,6 @@
   overflow-y: auto;
 }
 
-/* The resume-vs-fresh confirmation dialog body. */
-.help-pre {
-  font-family: var(--font-mono-alt);
-  font-size: var(--text-sm);
-  color: var(--text);
-  white-space: pre-wrap;
-  user-select: text;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  padding: var(--s3);
-  margin: var(--s2) 0;
-  max-height: 60vh;
-  overflow-y: auto;
-}
 
 .reviewer-resume-text {
   font-size: var(--text-sm);
@@ -793,98 +778,6 @@
   opacity: 0.7;
 }
 
-.reviewer-config {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--s3);
-  padding: var(--s4);
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--bg-raised);
-  margin-bottom: var(--s2);
-  animation: reviewer-in 180ms var(--ease-out);
-}
-
-.reviewer-config-wide {
-  grid-column: 1 / -1;
-}
-
-.reviewer-config label {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s1);
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-}
-
-.reviewer-config input {
-  font-family: var(--font-mono-alt);
-  font-size: var(--text-xs);
-  color: var(--text);
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
-  border-radius: var(--r-xs);
-  padding: var(--s2);
-  outline: none;
-}
-
-.reviewer-config input:focus {
-  border-color: var(--focus-border);
-}
-
-.reviewer-config select {
-  font-family: var(--font-mono-alt);
-  font-size: var(--text-xs);
-  color: var(--text);
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
-  border-radius: var(--r-xs);
-  padding: var(--s2);
-  outline: none;
-}
-
-.reviewer-config select:focus {
-  border-color: var(--focus-border);
-}
-
-.reviewer-config input:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.reviewer-config-hint {
-  font-size: var(--text-2xs);
-  color: var(--text-faint);
-  line-height: 1.4;
-}
-
-.reviewer-config input::placeholder {
-  color: var(--text-faint);
-}
-
-.reviewer-config-provider {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s2);
-  justify-content: flex-end;
-  align-items: flex-start;
-}
-
-.reviewer-config-provider select {
-  font-family: var(--font-mono-alt);
-  font-size: var(--text-xs);
-  color: var(--text);
-  background: var(--bg-raised);
-  border: 1px solid var(--line);
-  border-radius: var(--r-xs);
-  padding: var(--s1);
-}
-
-.reviewer-config-actions {
-  grid-column: 1 / -1;
-  display: flex;
-  gap: var(--s2);
-}
 
 @keyframes reviewer-in {
   from {

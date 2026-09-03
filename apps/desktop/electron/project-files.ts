@@ -6,6 +6,7 @@ import { PROJECT_SKIP_DIRS } from './skip-dirs.js';
  *  result is cached per root for a few seconds so repeated palette opens are
  *  instant; the walk itself skips heavy/recursive dirs and hidden entries. */
 const QUICK_OPEN_MAX = 5000;
+const QUICK_OPEN_BUDGET_MS = 4_000;
 const QUICK_OPEN_SKIP = PROJECT_SKIP_DIRS;
 let quickOpenCache: { root: string; at: number; files: Array<{ name: string; path: string }> } | null = null;
 
@@ -14,8 +15,11 @@ export async function listProjectFiles(root: string): Promise<Array<{ name: stri
     return quickOpenCache.files;
   }
   const files: Array<{ name: string; path: string }> = [];
+  // big vendor trees must not eat the whole budget silently — a hard cap
+  // keeps the palette responsive on huge projects
+  const deadline = Date.now() + QUICK_OPEN_BUDGET_MS;
   const stack = [root];
-  while (stack.length > 0 && files.length < QUICK_OPEN_MAX) {
+  while (stack.length > 0 && files.length < QUICK_OPEN_MAX && Date.now() < deadline) {
     const dir = stack.pop()!;
     let entries;
     try {
@@ -24,7 +28,7 @@ export async function listProjectFiles(root: string): Promise<Array<{ name: stri
       continue; // unreadable dir — skip the subtree
     }
     for (const e of entries) {
-      if (files.length >= QUICK_OPEN_MAX) break;
+      if (files.length >= QUICK_OPEN_MAX || Date.now() > deadline) break;
       if (e.name.startsWith('.')) continue;
       if (e.isDirectory()) {
         if (!QUICK_OPEN_SKIP.has(e.name)) stack.push(join(dir, e.name));

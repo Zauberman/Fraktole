@@ -77,53 +77,8 @@
   width: min(600px, 90vw);
 }
 
-.dialog-textarea {
-  width: 100%;
-  min-height: 260px;
-  padding: var(--s3);
-  background: var(--bg-tile);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-sm);
-  color: var(--text);
-  font-family: var(--font-mono-alt);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-  outline: none;
-  user-select: text;
-  resize: vertical;
-}
 
-.dialog-textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--focus-ring);
-}
 
-.dialog-projects {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s1);
-  max-height: 40vh;
-  overflow-y: auto;
-}
-
-.dialog-project {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--s3);
-  width: 100%;
-  padding: var(--s2) var(--s3);
-  background: transparent;
-  border: none;
-  border-radius: var(--r-sm);
-  color: var(--text);
-  font-family: var(--font-ui);
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out);
-}
 
 .dialog-project:hover {
   background: var(--hover-surface);
@@ -134,15 +89,7 @@
   outline-offset: -1px;
 }
 
-.dialog-project-name {
-  font-weight: 500;
-}
 
-.dialog-project-path {
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
-  color: var(--text-faint);
-}
 
 .dialog-actions {
   display: flex;

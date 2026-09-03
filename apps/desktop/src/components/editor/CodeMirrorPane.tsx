@@ -68,6 +68,8 @@ export function CodeMirrorPane({ file, settings, reveal, onUpdate, onSave }: Cod
   onSaveRef.current = onSave;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+  // guards the external-content dispatch (below) from echoing back as a user edit
+  const applyingExternal = useRef(false);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -96,7 +98,10 @@ export function CodeMirrorPane({ file, settings, reveal, onUpdate, onSave }: Cod
         wrapComp.of(initial.wrap ? EditorView.lineWrapping : []),
         EditorState.readOnly.of(file.readOnly),
         EditorView.updateListener.of((update) => {
-          if (update.docChanged) onUpdateRef.current(file.path, update.state.doc.toString());
+          if (!update.docChanged) return;
+          // programmatic external-content dispatches are not user edits
+          if (applyingExternal.current) return;
+          onUpdateRef.current(file.path, update.state.doc.toString());
         }),
       ],
     });
@@ -119,6 +124,21 @@ export function CodeMirrorPane({ file, settings, reveal, onUpdate, onSave }: Cod
       ],
     });
   }, [settings, fontComp, wrapComp]);
+
+  // external content changes (reload-from-disk / stale-banner reload) must
+  // reach the CodeMirror doc: without this dispatch the pane keeps showing
+  // the pre-reload buffer and the next save would write the stale bytes
+  // back over the disk version.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    if (file.dirty) return; // never clobber unsaved user edits
+    const current = view.state.doc.toString();
+    if (current === file.content) return;
+    applyingExternal.current = true;
+    view.dispatch({ changes: { from: 0, to: current.length, insert: file.content } });
+    applyingExternal.current = false;
+  }, [file.path, file.content, file.dirty]);
 
   // reveal: one-shot per nonce — select the line and center it
   useEffect(() => {

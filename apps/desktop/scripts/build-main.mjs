@@ -12,6 +12,8 @@ const common = {
   platform: 'node',
   format: 'cjs',
   target: 'node22',
+  // external = anything with a native addon; ws and @xterm/headless are pure JS
+  // and deliberately bundled (they must not be resolved from the packaged node_modules)
   external: ['electron', 'node-pty'],
   sourcemap: false,
   logLevel: 'info',

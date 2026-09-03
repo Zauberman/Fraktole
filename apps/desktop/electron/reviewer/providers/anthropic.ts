@@ -164,7 +164,10 @@ export class AnthropicProvider implements ProviderClient {
           break;
         case 'message_delta':
           if (p.delta?.stop_reason) stopReason = p.delta.stop_reason;
-          if (p.usage?.output_tokens && usage) usage.outputTokens = p.usage.output_tokens;
+          if (p.usage?.output_tokens) {
+            if (usage) usage.outputTokens = p.usage.output_tokens;
+            else usage = { inputTokens: 0, cachedTokens: 0, outputTokens: p.usage.output_tokens };
+          }
           break;
         case 'message_stop':
           sawStop = true;
@@ -172,9 +175,10 @@ export class AnthropicProvider implements ProviderClient {
         case 'content_block_start': {
           const type = p.content_block?.type;
           // a new start while a block is open means a lost
-          // content_block_stop — fail loudly instead of silently merging
-          // (for nested tool_use) or delivering a truncated block
-          if (openBlock && (type === 'tool_use' || openBlock.kind === 'tool')) {
+          // content_block_stop — fail loudly for ANY kind: a text restart
+          // would otherwise leave the first block truncated in contentBlocks
+          // while the aggregate text carries everything (replay divergence)
+          if (openBlock) {
             throw new Error('anthropic stream error: nested content block');
           }
           if (type === 'tool_use') {

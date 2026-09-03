@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, writeFile, readFile, stat, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, stat, rm, readdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exportSessionBundle, importSessionBundle, MAX_BUNDLE_BYTES } from '../electron/session-bundle.js';
-import { newSessionId } from '../electron/sessions.js';
+import { newSessionId, touchSessionIndex } from '../electron/sessions.js';
+import { execFile } from 'node:child_process';
 
 async function makeSessionDir(root: string, id: string): Promise<string> {
   const dir = join(root, id);
@@ -108,6 +109,63 @@ describe('session bundle export/import', () => {
     const res = await importSessionBundle(sessionsRoot, big);
     if (res.ok) throw new Error('expected the oversized bundle to be rejected');
     expect(res.error).toContain('bundle too large');
+    await rm(root, { recursive: true, force: true });
+  });
+});
+
+describe('bundle hardening', () => {
+  it('rejects archives containing symlink members (tar zip-slip)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'frak-evil-'));
+    const outRoot = join(root, 'out');
+    await mkdir(outRoot, { recursive: true });
+    const evilDir = join(root, 'evil', 's-evil');
+    await mkdir(evilDir, { recursive: true });
+    await symlink('/tmp/fraktole-evil-target', join(evilDir, 'link'), 'dir');
+    await writeFile(
+      join(evilDir, 'session.json'),
+      JSON.stringify({ version: 1, id: newSessionId(), name: 'x', createdAt: 0, updatedAt: 0, nextAgentSeq: 1, judge: null, tree: null, tiles: [] }),
+    );
+    const bundle = join(root, 'craft.tar.gz');
+    await new Promise<void>((res, rej) => execFile('tar', ['-czf', bundle, '-C', join(root, 'evil'), '.'], (e) => (e ? rej(e) : res())));
+    const res = await importSessionBundle(outRoot, bundle);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toMatch(/link/);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('indexes an imported session immediately', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'frak-idx-'));
+    const sessionsRoot = join(root, 'sessions');
+    await mkdir(sessionsRoot, { recursive: true });
+    const id = newSessionId();
+    await makeSessionDir(sessionsRoot, id);
+    const bundle = join(root, 'b.tar.gz');
+    const exp = await exportSessionBundle(sessionsRoot, id, bundle);
+    expect(exp.ok).toBe(true);
+    const res = await importSessionBundle(sessionsRoot, bundle);
+    expect(res.ok).toBe(true);
+    const importedId = res.ok && res.session ? res.session.id : '';
+    const idx = JSON.parse(await readFile(join(sessionsRoot, 'index.json'), 'utf8')) as { sessions: Array<{ id: string }> };
+    expect(idx.sessions.some((e) => e.id === importedId)).toBe(true);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('refuses to export a session id that is not an internal id', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'frak-exp-'));
+    const sessionsRoot = join(root, 'sessions');
+    await mkdir(sessionsRoot, { recursive: true });
+    const res = await exportSessionBundle(sessionsRoot, '../../etc', join(root, 'x.tar.gz'));
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toMatch(/invalid session id/);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('touchSessionIndex inserts and dedupes without touching a corrupt index', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'frak-tix-'));
+    await writeFile(join(root, 'index.json'), 'garbage');
+    await touchSessionIndex(root, { id: newSessionId(), name: 'n', updatedAt: 1 });
+    // corrupt index untouched — the store owns the rebuild
+    expect(await readFile(join(root, 'index.json'), 'utf8')).toBe('garbage');
     await rm(root, { recursive: true, force: true });
   });
 });

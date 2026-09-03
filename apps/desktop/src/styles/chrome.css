@@ -219,6 +219,10 @@
   white-space: nowrap;
   overflow: hidden;
   cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
 }
 
 .status-hints > span {
@@ -325,7 +329,6 @@
   .reviewer-item-assistant,
   .reviewer-item-system,
   .reviewer-item-tool,
-  .reviewer-config,
   .reviewer-question-card,
   .reviewer-goal-banner {
     animation: none;

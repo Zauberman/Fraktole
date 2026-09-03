@@ -17,10 +17,10 @@ import { TestTab } from './components/TestTab.js';
 import { RemoteTab } from './components/RemoteTab.js';
 import { ThemeProvider } from './theme-context.js';
 import { applyTheme, DEFAULT_THEME, THEME_IDS, THEMES, type ThemeId } from './themes.js';
+import { modalDepth } from './modal-guard.js';
 import { bridge, type Project, type SessionSummary, type SettingsSection } from './ipc.js';
 import type { SessionState } from './session-state.js';
 import { listIds } from './window-tree.js';
-import { AUTONOMY_NAMES } from './shared/autonomy.js';
 import './styles/index.css';
 
 function BootOverlay({ leaving }: { leaving: boolean }): React.JSX.Element {
@@ -185,7 +185,7 @@ export function App(): React.JSX.Element {
   const setTheme = useCallback((id: ThemeId) => {
     setThemeIdState(id);
     applyTheme(id);
-    void bridge.setSettings({ theme: id }).catch(() => undefined);
+    void bridge.setSettings({ theme: id }).catch(() => setNotice('theme could not be saved'));
   }, []);
 
   const openSettings = useCallback((section: SettingsSection = 'general'): void => {
@@ -247,10 +247,17 @@ export function App(): React.JSX.Element {
     [activate, refreshSessions],
   );
 
-  const stopSession = useCallback(async (sid: string): Promise<void> => {
-    await bridge.stopSession(sid);
-    await refreshSessions();
-  }, [refreshSessions]);
+  const stopSession = useCallback(
+    async (sid: string): Promise<void> => {
+      try {
+        await bridge.stopSession(sid);
+      } catch {
+        setNotice('failed to stop the session');
+      }
+      await refreshSessions();
+    },
+    [refreshSessions],
+  );
 
   const startSession = useCallback(async (sid: string): Promise<void> => {
     await bridge.startSession(sid);
@@ -260,8 +267,14 @@ export function App(): React.JSX.Element {
     await refreshSessions();
   }, [refreshSessions]);
 
-  const deleteSession = useCallback(    async (sid: string): Promise<void> => {
-      await bridge.deleteSession(sid);
+  const deleteSession = useCallback(
+    async (sid: string): Promise<void> => {
+      try {
+        await bridge.deleteSession(sid);
+      } catch {
+        setNotice('failed to delete the session');
+        return;
+      }
       setOpened((prev) => prev.filter((s) => s !== sid));
       if (sid === activeSessionIdRef.current) {
         const list = await bridge.listSessions().catch(() => [] as SessionSummary[]);
@@ -303,9 +316,15 @@ export function App(): React.JSX.Element {
     };
   }, []);
 
+  const dragLeft = useCallback((x: number) => dragDivider('left', x), [dragDivider]);
+  const dragRight = useCallback((x: number) => dragDivider('right', x), [dragDivider]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (dialogOpenRef.current) return;
+      // any open modal (palette, settings, help, session dialogs, editor
+      // pending rows, …) disables the workspace shortcuts
+      if (modalDepth() > 0) return;
       const key = e.key.toLowerCase();
       // alt+1/2/3 switch base tabs
       if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey) {
@@ -384,12 +403,12 @@ export function App(): React.JSX.Element {
         ws.moveFocus('prev');
       } else if (key === 'arrowright' || key === 'arrowdown') {
         ws.moveFocus('next');
-      } else if (key === '0') {
+      } else if (/^Digit0$/.test(e.code)) {
         ws.setReviewerFocused(true);
-      } else if (/^[1-9]$/.test(key)) {
+      } else if (/^Digit[1-9]$/.test(e.code)) {
         ws.setReviewerFocused(false);
         const ids = listIds(ws.treeRef.current);
-        const target = ids[Number(key) - 1];
+        const target = ids[Number(e.code.slice(5)) - 1];
         if (target) ws.setFocusedId(target);
       } else {
         handled = false;
@@ -444,19 +463,26 @@ export function App(): React.JSX.Element {
           setNotice('no active session to export');
           return;
         }
-        void bridge.exportSessionBundle(activeId).then((res) => {
-          if (res.ok) setNotice(`session exported to ${res.path}`);
-          else if (!res.canceled) setNotice(res.error);
-        });      } else if (action.action === 'import-bundle') {
-        void bridge.importSessionBundle().then((res) => {
-          if (res.ok && res.session) {
-            activate(res.session.id);
-            void refreshSessions();
-            setNotice(`session "${res.session.name}" imported`);
-          } else if (!res.ok && !res.canceled) {
-            setNotice(res.error);
-          }
-        });
+        void bridge
+          .exportSessionBundle(activeId)
+          .then((res) => {
+            if (res.ok) setNotice(`session exported to ${res.path ?? 'bundle'}`);
+            else if (!res.canceled) setNotice(res.error);
+          })
+          .catch(() => setNotice('session export failed'));
+      } else if (action.action === 'import-bundle') {
+        void bridge
+          .importSessionBundle()
+          .then((res) => {
+            if (res.ok && res.session) {
+              activate(res.session.id);
+              void refreshSessions();
+              setNotice(`session "${res.session.name}" imported`);
+            } else if (!res.ok && !res.canceled) {
+              setNotice(res.error);
+            }
+          })
+          .catch(() => setNotice('session import failed'));
       }
     });
     // the reviewer's open_test_page: switch to the Test tab and load
@@ -535,10 +561,13 @@ export function App(): React.JSX.Element {
           setNotice('no active session to export');
           return;
         }
-        void bridge.exportSessionBundle(activeId).then((res) => {
-          if (res.ok) setNotice(`session exported to ${res.path}`);
-          else if (!res.canceled) setNotice(res.error);
-        });
+        void bridge
+          .exportSessionBundle(activeId)
+          .then((res) => {
+            if (res.ok) setNotice(`session exported to ${res.path ?? 'bundle'}`);
+            else if (!res.canceled) setNotice(res.error);
+          })
+          .catch(() => setNotice('session export failed'));
       },
     },
     {
@@ -546,21 +575,24 @@ export function App(): React.JSX.Element {
       label: 'Import session bundle',
       section: 'session',
       run: () => {
-        void bridge.importSessionBundle().then((res) => {
-          if (res.ok && res.session) {
-            activate(res.session.id);
-            void refreshSessions();
-            setNotice(`session "${res.session.name}" imported`);
-          } else if (!res.ok && !res.canceled) {
-            setNotice(res.error);
-          }
-        });
+        void bridge
+          .importSessionBundle()
+          .then((res) => {
+            if (res.ok && res.session) {
+              activate(res.session.id);
+              void refreshSessions();
+              setNotice(`session "${res.session.name}" imported`);
+            } else if (!res.ok && !res.canceled) {
+              setNotice(res.error);
+            }
+          })
+          .catch(() => setNotice('session import failed'));
       },
     },
     {
       id: 'reviewer.compact',
       label: 'Reviewer: compact context now',
-      section: AUTONOMY_NAMES.custom === 'Custom' ? 'reviewer' : 'reviewer',
+      section: 'reviewer',
       run: () => {
         const activeId = activeSessionIdRef.current;
         if (activeId) void bridge.compactReviewer(activeId);
@@ -617,7 +649,7 @@ export function App(): React.JSX.Element {
             }}
           />
         </section>
-        <Divider onDrag={(x) => dragDivider('left', x)} />
+        <Divider onDrag={dragLeft} />
         <main className="app-main">
           {opened.map((sid) => (
             <SessionView
@@ -626,7 +658,7 @@ export function App(): React.JSX.Element {
               active={sid === activeSessionId}
               tab={tab}
               sideRightPct={rightOfMain}
-              onDragRight={(x) => dragDivider('right', x)}
+              onDragRight={dragRight}
               onActivate={activate}
               registerState={registerState}
               onActiveInfo={setActiveInfo}

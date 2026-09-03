@@ -353,7 +353,8 @@
 .tree-name-config { color: var(--cat-config); }
 .tree-name-style { color: var(--cat-style); }
 .tree-name-data { color: var(--cat-data); }
-.tree-row-other .tree-name { color: var(--text-muted); }
+.tree-row-other .tree-name,
+.tree-name-other { color: var(--text-muted); }
 
 .tree-row:hover .tree-name,
 .tree-row:hover .tree-chevron {

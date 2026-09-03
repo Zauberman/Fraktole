@@ -56,10 +56,10 @@ export function selectReduce(s: SelectState, a: SelectAction, opts: SelectOption
       if (count === 0) return s;
       const fresh = a.now - s.typedAt > TYPEAHEAD_RESET_MS;
       const typed = (fresh ? '' : s.typed) + a.ch.toLowerCase();
-      const active = Math.max(
-        0,
-        opts.findIndex((o) => o.label.toLowerCase().startsWith(typed)),
-      );
+      const found = opts.findIndex((o) => o.label.toLowerCase().startsWith(typed));
+      // no match keeps the current highlight (jumping to 0 from anywhere is
+      // disorienting and would move the commit target on a wrong keystroke)
+      const active = found < 0 ? s.active : found;
       if (!opts[active]) return { ...s, typed, typedAt: a.now };
       return { ...s, open: true, active, typed, typedAt: a.now };
     }

@@ -38,6 +38,7 @@ function searchWithRg(root: string, query: string): Promise<SearchResult> {
       '--no-heading',
       '--line-number',
       '--smart-case',
+      '--fixed-strings',
       '--max-count',
       '5',
       '--no-messages',
@@ -49,7 +50,6 @@ function searchWithRg(root: string, query: string): Promise<SearchResult> {
       root,
     ], { windowsHide: true });
 
-    let stdout = '';
     let buf = '';
     const hits: SearchHit[] = [];
     let truncated = false;
@@ -70,8 +70,8 @@ function searchWithRg(root: string, query: string): Promise<SearchResult> {
     }, RG_TIMEOUT_MS);
 
     child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-      const lines = stdout.split('\n');
+      buf += chunk.toString('utf8');
+      const lines = buf.split('\n');
       buf = lines.pop() ?? '';
       for (const line of lines) {
         if (hits.length >= MAX_HITS) {

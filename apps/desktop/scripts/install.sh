@@ -37,6 +37,15 @@ die() {
 uninstall() {
   rm -rf "${LIBDIR}"
   rm -f "${BIN}" "${DESKTOP}" "${ICON}"
+  # only remove the icon-theme index if fraktole wrote it (marker comment);
+  # a pre-existing index.theme belonging to other apps must survive
+  if [ -f "${ICON_DIR}/../../index.theme" ] && grep -q '^# fraktole-managed$' "${ICON_DIR}/../../index.theme"; then
+    if [ -f "${ICON_DIR}/../../index.theme.fraktole-backup" ]; then
+      mv "${ICON_DIR}/../../index.theme.fraktole-backup" "${ICON_DIR}/../../index.theme"
+    else
+      rm -f "${ICON_DIR}/../../index.theme"
+    fi
+  fi
   if [ -f "${BASHRC}" ]; then
     sed -i '/^# fraktole$/d; /^export PATH=.*# fraktole$/d' "${BASHRC}"
   fi
@@ -59,6 +68,12 @@ install() {
   chmod +x "${LIBDIR}/launcher.sh"
 
   cp "${source}/icon.png" "${ICON}"
+
+  # back up an existing hicolor index before writing ours (marked so
+  # uninstall can restore it instead of deleting a shared file)
+  if [ -f "${ICON_DIR}/../../index.theme" ] && ! grep -q '^# fraktole-managed$' "${ICON_DIR}/../../index.theme"; then
+    cp "${ICON_DIR}/../../index.theme" "${ICON_DIR}/../../index.theme.fraktole-backup"
+  fi
 
   cat > "${ICON_DIR}/../../index.theme" <<'THEME'
 [Icon Theme]

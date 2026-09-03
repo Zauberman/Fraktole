@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionFile } from '../src/shared/ipc.js';
-import { newSessionId } from './sessions.js';
+import { newSessionId, touchSessionIndex } from './sessions.js';
 
 export type BundleResult =
   | { ok: true; path?: string; session?: SessionFile }
@@ -25,9 +25,16 @@ function execFileP(cmd: string, args: string[]): Promise<string> {
  *  core). The archive contains the session dir with its id as the single
  *  top-level folder — the exact shape importSessionBundle expects. */
 export async function exportSessionBundle(sessionsRoot: string, id: string, dest: string): Promise<BundleResult> {
+  // the id reaches stat() and tar argv — only internally-generated ids may
+  // be exported (no traversal, no absolute paths, no tar option injection)
+  if (!/^s-[a-z0-9-]+$/.test(id)) return { ok: false, error: 'invalid session id' };
   try {
     await stat(join(sessionsRoot, id));
-    await execFileP('tar', ['-czf', dest, '-C', sessionsRoot, id]);
+    // archive to a tmp file first: a mid-stream failure must not leave a
+    // partial .tar.gz at the user-chosen destination
+    const tmp = `${dest}.${process.pid}.tmp`;
+    await execFileP('tar', ['-czf', tmp, '-C', sessionsRoot, id]);
+    await rename(tmp, dest);
     return { ok: true, path: dest };
   } catch (err) {
     return { ok: false, error: `export failed: ${(err as Error).message}` };
@@ -48,6 +55,15 @@ export async function importSessionBundle(sessionsRoot: string, bundleFile: stri
     }
     const listing = (await execFileP('tar', ['-tzf', bundleFile])).split('\n').filter((l) => l.length > 0);
     if (listing.length === 0) return { ok: false, error: 'invalid bundle: empty archive' };
+    // link members must be rejected BEFORE extraction: GNU tar follows
+    // archive-provided symlinks, so `link -> /home/x` + `link/.bashrc`
+    // would write outside the extraction dir (zip-slip via links)
+    const verbose = (await execFileP('tar', ['-tvzf', bundleFile])).split('\n');
+    for (const row of verbose) {
+      if (/^[lh]/.test(row.trim())) {
+        return { ok: false, error: 'invalid bundle: link members are not allowed' };
+      }
+    }
     for (const entry of listing) {
       if (entry.startsWith('/') || entry.split('/').includes('..')) {
         return { ok: false, error: 'invalid bundle: unsafe path in archive' };
@@ -59,7 +75,7 @@ export async function importSessionBundle(sessionsRoot: string, bundleFile: stri
     if (!listing.includes(`${topDir}/session.json`)) return { ok: false, error: 'invalid bundle: session.json missing' };
 
     await mkdir(tmp, { recursive: true });
-    await execFileP('tar', ['-xzf', bundleFile, '-C', tmp]);
+    await execFileP('tar', ['--no-same-owner', '--no-same-permissions', '-xzf', bundleFile, '-C', tmp]);
     const src = join(tmp, topDir);
 
     const raw = await readFile(join(src, 'session.json'), 'utf8');
@@ -79,6 +95,10 @@ export async function importSessionBundle(sessionsRoot: string, bundleFile: stri
 
     await rename(src, join(sessionsRoot, reKeyed.id));
     await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+    // index the import immediately: without this the session is invisible
+    // in the switcher until the renderer's first auto-save (and invisible
+    // forever if the app quits first)
+    await touchSessionIndex(sessionsRoot, reKeyed).catch(() => undefined);
     return { ok: true, session: reKeyed };
   } catch (err) {
     await rm(tmp, { recursive: true, force: true }).catch(() => undefined);

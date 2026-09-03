@@ -88,7 +88,7 @@ export class ScrollbackPersist {
     try {
       await mkdir(dir, { recursive: true });
       const file = join(dir, `${agentId}.json`);
-      const tmp = `${file}.tmp`;
+      const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
       await writeFile(tmp, JSON.stringify({ lines }, null, 2), 'utf8');
       await rename(tmp, file);
       this.lastWrite.set(agentId, this.fingerprint(lines.slice(-this.maxLines)));
@@ -100,6 +100,9 @@ export class ScrollbackPersist {
 
   private fingerprint(lines: string[]): string {
     const last = lines[lines.length - 1] ?? '';
-    return `${lines.length}\u0000${last.length}\u0000${last}`;
+    // middle lines can change while count and last stay equal (in-place
+    // rewrites) — sample the middle so those changes are not skipped
+    const mid = lines.length > 2 ? lines[Math.floor(lines.length / 2)] ?? '' : '';
+    return `${lines.length}\u0000${last.length}\u0000${last}\u0000${mid}`;
   }
 }

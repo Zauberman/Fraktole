@@ -52,6 +52,10 @@ const mock = http.createServer((req, res) => {
       try {
         failNext = JSON.parse(body).failNext ?? 0;
       } catch {
+        // a malformed control-plane call silently turns the failure-injection
+        // test into a success-path test — count it like a wire violation
+        mockViolations += 1;
+        console.log('  MOCK VIOLATION: malformed /control payload');
         failNext = 0;
       }
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -430,6 +434,9 @@ const main = async () => {
   else ok('chip click reveals the reasoning output');
   await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-thinking-chip')?.click(); true`);
   await sleep(300);
+  const chipHidden = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-thinking') === null`);
+  if (!chipHidden) fail('chip toggle-off did not hide the thinking block');
+  else ok('chip toggle-off hides the block');
 
   await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'think')?.click(); true`);
   const globalOn = await waitFor(`document.querySelector('.pane-reviewer-column .reviewer-thinking') !== null`, 10000, 'global thinking visible');
@@ -437,6 +444,9 @@ const main = async () => {
   else ok('global toggle reveals all thinking blocks');
   await evalJs(`[...document.querySelectorAll('.pane-reviewer-column .reviewer-actions button')].find((b) => b.textContent.trim() === 'think')?.click(); true`);
   await sleep(300);
+  const globalOff = await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-thinking') === null`);
+  if (!globalOff) fail('global think toggle-off did not hide the blocks');
+  else ok('global toggle-off hides the blocks');
 
   await prompt('summarize');
   const final = await waitFor(
@@ -504,7 +514,9 @@ const main = async () => {
 
   await prompt('/compact');
   await sleep(1200);
-  ok('/compact sent without errors');
+  const compactStatus = await evalJs(`document.querySelector('.pane-reviewer-column .orch-judge-status')?.textContent.trim() ?? ''`);
+  if (!['running', 'idle'].includes(compactStatus)) fail(`/compact left the reviewer in "${compactStatus}"`);
+  else ok('/compact sent without errors');
 
   await prompt('/goal test-goal');
   const banner = await waitFor(`document.querySelector('.pane-reviewer-column .reviewer-goal-banner') !== null`, 15000, 'goal banner');
@@ -605,7 +617,7 @@ const main = async () => {
     if (dt !== t) fail(`dataset.theme is ${dt} after applyTheme(${t})`);
     seen.add(bg);
   }
-  if (seen.size < 10) fail(`theme walk barely repainted (${seen.size} distinct bgs of ${themes.length})`);
+  if (seen.size < themes.length) fail(`theme walk repainted only ${seen.size} distinct bgs of ${themes.length}`);
   else ok(`theme walk: ${themes.length} themes via applyTheme, ${seen.size} distinct backgrounds`);
 
   // the old chrome is gone: no wordmark, no View button
@@ -644,7 +656,13 @@ const main = async () => {
   const fj = JSON.parse(fonts);
   if (!fj.body.includes('Instrument Serif')) fail(`assistant body font: ${fj.body}`);
   else ok(`assistant answers read in Instrument Serif`);
-  if (fj.thinking && !fj.thinking.includes('IBM Plex Mono')) fail(`thinking panel font: ${fj.thinking}`);
+  if (!fj.thinking) {
+    // re-open a thinking chip so the font check has something to measure
+    await evalJs(`document.querySelector('.pane-reviewer-column .reviewer-thinking-chip')?.click(); true`);
+    const th2 = await waitFor(`(() => { const el = document.querySelector('.pane-reviewer-column .reviewer-thinking'); return el ? getComputedStyle(el).fontFamily : ''; })()`, 10000, 'thinking font re-open');
+    if (!th2.includes('IBM Plex Mono')) fail(`thinking panel font: ${th2}`);
+    else ok('thinking panels set in IBM Plex Mono');
+  } else if (!fj.thinking.includes('IBM Plex Mono')) fail(`thinking panel font: ${fj.thinking}`);
   else ok('thinking panels set in IBM Plex Mono');
 
   // chrome heights: 34px top bar, 30px status bar
@@ -745,18 +763,21 @@ const main = async () => {
   }
 
   const rowColors = await evalJs(`(() => {
-    const mk = (sel, child) => { const el = document.querySelector(sel); return el ? getComputedStyle(child ? el.querySelector(child) : el).color : ''; };
+    const mk = (sel, child) => { const el = document.querySelector(sel); if (!el) return ''; const inner = child ? el.querySelector(child) : null; return getComputedStyle(inner ?? el).color; };
     return JSON.stringify({
       user: mk('.reviewer-item-user', '.reviewer-item-body'),
-      system: mk('.reviewer-item-system', '.reviewer-item-body'),
-      tool: mk('.reviewer-item-tool', '.reviewer-tool-detail'),
+      // error cards also carry .reviewer-item-tool — exclude them or the
+      // tool sample reads the SAME element as the error sample
+      tool: mk('.reviewer-item-tool:not(.reviewer-item-tool-error)', '.reviewer-tool-detail'),
       error: mk('.reviewer-item-tool-error', '.reviewer-tool-detail'),
     });
   })()`);
   const rc = JSON.parse(rowColors);
-  const distinct = new Set([rc.user, rc.system, rc.tool, rc.error].filter(Boolean)).size;
-  if (distinct < 2) fail(`row colors not distinct: ${rowColors}`);
-  else ok(`row colors distinct (${distinct} of 4): ${rowColors}`);
+  // user and tool bodies share the text color BY DESIGN (role labels and
+  // the tool band carry the distinction); the error card must read err-tinted
+  if (!rc.user || !rc.tool || !rc.error) fail(`missing row colors: ${rowColors}`);
+  else if (rc.tool === rc.error) fail(`tool/error rows share a color: ${rowColors}`);
+  else ok(`error rows tinted apart from tool rows: ${rowColors}`);
 
   const models = await evalJs(`window.fraktole.listReviewerModels({ adapter: 'openai', apiKey: 'sk-mock-42', baseUrl: '${MOCK_BASE}' })`);
   if (!Array.isArray(models) || !models.includes('mock-model')) fail(`model list fetch failed: ${JSON.stringify(models)}`);
@@ -896,9 +917,10 @@ const main = async () => {
   await evalJs(`window.fraktole.restartReviewer('${sid2}')`);
   await waitFor(`document.querySelector('.pane-reviewer-column .orch-judge-status')?.textContent === 'running'`, 25000, 'reviewer running after provider restart');
   const before = callCount;
+  const bodiesBefore = await evalJs(`document.querySelectorAll('.pane-reviewer-column .reviewer-item-body').length`);
   await prompt('provider ping');
   await waitFor(
-    `[...document.querySelectorAll('.pane-reviewer-column .reviewer-item-body')].some((e) => e.textContent.trim().length > 0)`,
+    `document.querySelectorAll('.pane-reviewer-column .reviewer-item-body').length > ${bodiesBefore}`,
     25000,
     'answer after provider pick',
   );
