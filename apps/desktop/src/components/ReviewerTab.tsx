@@ -45,9 +45,102 @@ function roleLabel(role?: string): string {
   return role ?? 'system';
 }
 
+interface ReviewerMessageRowProps {
+  it: TranscriptItem;
+  thinkingShown: boolean;
+  thinkingLiveOpen: boolean;
+  onToggleThinking(seq: number): void;
+}
+
+/** One message row of the transcript. Memoized: during streaming only the
+ *  live row's item identity changes, so every finished row is skipped and
+ *  its sanitize pass does not re-run. */
+const ReviewerMessageRow = React.memo(function ReviewerMessageRow({
+  it,
+  thinkingShown,
+  thinkingLiveOpen,
+  onToggleThinking,
+}: ReviewerMessageRowProps): React.JSX.Element {
+  return (
+    <div className={`reviewer-item reviewer-item-${it.role ?? 'system'}${it.finalized ? '' : ' reviewer-live'}`}>
+      <span className="reviewer-rail" aria-hidden="true" />
+      <div className="reviewer-item-main">
+        <div className="reviewer-item-meta">
+          <span className="reviewer-item-role">{roleLabel(it.role)}</span>
+          {it.thinking !== undefined && (
+            <button
+              type="button"
+              className={`reviewer-thinking-chip${thinkingShown || thinkingLiveOpen ? ' reviewer-thinking-chip-on' : ''}${it.thinkingLive ? ' reviewer-thinking-live' : ''}`}
+              title={it.thinkingLive ? 'thinking…' : 'toggle thinking output'}
+              onClick={() => onToggleThinking(it.seq)}
+            >
+              thinking{it.thinkingLive ? '…' : ''}
+            </button>
+          )}
+          <span className="reviewer-item-time">{timeOf(it.at)}</span>
+        </div>
+        {(thinkingShown || thinkingLiveOpen) && it.thinking !== undefined && (
+          <div className="reviewer-thinking">
+            <span className="reviewer-thinking-caption">thinking</span>
+            {sanitizeChatText(it.thinking)}
+          </div>
+        )}
+        <div className="reviewer-item-body">
+          {sanitizeChatText(it.content ?? '')}
+          {!it.finalized && <span className="reviewer-caret" aria-hidden="true" />}
+        </div>
+      </div>
+    </div>
+  );
+});
+
+/** Merges buffered stream deltas into the transcript: extends the live
+ *  assistant row when one exists, appends a new one otherwise. `seq` is
+ *  pre-allocated by the caller (outside the updater) for the append case. */
+function applyStreamTo(
+  its: TranscriptItem[],
+  delta: string,
+  thinking: string,
+  seq: number,
+): TranscriptItem[] {
+  const last = its[its.length - 1];
+  const live =
+    last && last.kind === 'message' && last.role === 'assistant' && !last.finalized ? last : null;
+  if (live) {
+    const next = [...its];
+    next[next.length - 1] = {
+      ...live,
+      content: delta ? `${live.content ?? ''}${delta}` : live.content,
+      thinking: thinking ? `${live.thinking ?? ''}${thinking}` : live.thinking,
+      thinkingLive: thinking ? true : live.thinkingLive,
+    };
+    return next;
+  }
+  if (delta || thinking) {
+    return [
+      ...its,
+      {
+        seq,
+        at: Date.now(),
+        kind: 'message',
+        role: 'assistant',
+        content: delta,
+        thinking: thinking || undefined,
+        thinkingLive: thinking ? true : undefined,
+        finalized: false,
+      },
+    ];
+  }
+  return its;
+}
+
 interface ReviewerTabProps {
   sessionId: string;
-  /** Opens the app Settings Center at a section (replaces the old inline config modal). */
+  /** False while the session view is hidden (another session active or a
+   *  non-Node tab): stream deltas buffer in refs and apply on re-visible,
+   *  so background sessions never re-render per frame. */
+  visible: boolean;
+  /** Opens the app Settings Center (replaces the old inline config modal). */
   onOpenSettings(section: SettingsSection): void;
 }
 
@@ -57,7 +150,7 @@ interface ReviewerTabProps {
  * /compact command, and the prompt box.
  */
 export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
-  const { sessionId, onOpenSettings } = props;
+  const { sessionId, visible, onOpenSettings } = props;
   const [status, setStatus] = useState<ReviewerStatus>('offline');
   const [statusError, setStatusError] = useState<string | undefined>(undefined);
   const [runningModel, setRunningModel] = useState<string | undefined>(undefined);
@@ -95,6 +188,15 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(0);
 
+  // stream deltas coalesce here instead of one setState per token: a rAF
+  // tick applies at most one update per frame, and while the view is hidden
+  // nothing applies at all (flushed on re-visible)
+  const pendingDelta = useRef('');
+  const pendingThinking = useRef('');
+  const pendingChars = useRef(0);
+  const streamRaf = useRef<number | null>(null);
+  const visibleRef = useRef(visible);
+
   useEffect(() => {
     if (!composeError) return;
     const t = window.setTimeout(() => setComposeError(null), 5000);
@@ -131,6 +233,30 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     loadTranscript();
   }, [sessionId, loadTranscript]);
 
+  // flush buffered stream deltas into the transcript (one rAF-coalesced
+  // update); no-op while hidden — the buffer survives until re-visible
+  const flushStream = useCallback((): void => {
+    streamRaf.current = null;
+    if (!visibleRef.current) return;
+    const delta = pendingDelta.current;
+    const thinking = pendingThinking.current;
+    const chars = pendingChars.current;
+    if (delta.length === 0 && thinking.length === 0) return;
+    pendingDelta.current = '';
+    pendingThinking.current = '';
+    pendingChars.current = 0;
+    if (chars > 0) setStreamChars((n) => n + chars);
+    setItems((its) => applyStreamTo(its, delta, thinking, nextSeq()));
+  }, []);
+
+  // re-visible: apply anything that streamed while the view was hidden
+  useEffect(() => {
+    visibleRef.current = visible;
+    if (visible && (pendingDelta.current.length > 0 || pendingThinking.current.length > 0)) {
+      if (streamRaf.current === null) streamRaf.current = requestAnimationFrame(flushStream);
+    }
+  }, [visible, flushStream]);
+
   useEffect(() => {
     const unsubs = [
       bridge.onReviewerStatus(sessionId, (s) => {
@@ -142,48 +268,17 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       bridge.onReviewerStream(sessionId, (ev) => {
         const { delta, thinking } = ev;
         if (delta) {
-          setStreamChars((n) => n + delta.length);
+          pendingChars.current += delta.length;
           // the first model output marks the start phase over
           if (startingRef.current) {
             startingRef.current = null;
             setStarting(null);
           }
         }
-        // seq is allocated here, outside the updater: an updater may be
-        // re-invoked by React, and an impure increment inside it would mint
-        // duplicate keys
-        const seq = nextSeq();
-        setItems((its) => {
-          const last = its[its.length - 1];
-          const live =
-            last && last.kind === 'message' && last.role === 'assistant' && !last.finalized ? last : null;
-          if (live) {
-            const next = [...its];
-            next[next.length - 1] = {
-              ...live,
-              content: delta ? `${live.content ?? ''}${delta}` : live.content,
-              thinking: thinking ? `${live.thinking ?? ''}${thinking}` : live.thinking,
-              thinkingLive: thinking ? true : live.thinkingLive,
-            };
-            return next;
-          }
-          if (delta || thinking) {
-            return [
-              ...its,
-              {
-                seq,
-                at: Date.now(),
-                kind: 'message',
-                role: 'assistant',
-                content: delta ?? '',
-                thinking,
-                thinkingLive: thinking ? true : undefined,
-                finalized: false,
-              },
-            ];
-          }
-          return its;
-        });
+        pendingDelta.current += delta ?? '';
+        pendingThinking.current += thinking ?? '';
+        if (!visibleRef.current) return;
+        if (streamRaf.current === null) streamRaf.current = requestAnimationFrame(flushStream);
       }),
       bridge.onReviewerToolCall(sessionId, (ev: ReviewerToolCallEvent) => {
         if (ev.state === 'start') {
@@ -207,11 +302,26 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       }),
       bridge.onReviewerMessage(sessionId, (entry) => {
         const seq = nextSeq();
+        // stream deltas buffered when the view was hidden must land BEFORE
+        // the finalize, or the finalized message would drop their text
+        const hasPending = pendingDelta.current.length > 0 || pendingThinking.current.length > 0;
+        const delta = hasPending ? pendingDelta.current : '';
+        const thinking = hasPending ? pendingThinking.current : '';
+        const chars = hasPending ? pendingChars.current : 0;
+        if (hasPending) {
+          pendingDelta.current = '';
+          pendingThinking.current = '';
+          pendingChars.current = 0;
+          if (chars > 0) setStreamChars((n) => n + chars);
+        }
         setItems((its) => {
+          // both creation paths share `seq`: they can never both append —
+          // an appended live row is immediately merged by the finalize
+          const base = hasPending ? applyStreamTo(its, delta, thinking, seq) : its;
+          const last = base[base.length - 1];
           if (entry.role === 'assistant') {
-            const last = its[its.length - 1];
             if (last && last.kind === 'message' && last.role === 'assistant' && !last.finalized) {
-              const next = [...its];
+              const next = [...base];
               next[next.length - 1] = {
                 ...last,
                 content: entry.content,
@@ -222,7 +332,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
               return next;
             }
           }
-          return [...its, { seq, at: entry.at, kind: 'message', role: entry.role, content: entry.content, thinking: entry.thinking, finalized: true }];
+          return [...base, { seq, at: entry.at, kind: 'message', role: entry.role, content: entry.content, thinking: entry.thinking, finalized: true }];
         });
       }),
       bridge.onReviewerGoal(sessionId, (ev) => {
@@ -277,6 +387,22 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
     const ro = new ResizeObserver(() => pinToBottom());
     ro.observe(el);
     return () => ro.disconnect();
+  }, []);
+
+  // a pending rAF flush must not fire after unmount
+  useEffect(
+    () => () => {
+      if (streamRaf.current !== null) cancelAnimationFrame(streamRaf.current);
+    },
+    [],
+  );
+
+  const toggleThinking = useCallback((seq: number): void => {
+    setThinkingOpen((o) => ({ ...o, [seq]: !o[seq] }));
+  }, []);
+
+  const toggleCard = useCallback((callKey: string): void => {
+    setExpanded((e) => ({ ...e, [callKey]: !e[callKey] }));
   }, []);
 
   const submit = (): void => {
@@ -482,44 +608,21 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
         )}
         {items.map((it) =>
           it.kind === 'message' ? (
-            <div
+            <ReviewerMessageRow
               key={it.seq}
-              className={`reviewer-item reviewer-item-${it.role ?? 'system'}${it.finalized ? '' : ' reviewer-live'}`}
-            >
-              <span className="reviewer-rail" aria-hidden="true" />
-              <div className="reviewer-item-main">
-                <div className="reviewer-item-meta">
-                  <span className="reviewer-item-role">{roleLabel(it.role)}</span>
-                  {it.thinking !== undefined && (
-                    <button
-                      type="button"
-                      className={`reviewer-thinking-chip${thinkingGlobal || thinkingOpen[it.seq] ? ' reviewer-thinking-chip-on' : ''}${it.thinkingLive ? ' reviewer-thinking-live' : ''}`}
-                      title={it.thinkingLive ? 'thinking…' : 'toggle thinking output'}
-                      onClick={() => setThinkingOpen((o) => ({ ...o, [it.seq]: !o[it.seq] }))}
-                    >
-                      thinking{it.thinkingLive ? '…' : ''}
-                    </button>
-                  )}
-                  <span className="reviewer-item-time">{timeOf(it.at)}</span>
-                </div>
-                {(thinkingGlobal || thinkingOpen[it.seq]) && it.thinking !== undefined && (
-                  <div className="reviewer-thinking">
-                    <span className="reviewer-thinking-caption">thinking</span>
-                    {sanitizeChatText(it.thinking)}
-                  </div>
-                )}
-                <div className="reviewer-item-body">
-                  {sanitizeChatText(it.content ?? '')}
-                  {!it.finalized && <span className="reviewer-caret" aria-hidden="true" />}
-                </div>
-              </div>
-            </div>
+              it={it}
+              thinkingShown={thinkingGlobal}
+              thinkingLiveOpen={thinkingOpen[it.seq] === true}
+              onToggleThinking={toggleThinking}
+            />
           ) : (
             <ReviewerToolCard
+              key={it.seq}
               it={it}
               expanded={expanded[it.callId ?? String(it.seq)] || it.state === 'error'}
-              onToggle={() => setExpanded((e) => ({ ...e, [it.callId ?? String(it.seq)]: !e[it.callId ?? String(it.seq)] }))}
-            />          ),
+              onToggle={toggleCard}
+            />
+          ),
         )}
         {question && (
           <div className="reviewer-question-card">

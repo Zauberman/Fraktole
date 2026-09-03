@@ -32,8 +32,12 @@ interface SessionViewProps {
  * session is active, so its PTYs keep running and its terminal buffers keep
  * streaming — the keep-alive core. The Node tab shows the tiling workspace
  * plus the reviewer column on the right.
+ *
+ * Memoized: every prop from App is identity-stable across unrelated
+ * re-renders (editor keystrokes, notices), so a hidden/visible session only
+ * re-renders for its own state or a real prop change.
  */
-export function SessionView(props: SessionViewProps): React.JSX.Element {
+export const SessionView = React.memo(function SessionView(props: SessionViewProps): React.JSX.Element {
   const {
     sessionId,
     active,
@@ -97,6 +101,10 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
     };
   }, [sessionId, ws.tiles, ws.closeTile]);
 
+  // the top-bar Test tab is App-level (like the File Editor); the session
+  // view is only visible on the Node tab
+  const viewVisible = active && tab === 'node';
+
   const nodeContent = (
     <>
       <section className="pane pane-workspace">
@@ -122,15 +130,12 @@ export function SessionView(props: SessionViewProps): React.JSX.Element {
         style={{ width: `${sideRightPct}%` }}
         onMouseDown={() => ws.setReviewerFocused(true)}
       >
-        <ReviewerTab sessionId={sessionId} onOpenSettings={onOpenSettings} />
+        <ReviewerTab sessionId={sessionId} visible={viewVisible} onOpenSettings={onOpenSettings} />
       </section>
     </>
   );
 
-  // the top-bar Test tab is App-level (like the File Editor); the session
-  // view is only visible on the Node tab
-  const viewVisible = active && tab === 'node';
   return (
     <div className={`session-view${viewVisible ? '' : ' session-view-hidden'}`}>{nodeContent}</div>
   );
-}
+});

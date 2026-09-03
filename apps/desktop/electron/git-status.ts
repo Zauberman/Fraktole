@@ -2,7 +2,9 @@ import { spawn } from 'node:child_process';
 import type { GitMark, GitStatus } from '../src/shared/ipc.js';
 
 const GIT_TIMEOUT_MS = 3000;
-const CACHE_TTL_MS = 3000;
+// matches the renderer's 5s poll: the cache must cover the full period or
+// every poll spawns a fresh `git status`
+const CACHE_TTL_MS = 5000;
 
 const statusCache = new Map<string, { at: number; status: GitStatus | null }>();
 

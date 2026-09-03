@@ -239,6 +239,12 @@ export class ReviewerHost {
   private pendingInterrupt = false;
   private aborter: AbortController | null = null;
   private provider: ProviderClient;
+  /** Stream deltas coalesce here and flush on a 40ms timer — one IPC frame
+   *  per frame instead of one per token (the renderer re-renders per frame,
+   *  so per-token frames were pure IPC churn). Flushed at call boundaries,
+   *  on stop/idleOut, and in the run's finally so no tail is ever lost. */
+  private streamBuf = { delta: '', thinking: '' };
+  private streamTimer: NodeJS.Timeout | null = null;
   /** Provider/endpoint/model resolved from the key at start(). */
   private resolved: ProviderResolution | null = null;
   private apiKey = '';
@@ -496,6 +502,7 @@ export class ReviewerHost {
     this.stopWatch();
     this.rejectPendingAsk();
     this.queue = [];
+    this.flushStream();
     this.setStatus('stopped');
   }
 
@@ -506,6 +513,7 @@ export class ReviewerHost {
     this.cancel();
     this.stopWatch();
     this.rejectPendingAsk();
+    this.flushStream();
     this.setStatus('idle');
   }
 
@@ -1022,6 +1030,34 @@ export class ReviewerHost {
     this.aborter = null;
   }
 
+  /** Buffers one stream delta; a single timer flushes at most every 40ms. */
+  private queueStream(delta: string, thinking?: string): void {
+    this.streamBuf.delta += delta;
+    if (thinking && thinking.length > 0) this.streamBuf.thinking += thinking;
+    if (this.streamTimer === null) {
+      this.streamTimer = setTimeout(() => {
+        this.streamTimer = null;
+        this.flushStream();
+      }, 40);
+      this.streamTimer.unref();
+    }
+  }
+
+  /** Emits the buffered stream frame (no-op when nothing is buffered). */
+  private flushStream(): void {
+    if (this.streamTimer !== null) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
+    const { delta, thinking } = this.streamBuf;
+    if (delta.length === 0 && thinking.length === 0) return;
+    this.streamBuf = { delta: '', thinking: '' };
+    this.opts.emit.stream({
+      delta,
+      thinking: thinking.length > 0 ? thinking : undefined,
+    });
+  }
+
   private setStatus(status: ReviewerStatus, error?: string): void {
     this.status = status;
     this.opts.emit.status(status, error, this.resolved?.model, this.variant);
@@ -1087,10 +1123,7 @@ export class ReviewerHost {
                 knobs: this.knobsForRequest(),
                 onDelta: (delta, thinking) => {
                   onActivity();
-                  this.opts.emit.stream({
-                    delta,
-                    thinking: thinking && thinking.length > 0 ? thinking : undefined,
-                  });
+                  this.queueStream(delta, thinking);
                 },
               }),
             // when the server bounces a prompt that overflows its context,
@@ -1098,6 +1131,10 @@ export class ReviewerHost {
             // the same overflowing request
             () => this.compactIfNeeded(true, true),
           );
+          // the buffered tail must land before the assistant message is
+          // finalized below, or the renderer finalizes a live row missing
+          // the last ≤40ms of output
+          this.flushStream();
           const clipped = response.finishReason === 'length';
           // never persist an empty toolCalls array: providers reject
           // "tool_calls": [] on the next request (OpenAI 400s on it)
@@ -1301,6 +1338,8 @@ export class ReviewerHost {
     } finally {
       this.running = false;
       this.aborter = null;
+      // a cancelled/errored turn still owes the renderer its buffered tail
+      this.flushStream();
       // a /compact deferred mid-turn lands here when the run ends early
       // (abort/error) without reaching the turn-boundary call
       if (this.pendingCompact) void this.compactIfNeeded(false, true);

@@ -1,3 +1,4 @@
+import React from 'react';
 import { bridge } from '../ipc.js';
 import { sanitizeChatText } from '../shared/sanitize.js';
 
@@ -15,13 +16,17 @@ export interface ReviewerToolItem {
 
 /** Pure presentational card for one reviewer tool call: name, state,
  *  duration, args, a copy-result button, and the collapsible detail block.
- *  Extracted from ReviewerTab so the transcript renderer stays readable. */
-export function ReviewerToolCard(props: {
+ *  Extracted from ReviewerTab so the transcript renderer stays readable.
+ *  Memoized: a streaming transcript re-renders only cards whose item
+ *  identity or expansion actually changed. */
+export const ReviewerToolCard = React.memo(function ReviewerToolCard(props: {
   it: ReviewerToolItem;
   expanded: boolean;
-  onToggle(): void;
+  /** Toggles the card by its transcript key (callId or seq). */
+  onToggle(callKey: string): void;
 }): React.JSX.Element {
   const { it, expanded: open, onToggle } = props;
+  const callKey = it.callId ?? String(it.seq);
   // the transcript state is start|done|error; the CSS contract is
   // running|done|error — map instead of emitting an unstyled -start class
   const phase = it.state === 'start' || it.state === undefined ? 'running' : it.state;
@@ -30,7 +35,7 @@ export function ReviewerToolCard(props: {
   <span className={`reviewer-tool-band reviewer-tool-band-${phase}`} aria-hidden="true" />
   <div className="reviewer-tool-header">
     <div className="reviewer-tool-row">
-      <button type="button" className="reviewer-tool-toggle" onClick={onToggle}>
+      <button type="button" className="reviewer-tool-toggle" onClick={() => onToggle(callKey)}>
         <svg
           className={`reviewer-tool-chevron${open ? ' reviewer-tool-chevron-open' : ''}`}
           width="10"
@@ -77,4 +82,4 @@ export function ReviewerToolCard(props: {
   )}
 </div>
   );
-}
+});

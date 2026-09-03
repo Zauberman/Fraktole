@@ -45,7 +45,7 @@ export interface SessionState extends SessionStateRefs {
   setReviewerFocused(v: boolean): void;
   toggleZoom(id: TileId): void;
   renameSession(name: string): Promise<void>;
-  saveSession(opts?: { scrollback?: Record<string, string[]> }): Promise<void>;
+  saveSession(opts?: { includeScrollback?: boolean }): Promise<void>;
   reactivate(): Promise<void>;
   agentOf(tileId: TileId): string | null;
   tileOf(agentId: string): TileId | null;
@@ -125,7 +125,7 @@ export function useSessionState(sessionId: string): SessionState {
   }, []);
 
   const saveSession = useCallback(
-    async (opts?: { scrollback?: Record<string, string[]> }): Promise<void> => {
+    async (opts?: { includeScrollback?: boolean }): Promise<void> => {
       const current = sessionRef.current;
       if (!current || busyRef.current) return;
       // never erase a persisted arrangement from an externally-emptied view
@@ -145,7 +145,11 @@ export function useSessionState(sessionId: string): SessionState {
           zoomedAgentId: zoomId ? (tilesRef.current.get(zoomId)?.agentId ?? null) : null,
           focusedAgentId: focusId ? (tilesRef.current.get(focusId)?.agentId ?? null) : null,
           judgeCwd: focusId ? (tilesRef.current.get(focusId)?.cwd ?? null) : null,
-          scrollback: opts?.scrollback ?? captureAll(sessionId, (id) => tilesRef.current.get(id)?.agentId ?? null),
+          // the renderer's full-buffer capture rides only on the unload save:
+          // the live recorder (1s debounce) is fresher than any 30s/1.5s
+          // snapshot, and shipping every tile's buffer over IPC on each
+          // periodic save is the single largest recurring waste
+          scrollback: opts?.includeScrollback === false ? undefined : captureAll(sessionId, (id) => tilesRef.current.get(id)?.agentId ?? null),
         });
       } catch {
         // a save must never take the workspace down
@@ -233,10 +237,11 @@ export function useSessionState(sessionId: string): SessionState {
     [],
   );
 
-  // debounced auto-save on any structural change
+  // debounced auto-save on any structural change (scrollback is owned by the
+  // main-process recorder — the arrangement is all this save ships)
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void saveSession();
+      void saveSession({ includeScrollback: false });
     }, 1500);
     return () => window.clearTimeout(timer);
   }, [tree, focusedId, zoomedId, tiles, saveSession]);
@@ -250,11 +255,12 @@ export function useSessionState(sessionId: string): SessionState {
     return () => window.removeEventListener('beforeunload', onUnload);
   }, [saveSession]);
 
-  // periodic safety net: captures scrollback even when nothing structural
-  // changes, so a crash loses at most the last 30s
+  // periodic safety net for the session arrangement; scrollback is kept
+  // fresh by the recorder's own 1s debounced writes, so re-capturing every
+  // tile's buffer here would be pure IPC+disk churn
   useEffect(() => {
     const timer = window.setInterval(() => {
-      void saveSession();
+      void saveSession({ includeScrollback: false });
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [saveSession]);

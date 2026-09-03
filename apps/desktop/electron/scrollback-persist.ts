@@ -25,13 +25,18 @@ export interface ScrollbackPersistOpts {
 export class ScrollbackPersist {
   private readonly debounceMs: number;
   private readonly maxLines: number;
-  private readonly timers = new Map<string, NodeJS.Timeout>();
+  /** Continuous output used to refresh the debounce forever, starving the
+   *  disk write; the pending age is capped so a tile that never goes quiet
+   *  still flushes every maxHoldMs. */
+  private readonly maxHoldMs: number;
+  private readonly timers = new Map<string, { timer: NodeJS.Timeout; since: number }>();
   /** fingerprint (count + last line) of the last write per agentId, used to
    *  skip no-op writes so an idle tile stops hitting disk. */
   private readonly lastWrite = new Map<string, string>();
 
   constructor(private readonly opts: ScrollbackPersistOpts) {
     this.debounceMs = opts.debounceMs ?? 1_000;
+    this.maxHoldMs = (opts.debounceMs ?? 1_000) * 5;
     this.maxLines = opts.maxLines ?? 5_000;
   }
 
@@ -40,38 +45,46 @@ export class ScrollbackPersist {
   note(tileId: string): void {
     const agentId = this.opts.agentOfTile(tileId);
     if (!agentId) return;
-    const existing = this.timers.get(tileId);
-    if (existing) {
-      existing.refresh();
-      return;
+    const pending = this.timers.get(tileId);
+    if (pending) {
+      // quiet → keep postponing; a nonstop producer must not starve forever
+      if (Date.now() - pending.since < this.maxHoldMs) {
+        pending.timer.refresh();
+        return;
+      }
+      clearTimeout(pending.timer);
+      this.timers.delete(tileId);
     }
     const timer = setTimeout(() => {
       this.timers.delete(tileId);
       void this.writeIfChanged(agentId, this.opts.linesOf(tileId));
-    }, this.debounceMs);
+    }, pending ? 0 : this.debounceMs);
     timer.unref();
-    this.timers.set(tileId, timer);
+    // a forced flush opens a fresh hold window — the next forced write is
+    // another maxHoldMs away, not per-chunk
+    this.timers.set(tileId, { timer, since: Date.now() });
   }
 
-  /** Immediate write (tile exit) — must be called while the tile's lines are
-   *  still available, before the recorder drops the tile. Cancels any pending
-   *  debounced write for the tile. */
+  /** Immediate write (tile exit, quit flush, session save) — must be called
+   *  while the tile's lines are still available, before the recorder drops
+   *  the tile. Cancels any pending debounced write for the tile. Honors the
+   *  fingerprint: rewriting byte-identical scrollback is skipped. */
   async flushTile(tileId: string, lines: string[]): Promise<void> {
     const agentId = this.opts.agentOfTile(tileId);
-    const timer = this.timers.get(tileId);
-    if (timer) {
-      clearTimeout(timer);
+    const pending = this.timers.get(tileId);
+    if (pending) {
+      clearTimeout(pending.timer);
       this.timers.delete(tileId);
     }
     if (!agentId) return;
     // never create an empty file for a tile that produced nothing
     if (lines.length === 0) return;
-    await this.write(agentId, lines);
+    await this.writeIfChanged(agentId, lines);
   }
 
   /** Cancels all pending timers (session teardown). */
   dispose(): void {
-    for (const timer of this.timers.values()) clearTimeout(timer);
+    for (const pending of this.timers.values()) clearTimeout(pending.timer);
     this.timers.clear();
   }
 
@@ -89,7 +102,9 @@ export class ScrollbackPersist {
       await mkdir(dir, { recursive: true });
       const file = join(dir, `${agentId}.json`);
       const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-      await writeFile(tmp, JSON.stringify({ lines }, null, 2), 'utf8');
+      // compact encoding: pretty-printing added ~2x bytes and serialize time
+      // on the hottest disk path (readers JSON.parse either way)
+      await writeFile(tmp, JSON.stringify({ lines }), 'utf8');
       await rename(tmp, file);
       this.lastWrite.set(agentId, this.fingerprint(lines.slice(-this.maxLines)));
       (this.opts.logger ?? ((): void => undefined))(`scrollback: wrote ${agentId} (${lines.length} lines)`);

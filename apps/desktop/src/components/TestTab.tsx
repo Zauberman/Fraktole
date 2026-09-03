@@ -29,7 +29,7 @@ function normalize(raw: string): string {
  * popups navigate in-tab; console errors surface as a badge; DevTools open
  * for the guest page.
  */
-export function TestTab(props: TestTabProps): React.JSX.Element {
+export const TestTab = React.memo(function TestTab(props: TestTabProps): React.JSX.Element {
   const { sessionId, pendingUrl, onPendingUrlConsumed, active } = props;
   const [url, setUrl] = useState('');
   const [input, setInput] = useState('');
@@ -234,4 +234,4 @@ export function TestTab(props: TestTabProps): React.JSX.Element {
       )}
     </div>
   );
-}
+});

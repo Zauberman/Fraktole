@@ -1581,6 +1581,12 @@ ipcMain.handle(IPC.ptySpawn, async (_e, args: PtySpawnArgs): Promise<PtySpawnRes
       });
     });
 
+    // window first, bridge second: the bridge (cert load, RSA keygen on
+    // first run, HTTPS bind) is background infrastructure and must not sit
+    // between whenReady and the first paint. The renderer's boot catch-up
+    // (remoteGetState) covers the brief window before enableRemote lands.
+    createWindow();
+
     // boot-time bridge start: persisted enable state (or FRAKTOLE_REMOTE_ENABLE)
     if ((await remoteStore.get()).enabled || process.env.FRAKTOLE_REMOTE_ENABLE === '1') {
       try {
@@ -1590,8 +1596,6 @@ ipcMain.handle(IPC.ptySpawn, async (_e, args: PtySpawnArgs): Promise<PtySpawnRes
         pushRemoteStatus();
       }
     }
-
-    createWindow();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
