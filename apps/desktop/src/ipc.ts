@@ -16,6 +16,8 @@ import type {
   ReviewerEntry,
   ReviewerGoal,
   ReviewerGoalEvent,
+  ReviewerProbeArgs,
+  ReviewerProbeResult,
   ReviewerQuestion,
   ReviewerSpawnRequest,
   ReviewerStatus,
@@ -53,6 +55,8 @@ export type {
   ReviewerEntry,
   ReviewerGoal,
   ReviewerGoalEvent,
+  ReviewerProbeArgs,
+  ReviewerProbeResult,
   ReviewerQuestion,
   ReviewerSpawnRequest,
   ReviewerStatus,
@@ -136,7 +140,7 @@ export interface FraktoleBridge {
   restartReviewer(sessionId: string): Promise<boolean>;
   compactReviewer(sessionId: string): Promise<void>;
   reviewerTranscript(sessionId: string): Promise<ReviewerEntry[]>;
-  onReviewerStatus(sessionId: string, cb: (s: { status: string; error?: string; model?: string; variant?: string | null }) => void): () => void;
+  onReviewerStatus(sessionId: string, cb: (s: { status: string; error?: string; model?: string; variant?: string | null; detail?: string }) => void): () => void;
   onReviewerStream(sessionId: string, cb: (ev: ReviewerStreamEvent) => void): () => void;
   onReviewerToolCall(sessionId: string, cb: (ev: ReviewerToolCallEvent) => void): () => void;
   onReviewerMessage(sessionId: string, cb: (entry: ReviewerEntry) => void): () => void;
@@ -156,6 +160,8 @@ export interface FraktoleBridge {
   /** The resolved context budget (server-probed ≤ knob ≤ guess) at start. */
   onReviewerBudget(sessionId: string, cb: (info: { contextTokens: number; probed?: number }) => void): () => void;
   listReviewerModels(opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]>;
+  /** Live provider health for the model section (probe + model inventory). */
+  probeReviewer(opts: ReviewerProbeArgs): Promise<ReviewerProbeResult>;
   onReviewerQuestion(sessionId: string, cb: (ev: ReviewerQuestion) => void): () => void;
   answerReviewerQuestion(sessionId: string, askId: string, answer: string): Promise<void>;
   killReviewerAgent(sessionId: string, agentId: string): Promise<string>;

@@ -1,6 +1,8 @@
 import {
   joinBase,
   normalizeOpenaiBase,
+  parseRetryAfterMs,
+  ProviderHttpError,
   sseEvents,
   type CompleteOpts,
   type ProviderClient,
@@ -138,7 +140,7 @@ export class OpenAIProvider implements ProviderClient {
     if (opts.apiKey.length > 0) headers.authorization = `Bearer ${opts.apiKey}`;
     let res = await fetch(url, { method: 'POST', signal: opts.signal, headers, body: bodyFor(true) });
     if (!res.ok && !res.body) {
-      throw new Error(`openai API error ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      throw new ProviderHttpError('openai', res.status, parseRetryAfterMs(res.headers.get('retry-after')), (await res.text()).slice(0, 300));
     }
     if (!res.ok) {
       const text = (await res.text()).slice(0, 300);
@@ -147,13 +149,13 @@ export class OpenAIProvider implements ProviderClient {
       if (res.status === 400 && /stream_options|include_usage/i.test(text)) {
         res = await fetch(url, { method: 'POST', signal: opts.signal, headers, body: bodyFor(false) });
         if (!res.ok || !res.body) {
-          throw new Error(`openai API error ${res.status}: ${(await res.text()).slice(0, 300)}`);
+          throw new ProviderHttpError('openai', res.status, parseRetryAfterMs(res.headers.get('retry-after')), (await res.text()).slice(0, 300));
         }
       } else {
-        throw new Error(`openai API error ${res.status}: ${text}`);
+        throw new ProviderHttpError('openai', res.status, parseRetryAfterMs(res.headers.get('retry-after')), text);
       }
     }
-    if (!res.body) throw new Error(`openai API error ${res.status}: empty body`);
+    if (!res.body) throw new ProviderHttpError('openai', res.status, parseRetryAfterMs(res.headers.get('retry-after')), 'empty body');
 
     let text = '';
     let thinking = '';

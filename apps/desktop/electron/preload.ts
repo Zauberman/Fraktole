@@ -18,6 +18,8 @@ import {
   type ReviewerUsageEvent,
   type ReviewerQuestion,
   type ReviewerSpawnRequest,
+  type ReviewerProbeArgs,
+  type ReviewerProbeResult,
   type ReviewerStreamEvent,
   type ReviewerToolCallEvent,
   type RemoteStatus,
@@ -139,8 +141,8 @@ const api = {
   reviewerTranscript: (sessionId: string): Promise<ReviewerEntry[]> =>
     ipcRenderer.invoke(IPC.reviewerTranscript, sessionId),
 
-  onReviewerStatus: (sessionId: string, cb: (s: { status: string; error?: string; model?: string; variant?: string | null }) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, sid: string, s: { status: string; error?: string; model?: string }): void => {
+  onReviewerStatus: (sessionId: string, cb: (s: { status: string; error?: string; model?: string; variant?: string | null; detail?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, sid: string, s: { status: string; error?: string; model?: string; detail?: string }): void => {
       if (sid === sessionId) cb(s);
     };
     ipcRenderer.on(IPC.reviewerStatus, listener);
@@ -207,6 +209,7 @@ const api = {
   },
   listReviewerModels: (opts: { adapter: string; apiKey: string; baseUrl: string }): Promise<string[]> =>
     ipcRenderer.invoke(IPC.reviewerListModels, opts),
+  probeReviewer: (opts: ReviewerProbeArgs): Promise<ReviewerProbeResult> => ipcRenderer.invoke(IPC.reviewerProbe, opts),
   onReviewerQuestion: (sessionId: string, cb: (ev: ReviewerQuestion) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, sid: string, ev: ReviewerQuestion): void => {
       if (sid === sessionId) cb(ev);

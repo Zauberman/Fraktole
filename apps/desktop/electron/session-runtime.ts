@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import type { FraktoleMessage, ReviewerEntry, SessionFile, SessionState } from '../src/shared/ipc.js';
+import type { LoopCadence } from '../src/shared/loop-cadence.js';
 import type { AutonomyVariant } from '../src/shared/autonomy.js';
 import type { ReviewerStatus } from './reviewer.js';
 
@@ -37,6 +38,9 @@ export interface RuntimeReviewer {
   resumableRun(variant: AutonomyVariant): Promise<{ resumable: boolean; goalText: string | null }>;
   /** Ask the model for a session recap, persist it, and compact context. */
   summarizeSession(): { ok: boolean; error?: string };
+  /** Live "loops hunger" update: swap the poll cadence (interval + scaled
+   *  backstop/stall guard) without a reviewer restart. */
+  setCadence(cadence: LoopCadence): void;
   answerQuestion(askId: string, answer: string): void;
   killAgentNow(agentId: string): Promise<string>;
   onAgentMessage(msg: FraktoleMessage): void;

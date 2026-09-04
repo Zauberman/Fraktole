@@ -60,6 +60,20 @@ function parseKnobs(raw: Record<string, unknown> | undefined): SamplerKnobs | un
     k.keepAlive = raw.keepAlive;
   }
   if (typeof raw.think === 'boolean') k.think = raw.think;
+  // thinking policy: an explicit thinkingMode wins; a legacy boolean `think`
+  // (ollama knob, pre-0.15.0) migrates one-way to on/off. `think` itself is
+  // still emitted for the ollama adapter until the UI swap lands.
+  const tm =
+    raw.thinkingMode === 'auto' || raw.thinkingMode === 'on' || raw.thinkingMode === 'off'
+      ? raw.thinkingMode
+      : typeof raw.think === 'boolean'
+        ? raw.think
+          ? 'on'
+          : 'off'
+        : undefined;
+  if (tm) k.thinkingMode = tm;
+  const tb = knobInt(raw.thinkingBudgetTokens, 1024, 32768);
+  if (tb !== undefined) k.thinkingBudgetTokens = tb;
   return Object.keys(k).length > 0 ? k : undefined;
 }
 
@@ -101,6 +115,7 @@ const KNOWN_REVIEWER_KEYS = new Set([
   'allowedLaunchers',
   'reasoningEffort',
   'knobs',
+  'pollSeconds',
   'customAutonomy',
 ]);
 
@@ -136,7 +151,7 @@ export class SettingsStore {
       const parsed = JSON.parse(raw) as Partial<Settings>;
       const provider = parsed.reviewer?.provider;
       return {
-        theme: typeof parsed.theme === 'string' ? parsed.theme : 'midnight',
+        theme: typeof parsed.theme === 'string' ? parsed.theme : 'sable',
         editor: parseEditor(parsed.editor as Record<string, unknown> | undefined),
         notifications: parseNotifications(parsed.notifications as Record<string, unknown> | undefined),
         explorer: parseExplorer(parsed.explorer as Record<string, unknown> | undefined),
@@ -162,6 +177,7 @@ export class SettingsStore {
               ? parsed.reviewer.reasoningEffort
               : undefined,
           knobs: parseKnobs(parsed.reviewer?.knobs as Record<string, unknown> | undefined),
+          pollSeconds: knobInt(parsed.reviewer?.pollSeconds, 2, 600),
           customAutonomy:
             typeof parsed.reviewer?.customAutonomy?.name === 'string' ||
             typeof parsed.reviewer?.customAutonomy?.prompt === 'string'
@@ -174,7 +190,7 @@ export class SettingsStore {
         },
       };
     } catch {
-      return { theme: 'midnight', editor: DEFAULT_EDITOR, notifications: DEFAULT_NOTIFICATIONS, explorer: DEFAULT_EXPLORER, reviewer: {} };
+      return { theme: 'sable', editor: DEFAULT_EDITOR, notifications: DEFAULT_NOTIFICATIONS, explorer: DEFAULT_EXPLORER, reviewer: {} };
     }
   }
 

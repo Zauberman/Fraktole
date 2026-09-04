@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicProvider } from '../electron/reviewer/providers/anthropic.js';
 import { OllamaProvider } from '../electron/reviewer/providers/ollama.js';
 import { OpenAIProvider } from '../electron/reviewer/providers/openai.js';
-import { createProvider } from '../electron/reviewer/providers.js';
+import { createProvider, parseRetryAfterMs, ProviderHttpError, RETRY_AFTER_CAP_MS } from '../electron/reviewer/providers.js';
 
 function sseStream(lines: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -57,6 +57,40 @@ describe('createProvider', () => {
     expect(createProvider('anthropic')).toBeInstanceOf(AnthropicProvider);
     expect(createProvider('ollama')).toBeInstanceOf(OllamaProvider);
     expect(() => createProvider('x')).toThrow('unknown reviewer provider');
+  });
+
+  it('parses Retry-After: seconds, HTTP-dates, junk, and the 120s cap', () => {
+    expect(parseRetryAfterMs('7')).toBe(7000);
+    expect(parseRetryAfterMs('0.5')).toBe(500);
+    expect(parseRetryAfterMs('0')).toBe(0);
+    const future = new Date(Date.now() + 10_000).toUTCString();
+    const parsed = parseRetryAfterMs(future);
+    expect(parsed).toBeGreaterThan(8000);
+    expect(parsed).toBeLessThanOrEqual(10_000);
+    const past = new Date(Date.now() - 10_000).toUTCString();
+    expect(parseRetryAfterMs(past)).toBe(0);
+    expect(parseRetryAfterMs('soon')).toBeUndefined();
+    expect(parseRetryAfterMs(null)).toBeUndefined();
+    expect(parseRetryAfterMs('9999')).toBe(RETRY_AFTER_CAP_MS);
+  });
+
+  it('keeps the ProviderHttpError message shape the harness classification expects', () => {
+    const e = new ProviderHttpError('openai', 429, 7000, 'rate limited');
+    expect(e.message).toBe('openai API error 429: rate limited');
+    expect(e.status).toBe(429);
+    expect(e.retryAfterMs).toBe(7000);
+    expect(e).toBeInstanceOf(Error);
+  });
+
+  it('surfaces typed status + Retry-After from each adapter', async () => {
+    stubFetch(new Response('rate limited', { status: 429, headers: { 'retry-after': '7' } }));
+    await expect(new OpenAIProvider().complete(baseOpts())).rejects.toMatchObject({ status: 429, retryAfterMs: 7000 });
+
+    stubFetch(new Response('slow down', { status: 429 }));
+    await expect(new AnthropicProvider().complete(baseOpts())).rejects.toMatchObject({ status: 429, retryAfterMs: undefined });
+
+    stubFetch(new Response('busy', { status: 503, headers: { 'retry-after': '0.5' } }));
+    await expect(new OllamaProvider().complete(baseOpts())).rejects.toMatchObject({ status: 503, retryAfterMs: 500 });
   });
 });
 
@@ -582,6 +616,33 @@ describe('AnthropicProvider', () => {
     expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 4096 });
   });
 
+  it('honors the thinking policy: budget knob raises the floor, off omits thinking and the clamp', async () => {
+    // budget 8192 → floor = 8192 + 4096 text headroom
+    stubFetch(sseStream(['{"type":"message_stop"}']));
+    await new AnthropicProvider().complete({ ...baseOpts(), thinking: { mode: 'on', budgetTokens: 8192 } });
+    const on = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { thinking?: unknown; max_tokens?: number };
+    expect(on.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 });
+    expect(on.max_tokens).toBe(12288);
+    // a user cap above the floor is preserved
+    stubFetch(sseStream(['{"type":"message_stop"}']));
+    await new AnthropicProvider().complete({ ...baseOpts(), thinking: { mode: 'on', budgetTokens: 4096 }, knobs: { maxOutputTokens: 20000 } });
+    const capped = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { max_tokens?: number };
+    expect(capped.max_tokens).toBe(20000);
+
+    // off: no thinking field, no clamp — the user cap (or 4096) goes as-is
+    stubFetch(sseStream(['{"type":"message_stop"}']));
+    await new AnthropicProvider().complete({ ...baseOpts(), thinking: { mode: 'off' }, knobs: { maxOutputTokens: 4000 } });
+    const off = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { thinking?: unknown; max_tokens?: number };
+    expect('thinking' in off).toBe(false);
+    expect(off.max_tokens).toBe(4000);
+
+    // off without a knob: 4096 default
+    stubFetch(sseStream(['{"type":"message_stop"}']));
+    await new AnthropicProvider().complete({ ...baseOpts(), thinking: { mode: 'off' } });
+    const offDefault = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { max_tokens?: number };
+    expect(offDefault.max_tokens).toBe(4096);
+  });
+
   it('applies max output (clamped to the thinking floor), temperature and top_p', async () => {
     // 4000 is below the 8192 floor the extended-thinking budget requires —
     // the adapter clamps up instead of letting the API 400
@@ -758,10 +819,11 @@ describe('OllamaProvider', () => {
     expect(typeof args).toBe('object');
   });
 
-  it('builds the options map plus keep_alive/think from the knobs', async () => {
+  it('builds the options map plus keep_alive from the knobs and think from the thinking policy', async () => {
     stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"done"},"done":true}']));
     await new OllamaProvider().complete({
       ...baseOpts(),
+      thinking: { mode: 'on' },
       knobs: {
         contextTokens: 65536,
         maxOutputTokens: 1024,
@@ -774,7 +836,6 @@ describe('OllamaProvider', () => {
         presencePenalty: 0.5,
         frequencyPenalty: -0.5,
         keepAlive: '2h',
-        think: true,
       },
     });
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as {
@@ -798,6 +859,18 @@ describe('OllamaProvider', () => {
     expect(body.think).toBe(true);
   });
 
+  it('maps the thinking policy: on → think true, off → think false, unset → omitted', async () => {
+    stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"done"},"done":true}']));
+    await new OllamaProvider().complete({ ...baseOpts(), thinking: { mode: 'off' } });
+    const off = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as { think?: boolean };
+    expect(off.think).toBe(false);
+
+    stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"done"},"done":true}']));
+    await new OllamaProvider().complete(baseOpts());
+    const auto = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as Record<string, unknown>;
+    expect('think' in auto).toBe(false);
+  });
+
   it('clamps num_predict to the 512 floor (truncated tool JSON would break the loop)', async () => {
     stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"done"},"done":true}']));
     await new OllamaProvider().complete({ ...baseOpts(), knobs: { maxOutputTokens: 10 } });
@@ -807,19 +880,11 @@ describe('OllamaProvider', () => {
 
   it('always ships sane local defaults: num_predict 4096 + keep_alive 1h (unset must not mean unlimited generation / 5m eviction)', async () => {
     stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"done"},"done":true}']));
-    await new OllamaProvider().complete({ ...baseOpts(), knobs: { think: false } });
+    await new OllamaProvider().complete(baseOpts());
     const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as Record<string, unknown>;
     expect(body.options).toEqual({ num_predict: 4096 });
     expect(body.keep_alive).toBe('1h');
-    expect(body.think).toBe(false);
-
-    stubFetch(ndjsonStream(['{"message":{"role":"assistant","content":"done"},"done":true}']));
-    await new OllamaProvider().complete(baseOpts());
-    // stubFetch replaces the fetch mock — the knob-less request is calls[0]
-    const body2 = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]!.body)) as Record<string, unknown>;
-    expect(body2.options).toEqual({ num_predict: 4096 });
-    expect(body2.keep_alive).toBe('1h');
-    expect('think' in body2).toBe(false);
+    expect('think' in body).toBe(false);
   });
 
   it('parses eval counts from the final done chunk', async () => {

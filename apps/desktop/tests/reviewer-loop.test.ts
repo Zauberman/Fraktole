@@ -3,17 +3,19 @@ import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ReviewerHost, type ReviewerConfig } from '../electron/reviewer.js';
+import { deriveLoopCadence } from '../src/shared/loop-cadence.js';
 import type { ReviewerToolContext } from '../electron/reviewer-tools.js';
 import type { ReviewerState } from '../src/shared/ipc.js';
 import type { FraktoleMessage } from '../src/shared/ipc.js';
 import { TileRecorder } from '../electron/tile-recorder.js';
-import type { ProviderClient, ProviderMsg } from '../electron/reviewer/providers.js';
+import { ProviderHttpError, type ProviderClient, type ProviderMsg } from '../electron/reviewer/providers.js';
 
 type ScriptEntry =
   | { text: string; toolCalls: ProviderMsg['toolCalls']; thinking?: string; usage?: { inputTokens: number; cachedTokens: number; outputTokens: number }; finishReason?: string; delay?: number }
   | { hang: boolean }
   | { fail: boolean }
-  | { failWith: string };
+  | { failWith: string }
+  | { httpFail: { status: number; retryAfterMs?: number; body?: string } };
 
 class FakeProvider implements ProviderClient {
   readonly name = 'openai' as const;
@@ -31,6 +33,9 @@ class FakeProvider implements ProviderClient {
       }
       if (entry && 'failWith' in entry) {
         return Promise.reject(new Error(entry.failWith));
+      }
+      if (entry && 'httpFail' in entry) {
+        return Promise.reject(new ProviderHttpError('openai', entry.httpFail.status, entry.httpFail.retryAfterMs, entry.httpFail.body ?? 'http failure'));
       }
       const body = {
         text: entry.text,
@@ -74,7 +79,7 @@ function ctxFor(recorder: TileRecorder, opts: Partial<ReviewerToolContext> = {})
 }
 
 let hostSeq = 0;
-function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; loadingRetryMs: number; contextBudgetTokens: number; stallTimeoutMs: number; askTimeoutMs: number; cwd: string; probe: () => Promise<unknown>; forkProject: (variant: string, keepExisting: boolean) => Promise<{ ok: true; path: string } | { ok: false; error: string }> }> = {}) {
+function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<{ config: ReviewerConfig; dir: string; retryDelayMs: number; loadingRetryMs: number; contextBudgetTokens: number; stallTimeoutMs: number; askTimeoutMs: number; cwd: string; maxRetries: number; probe: () => Promise<unknown>; forkProject: (variant: string, keepExisting: boolean) => Promise<{ ok: true; path: string } | { ok: false; error: string }> }> = {}) {
   const dir = extra.dir ?? join(tmpdir(), `fraktole-reviewer-host-${process.pid}-${++hostSeq}`);
   const provider = new FakeProvider(script);
   const events: string[] = [];
@@ -89,6 +94,7 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
     createProvider: () => provider,
     forkProject: extra.forkProject,
     retryDelayMs: extra.retryDelayMs ?? 1,
+    maxRetries: extra.maxRetries,
     loadingRetryMs: extra.loadingRetryMs,
     stallTimeoutMs: extra.stallTimeoutMs,
     contextBudgetTokens: extra.contextBudgetTokens,
@@ -96,9 +102,10 @@ function makeHost(script: ScriptEntry[], recorder: TileRecorder, extra: Partial<
     probe: extra.probe as never,
     conversationFile: extra.dir ? join(extra.dir, 'conversation.jsonl') : uniqueConversationFile(),
     emit: {
-      status: (s, e) => {
+      status: (s, e, _m, _v, detail) => {
         events.push(`status:${s}`);
         if (e) events.push(`status-error:${e}`);
+        if (detail) events.push(`status-detail:${detail}`);
       },
       stream: (ev) => events.push(`stream:${ev.delta}${ev.thinking ? '|think:' + ev.thinking : ''}`),
       toolCall: (ev) => events.push(`tool:${ev.name}:${ev.state}`),
@@ -409,6 +416,36 @@ describe('ReviewerHost', () => {
     expect(call.knobs).toEqual({ contextTokens: 16384, maxOutputTokens: 2048, temperature: 0.2, think: true });
   });
 
+  it('flows the thinking policy: forced on/off reach the adapter, auto stays undefined', async () => {
+    const recorder = new TileRecorder();
+    const forced = makeHost([{ text: 'ok', toolCalls: [] }], recorder, {
+      config: { provider: 'ollama', model: 'm', knobs: { thinkingMode: 'on', thinkingBudgetTokens: 8192 } },
+    });
+    await forced.host.start();
+    await forced.host.prompt('hi');
+    await settle(60);
+    expect((forced.provider.complete.mock.calls[0]![0] as { thinking?: unknown }).thinking).toEqual({
+      mode: 'on',
+      budgetTokens: 8192,
+    });
+
+    const auto = makeHost([{ text: 'ok', toolCalls: [] }], new TileRecorder(), {
+      config: { provider: 'ollama', model: 'm', knobs: { thinkingMode: 'auto' } },
+    });
+    await auto.host.start();
+    await auto.host.prompt('hi');
+    await settle(60);
+    expect((auto.provider.complete.mock.calls[0]![0] as { thinking?: unknown }).thinking).toBeUndefined();
+
+    const unset = makeHost([{ text: 'ok', toolCalls: [] }], new TileRecorder(), {
+      config: { provider: 'ollama', model: 'm' },
+    });
+    await unset.host.start();
+    await unset.host.prompt('hi');
+    await settle(60);
+    expect((unset.provider.complete.mock.calls[0]![0] as { thinking?: unknown }).thinking).toBeUndefined();
+  });
+
   it('knobs.contextTokens drives the compaction budget (config wins over the model guess)', async () => {
     const recorder = recorderWith('x'.repeat(3000));
     const script: ScriptEntry[] = [];
@@ -508,6 +545,112 @@ describe('ReviewerHost', () => {
     for (let i = 0; i < 10; i++) host.pollNow(); // the 10th silent poll hits the backstop
     await settle(100);
     expect(provider.complete).toHaveBeenCalledTimes(beforeIdle + 1);
+  });
+
+  it('pollSeconds scales the re-check backstop (hunger: 3s → backstop at poll 30)', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost(
+      [
+        { text: 'goal armed', toolCalls: [] },
+        { text: 'woke on activity', toolCalls: [] },
+        { text: 'woke on backstop', toolCalls: [] },
+      ],
+      recorder,
+      { config: { provider: 'ollama', model: 'm', pollSeconds: 3 } },
+    );
+    await host.start();
+    await host.setGoal('watch the build');
+    await settle(100);
+
+    recorder.record('tile-1', 'boot\r\nnew output');
+    host.pollNow();
+    await settle(100);
+
+    // 29 silent polls stay quiet; the 30th (recheckPolls for a 3s poll)
+    // fires the backstop wake
+    const beforeIdle = provider.complete.mock.calls.length;
+    for (let i = 0; i < 29; i++) host.pollNow();
+    await settle(80);
+    expect(provider.complete).toHaveBeenCalledTimes(beforeIdle);
+    host.pollNow();
+    await settle(100);
+    expect(provider.complete).toHaveBeenCalledTimes(beforeIdle + 1);
+    expect(host.conversation.some((e) => e.content.includes('[loop carrier] re-check progress'))).toBe(true);
+  });
+
+  it('setCadence applies hunger live without a restart (both directions)', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost(
+      [
+        { text: 'goal armed', toolCalls: [] },
+        { text: 'woke on activity', toolCalls: [] },
+        { text: 'slow wake', toolCalls: [] },
+        { text: 'hungry wake', toolCalls: [] },
+      ],
+      recorder,
+    );
+    await host.start();
+    await host.setGoal('watch the build');
+    await settle(100);
+    recorder.record('tile-1', 'boot\r\nnew output');
+    host.pollNow();
+    await settle(100);
+
+    // started at the standard 15s rate: 5 silent polls stay quiet (backstop 6)
+    for (let i = 0; i < 5; i++) host.pollNow();
+    await settle(60);
+    const beforeSlow = provider.complete.mock.calls.length;
+
+    // live swap to lazy (90s → backstop 1): the very next silent poll wakes
+    host.setCadence(deriveLoopCadence(600));
+    host.pollNow();
+    await settle(100);
+    expect(provider.complete.mock.calls.length).toBe(beforeSlow + 1);
+    expect(host.conversation.some((e) => e.content.includes('slow wake'))).toBe(true);
+    await settle(300);
+    expect(provider.complete.mock.calls.length).toBe(beforeSlow + 1); // turn drained
+
+    // live swap back to standard (15s → backstop 6): five silent polls quiet again
+    host.setCadence(deriveLoopCadence(15));
+    for (let i = 0; i < 5; i++) host.pollNow();
+    await settle(60);
+    expect(provider.complete.mock.calls.length).toBe(beforeSlow + 1);
+  });
+
+  it('pollSeconds scales the stall guard (lazy cadence stands down after 2 ledger-less wakes)', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost(
+      [
+        { text: 'goal armed', toolCalls: [] },
+        { text: 're-check 1', toolCalls: [] },
+        { text: 're-check 2', toolCalls: [] },
+        { text: 'stall acknowledged', toolCalls: [] },
+      ],
+      recorder,
+      { config: { provider: 'ollama', model: 'm', pollSeconds: 600 } },
+    );
+    await host.start();
+    await host.setGoal('watch the build');
+    await settle(100);
+
+    // two silent-poll wakes that change nothing (recheckPolls 1, staleWakeLimit 2)
+    host.pollNow();
+    await settle(100);
+    host.pollNow();
+    await settle(100);
+    const afterTwoWakes = provider.complete.mock.calls.length;
+
+    // the third silent poll trips the stall guard: a warning turn, not a wake
+    host.pollNow();
+    await settle(100);
+    expect(host.conversation.some((e) => e.content.includes('[stall warning] 2 consecutive re-checks'))).toBe(true);
+    const afterWarning = provider.complete.mock.calls.length;
+    expect(afterWarning).toBeGreaterThanOrEqual(afterTwoWakes);
+
+    // stood down: further silent polls never wake the model again
+    for (let i = 0; i < 5; i++) host.pollNow();
+    await settle(100);
+    expect(provider.complete.mock.calls.length).toBe(afterWarning);
   });
 
   it('a GOAL-MET declaration marks the goal met and silences the loop carrier', async () => {
@@ -1206,6 +1349,66 @@ describe('ReviewerHost', () => {
     expect(host.status).toBe('running');
     expect(events).not.toContain('status:error');
     expect(host.conversation.some((e) => e.role === 'assistant' && e.content === 'recovered')).toBe(true);
+  });
+
+  it('honors the server Retry-After hint over the base delay', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider } = makeHost(
+      [{ httpFail: { status: 429, retryAfterMs: 120 } }, { text: 'after the wait', toolCalls: [] }],
+      recorder,
+      { retryDelayMs: 1 },
+    );
+    await host.start();
+    const t0 = Date.now();
+    await host.prompt('q');
+    await settle(600);
+    expect(provider.complete.mock.calls.length).toBe(2);
+    // the 120ms hint wins over the 1ms base delay
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(110);
+    expect(host.status).toBe('running');
+  });
+
+  it('backs off exponentially with jitter and surfaces the retry wait', async () => {
+    const recorder = new TileRecorder();
+    const { host, provider, events } = makeHost([{ fail: true }, { fail: true }, { fail: true }], recorder, {
+      retryDelayMs: 300,
+      maxRetries: 2,
+    });
+    await host.start();
+    const t0 = Date.now();
+    await host.prompt('q');
+    await settle(3000);
+    expect(provider.complete.mock.calls.length).toBe(3);
+    expect(host.status).toBe('error');
+    // 300..337 + 600..674 (jitter ≤ base/8 per step) → total 900..1011ms;
+    // only the lower bound is asserted — a loaded machine may stretch it
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeGreaterThanOrEqual(850);
+    expect(events.some((e) => e.startsWith('status-detail:retrying (2/3)'))).toBe(true);
+    expect(events.some((e) => e.startsWith('status-detail:retrying (3/3)'))).toBe(true);
+  });
+
+  it('classifies typed HTTP statuses: 429 retries, 400 is terminal', async () => {
+    const recorder = new TileRecorder();
+    const rateLimited = makeHost(
+      [{ httpFail: { status: 429 } }, { text: 'ok after rate limit', toolCalls: [] }],
+      recorder,
+      { retryDelayMs: 1 },
+    );
+    await rateLimited.host.start();
+    await rateLimited.host.prompt('q');
+    await settle(80);
+    expect(rateLimited.provider.complete.mock.calls.length).toBe(2);
+    expect(rateLimited.host.status).toBe('running');
+
+    const badRequest = makeHost([{ httpFail: { status: 400, body: 'bad request' } }, { text: 'never', toolCalls: [] }], new TileRecorder(), {
+      retryDelayMs: 1,
+    });
+    await badRequest.host.start();
+    await badRequest.host.prompt('q');
+    await settle(60);
+    expect(badRequest.provider.complete.mock.calls.length).toBe(1);
+    expect(badRequest.host.status).toBe('error');
   });
 
   it('setGoal revives an idle reviewer instead of vanishing', async () => {

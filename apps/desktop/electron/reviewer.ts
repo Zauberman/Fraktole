@@ -21,8 +21,18 @@ import { AUTONOMY_MISSIONS, AUTONOMY_PLUGINS, type AutonomyVariant } from './rev
 import { forkExists, type ForkResult } from './fork.js';
 import { emptyState, isGoalMet, loadState, persistState } from './reviewer-state.js';
 import { UsageLog } from './usage-log.js';
-import { createProvider, type ProviderClient, type ProviderMsg, type ProviderResult, type SamplerKnobs } from './reviewer/providers.js';
+import {
+  createProvider,
+  ProviderHttpError,
+  RETRY_AFTER_CAP_MS,
+  type ProviderClient,
+  type ProviderMsg,
+  type ProviderResult,
+  type ProviderThinking,
+  type SamplerKnobs,
+} from './reviewer/providers.js';
 import { probeLocalServer, type ProbeFn } from './reviewer/local-probe.js';
+import { deriveLoopCadence, type LoopCadence } from '../src/shared/loop-cadence.js';
 import type { TileRecorder } from './tile-recorder.js';
 
 export type { ReviewerEntry, ReviewerStatus, ReviewerToolCallEvent } from '../src/shared/ipc.js';
@@ -47,6 +57,9 @@ export interface ReviewerConfig {
   /** Model-tuning knobs (context window, output cap, samplers); unset =
    *  provider defaults. Captured at start(); applies on restart. */
   knobs?: SamplerKnobs;
+  /** Loop-carrier poll rate in seconds ("loops hunger"); unset = 15. The
+   *  backstop and stall guard scale with it (loop-cadence.ts). */
+  pollSeconds?: number;
   /** The user's custom autonomous loop (name + full directive). */
   customAutonomy?: { name?: string; prompt?: string };
 }
@@ -65,7 +78,7 @@ export function defaultReasoningEffort(res: ProviderResolution): 'high' | undefi
 }
 
 export interface ReviewerEmitter {
-  status(status: ReviewerStatus, error?: string, model?: string, variant?: AutonomyVariant | null): void;
+  status(status: ReviewerStatus, error?: string, model?: string, variant?: AutonomyVariant | null, detail?: string): void;
   stream(ev: ReviewerStreamEvent): void;
   toolCall(ev: ReviewerToolCallEvent): void;
   message(entry: ReviewerEntry): void;
@@ -122,8 +135,6 @@ export interface ReviewerHostOpts {
 
 const MAX_TOOL_ITERATIONS = 25;
 const TOOL_RESULT_CHARS = 20_000;
-/** Loop carrier poll cadence: cheap line-count checks every 15s. */
-const POLL_INTERVAL_MS_DEFAULT = 15_000;
 const MAX_COMPLETE_RETRIES = 1;
 const COMPLETE_RETRY_DELAY_MS = 2_000;
 /** A provider stream that produces NO output (deltas or thinking) for this
@@ -145,10 +156,6 @@ const MAX_TOKENS_RESERVE = 512;
 /** Bounded auto-heal: how many "continue where you left off" prompts a
  *  single queued turn may spend. */
 const HEAL_PROMPTS_MAX = 2;
-/** A loop carrier wake that finished without touching the goal/task ledger N
- *  times in a row stands down (a stalled loop must not fill the context
- *  forever with re-checks that change nothing). */
-const STALE_WAKE_LIMIT = 3;
 
 /** Per-model context budgets (tokens) — compaction keeps the conversation
  *  within 80% of the budget. Unknown openai-compatible models default to
@@ -175,9 +182,6 @@ function contextBudgetTokens(model: string, override?: number): number {
 function isLocalResolution(res: ConfigResolution): boolean {
   return res.adapter === 'ollama' || (res.entry !== undefined && res.entry.auth !== 'key');
 }
-/** With an active goal, force a wake every N silent polls (~90s at 15s) so
- *  a stalled loop can never die quietly. */
-const GOAL_RECHECK_POLLS = 6;
 
 export function buildSystemPrompt(
   sessionId: string,
@@ -260,6 +264,10 @@ export class ReviewerHost {
   /** Durable goal + task ledger (survives compaction and restarts). */
   private state: ReviewerState = emptyState();
   private watchTimer: NodeJS.Timeout | null = null;
+  /** The loop-carrier cadence (poll rate + scaled backstop/stall guard),
+   *  derived from the reviewer config's pollSeconds ("loops hunger") and
+   *  live-adjustable via setCadence. */
+  private cadence: LoopCadence = deriveLoopCadence(undefined);
   /** Per-tile line counts from the last poll (the cheap activity signal). */
   private lastLines = new Map<string, number>();
   private pollsSinceWake = 0;
@@ -398,6 +406,7 @@ export class ReviewerHost {
     this.agentCommand = cfg.agentCommand?.trim() ?? '';
     this.reasoningEffort = cfg.reasoningEffort;
     this.knobs = cfg.knobs;
+    this.cadence = deriveLoopCadence(cfg.pollSeconds);
     this.provider = (this.opts.createProvider ?? createProvider)(res.adapter);
     // probe the local server for its real context window (and readiness) —
     // best-effort: a dead server simply keeps the conservative defaults
@@ -451,8 +460,9 @@ export class ReviewerHost {
       probed: this.serverContext,
     });
     // A reloaded session with an armed goal resumes immediately instead of
-    // waiting for the loop carrier's ~90s polling window (GOAL_RECHECK_POLLS ×
-    // 15s). First-ever starts and restarts() have no goal, so no wake fires.
+    // waiting for the loop carrier's silent-poll backstop (~90s at the
+    // standard 15s rate — see src/shared/loop-cadence.ts). First-ever starts
+    // and restarts() have no goal, so no wake fires.
     // When reviving FROM an error, the loop carrier drives the wake itself
     // ([loop carrier] re-check progress) — adding a second wake would double the
     // turn and, in tests, exhaust a fixed mock response list.
@@ -695,13 +705,13 @@ export class ReviewerHost {
         void this.ensureStarted().then((ok) => {
           if (!ok) return;
           this.pollsSinceWake = 0;
-          if (this.staleWakes >= STALE_WAKE_LIMIT) {
+          if (this.staleWakes >= this.cadence.staleWakeLimit) {
             if (!this.warnedStale) {
               this.warnedStale = true;
               this.queue.push({
                 role: 'user',
                 content: this.withStateBlock(
-                  `[stall warning] ${STALE_WAKE_LIMIT} consecutive re-checks produced no goal or task-ledger change. Inspect the tiles (read_scrollback) and either advance one concrete step or declare the blockers explicitly.`,
+                  `[stall warning] ${this.cadence.staleWakeLimit} consecutive re-checks produced no goal or task-ledger change. Inspect the tiles (read_scrollback) and either advance one concrete step or declare the blockers explicitly.`,
                 ),
               });
               this.drainQueue();
@@ -724,18 +734,18 @@ export class ReviewerHost {
     }
     const delta = [...lines].some(([id, n]) => (this.lastLines.get(id) ?? 0) !== n);
     this.pollsSinceWake += 1;
-    if (delta || this.pollsSinceWake >= GOAL_RECHECK_POLLS) {
+    if (delta || this.pollsSinceWake >= this.cadence.recheckPolls) {
       this.pollsSinceWake = 0;
       // a stalled loop must not fill the context forever with re-checks
-      // that change nothing — after STALE_WAKE_LIMIT straight no-op wakes
+      // that change nothing — after staleWakeLimit straight no-op wakes
       // the re-check loop stands down (one warning turn is enqueued)
-      if (this.staleWakes >= STALE_WAKE_LIMIT) {
+      if (this.staleWakes >= this.cadence.staleWakeLimit) {
         if (!this.warnedStale && !this.running && this.queue.length === 0) {
           this.warnedStale = true;
           const note: ProviderMsg = {
             role: 'user',
             content: this.withStateBlock(
-              `[stall warning] ${STALE_WAKE_LIMIT} consecutive re-checks produced no goal or task-ledger change. Inspect the tiles (read_scrollback) and either advance one concrete step or declare the blockers explicitly.`,
+              `[stall warning] ${this.cadence.staleWakeLimit} consecutive re-checks produced no goal or task-ledger change. Inspect the tiles (read_scrollback) and either advance one concrete step or declare the blockers explicitly.`,
             ),
           };
           this.queue.push(note);
@@ -882,8 +892,19 @@ export class ReviewerHost {
 
   private startWatch(): void {
     this.stopWatch();
-    this.watchTimer = setInterval(() => this.pollNow(), this.opts.pollIntervalMs ?? POLL_INTERVAL_MS_DEFAULT);
+    this.watchTimer = setInterval(() => this.pollNow(), this.opts.pollIntervalMs ?? this.cadence.pollIntervalMs);
     this.watchTimer.unref();
+  }
+
+  /** Live cadence update ("loops hunger"): swaps the poll interval and the
+   *  scaled backstop/stall-guard values without a reviewer restart. A live
+   *  timer is recreated so the new rate applies from the next tick. */
+  setCadence(cadence: LoopCadence): void {
+    this.cadence = cadence;
+    if (this.watchTimer !== null) {
+      this.stopWatch();
+      this.startWatch();
+    }
   }
 
   /** The effective context budget (tokens): the user's knob wins, but the
@@ -907,6 +928,15 @@ export class ReviewerHost {
     const maxOut = this.knobs?.maxOutputTokens ?? 4096;
     const remaining = this.contextBudget() - this.estimateTokens() - MAX_TOKENS_RESERVE;
     return { ...this.knobs, maxOutputTokens: Math.max(256, Math.min(maxOut, remaining)) };
+  }
+
+  /** The thinking policy for the wire: only a forced on/off reaches the
+   *  adapter — 'auto' and unset both mean "adapter default" so the
+   *  anthropic default budget and the ollama server default stay intact. */
+  private thinkingForRequest(): ProviderThinking | undefined {
+    const mode = this.knobs?.thinkingMode;
+    if (mode !== 'on' && mode !== 'off') return undefined;
+    return { mode, budgetTokens: this.knobs?.thinkingBudgetTokens };
   }
 
   /** A cheap fingerprint of the goal/task ledger: two loop carrier wakes produce
@@ -949,6 +979,25 @@ export class ReviewerHost {
   ): Promise<ProviderResult> {
     const max = this.opts.maxRetries ?? MAX_COMPLETE_RETRIES;
     const stallMs = this.opts.stallTimeoutMs ?? STALL_TIMEOUT_MS;
+    const base = this.opts.retryDelayMs ?? COMPLETE_RETRY_DELAY_MS;
+    /** Backoff for a transient failure before the next attempt: the
+     *  server's Retry-After hint wins (capped), else exponential from the
+     *  base delay with a little jitter so parallel loops don't thundering-
+     *  herd a rate-limited endpoint. Jitter scales with the base (capped at
+     *  250ms) so a 1ms test base stays deterministic. */
+    const backoffDelay = (err: unknown, attempt: number): number => {
+      const hint = err instanceof ProviderHttpError ? err.retryAfterMs : undefined;
+      if (hint !== undefined) return Math.min(hint, RETRY_AFTER_CAP_MS);
+      return base * 2 ** attempt + Math.floor(Math.random() * Math.min(250, Math.floor(base / 8)));
+    };
+    /** Surfaces the coming retry in the status line so a silent 15s
+     *  Retry-After wait never looks like a hang. */
+    const announceRetry = (err: unknown, attempt: number, delayMs: number, note: string): void => {
+      const why = err instanceof ProviderHttpError ? `HTTP ${err.status}` : note;
+      this.emitStatusDetail(
+        `retrying (${attempt + 2}/${max + 1}) after ${why} — waiting ${(delayMs / 1000).toFixed(1)}s`,
+      );
+    };
     for (let attempt = 0; ; attempt += 1) {
       const attemptAborter = new AbortController();
       const composite = AbortSignal.any([signal, attemptAborter.signal]);
@@ -969,7 +1018,9 @@ export class ReviewerHost {
         if (attemptAborter.signal.aborted) {
           // stalled stream — retryable like any transient failure
           if (attempt >= max) throw new Error(`stream stalled — no output for ${Math.round(stallMs / 1000)}s`);
-          await abortableDelay(this.opts.retryDelayMs ?? COMPLETE_RETRY_DELAY_MS, signal);
+          const delay = backoffDelay(err, attempt);
+          announceRetry(err, attempt, delay, 'a stalled stream');
+          await abortableDelay(delay, signal);
           continue;
         }
         // a still-loading local server: wait it out on a long cycle — the
@@ -986,11 +1037,13 @@ export class ReviewerHost {
           if (attempt >= max) {
             throw new Error(`context limit reached and compaction did not help: ${(err as Error).message.slice(0, 160)}`);
           }
-          await abortableDelay(this.opts.retryDelayMs ?? COMPLETE_RETRY_DELAY_MS, signal);
+          await abortableDelay(base, signal);
           continue;
         }
         if (attempt >= max || !isRetryableError(err)) throw err;
-        await abortableDelay(this.opts.retryDelayMs ?? COMPLETE_RETRY_DELAY_MS, signal);
+        const delay = backoffDelay(err, attempt);
+        announceRetry(err, attempt, delay, 'a transient failure');
+        await abortableDelay(delay, signal);
       }
     }
   }
@@ -1063,6 +1116,12 @@ export class ReviewerHost {
     this.opts.emit.status(status, error, this.resolved?.model, this.variant);
   }
 
+  /** A transient, non-error status line: retry backoffs and other in-turn
+   *  wait states. Cleared implicitly by the next setStatus. */
+  private emitStatusDetail(detail: string): void {
+    this.opts.emit.status('running', undefined, this.resolved?.model, this.variant, detail);
+  }
+
   private drainQueue(): void {
     void this.run();
   }
@@ -1121,6 +1180,7 @@ export class ReviewerHost {
                 // a local server clips silently (finish_reason=length);
                 // the harness clips first so the reply is never cut mid-JSON
                 knobs: this.knobsForRequest(),
+                thinking: this.thinkingForRequest(),
                 onDelta: (delta, thinking) => {
                   onActivity();
                   this.queueStream(delta, thinking);
@@ -1637,6 +1697,11 @@ function toEntry(msg: ProviderMsg): ReviewerEntry {
  *  onContextError), so they are retryable. */
 function isRetryableError(err: unknown): boolean {
   if (err instanceof TypeError) return true;
+  // typed HTTP status wins over message-shaped classification
+  if (err instanceof ProviderHttpError) {
+    if (isContextError(err)) return true;
+    return err.status >= 429;
+  }
   if (err instanceof Error) {
     if (isContextError(err)) return true;
     const m = err.message.match(/API error ([45]\d\d)/);

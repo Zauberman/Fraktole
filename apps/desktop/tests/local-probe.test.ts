@@ -85,4 +85,34 @@ describe('probeLocalServer', () => {
     expect(res.contextTokens).toBe(8192);
     expect(fetchMock.mock.calls[0]![0]).toBe('http://localhost:8080/v1/props');
   });
+
+  it('explains every outcome in a single-line detail (which endpoint answered, or why not)', async () => {
+    // llama.cpp: the answering endpoint is named with the detected window
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ default_generation_settings: { n_ctx: 16384 } })));
+    const llamacpp = await probeLocalServer({ adapter: 'openai', baseUrl: 'http://localhost:8080/v1', model: 'm' });
+    expect(llamacpp.detail).toBe('llama.cpp /props — context window 16384');
+
+    // ollama: named endpoint + window
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ model_info: { 'qwen2.context_length': 32768 } })),
+    );
+    const ollama = await probeLocalServer({ adapter: 'ollama', baseUrl: 'http://localhost:11434', model: 'q' });
+    expect(ollama.detail).toBe('ollama /api/show — context window 32768');
+
+    // loading: says so
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: { message: 'Loading model' } }, 503)));
+    const loading = await probeLocalServer({ adapter: 'openai', baseUrl: 'http://localhost:8080/v1', model: 'm' });
+    expect(loading.detail).toBe('llama.cpp is loading the model');
+
+    // unreachable: says why, never throws
+    vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('fetch failed'))));
+    const dead = await probeLocalServer({ adapter: 'openai', baseUrl: 'http://localhost:8080/v1', model: 'm' });
+    expect(dead.state).toBe('unreachable');
+    expect(dead.detail).toBe('no answer — is the server running?');
+
+    // empty base URL
+    const empty = await probeLocalServer({ adapter: 'openai', baseUrl: '  ', model: 'm' });
+    expect(empty.detail).toBe('no base URL configured');
+  });
 });

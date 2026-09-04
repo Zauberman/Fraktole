@@ -26,6 +26,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--s4);
   padding: var(--s3) var(--s5);
   border-bottom: 1px solid var(--line);
   background: var(--chrome-bg);
@@ -37,6 +38,26 @@
   letter-spacing: 0.02em;
   text-transform: none;
   color: var(--rgn-settings);
+}
+
+/* unsaved-changes guard: inline confirm bar in the header (Escape with a
+   dirty section opens it; it never uses window.confirm) */
+.settings-dirty-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s1) var(--s3);
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: var(--warn-tint);
+  color: var(--text);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-wide);
+  text-transform: lowercase;
+}
+
+.settings-dirty-bar span {
+  color: var(--warn);
 }
 
 .settings-body {
@@ -137,12 +158,6 @@
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .settings-content > * {
-    animation: none;
-  }
-}
-
 .settings-section {
   display: flex;
   flex-direction: column;
@@ -157,23 +172,61 @@
   margin: 0;
 }
 
+/* ————— section cards (SectionCard primitive) ————— */
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s4) var(--s5);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+
+.settings-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.settings-card-title {
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: var(--track-wide);
+  margin: 0;
+}
+
+.settings-card-hint {
+  color: var(--text-faint);
+  font-size: var(--text-2xs);
+  margin: 0;
+}
+
+.settings-card-danger {
+  border-color: var(--err);
+}
+
+.settings-card-danger .settings-card-title {
+  color: var(--err);
+}
+
+/* ————— fields (Field primitive) ————— */
+
 .settings-field {
   display: flex;
   flex-direction: column;
   gap: var(--s1);
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  text-transform: lowercase;
-  letter-spacing: var(--track-wide);
 }
 
-.settings-field input,
-.settings-field select,
-.settings-field textarea {
-  color: var(--text);
-  font-size: var(--text-sm);
-  text-transform: none;
-  letter-spacing: normal;
+.settings-label {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: var(--track-wide);
 }
 
 .settings-field-wide {
@@ -193,8 +246,6 @@
 .settings-hint {
   color: var(--text-faint);
   font-size: var(--text-2xs);
-  text-transform: none;
-  letter-spacing: normal;
 }
 
 .settings-mono {
@@ -202,12 +253,114 @@
   font-size: var(--text-xs);
 }
 
+/* ————— form controls ————— */
+
+.settings-input,
+.settings-select,
+.settings-textarea {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-xs);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  padding: var(--s2) var(--s3);
+  width: 100%;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.settings-input:hover:not(:disabled),
+.settings-select:hover:not(:disabled),
+.settings-textarea:hover:not(:disabled) {
+  border-color: var(--text-muted);
+}
+
+.settings-input:focus-visible,
+.settings-select:focus-visible,
+.settings-textarea:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 1px;
+}
+
+.settings-input:disabled,
+.settings-select:disabled,
+.settings-textarea:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.settings-input::placeholder,
+.settings-textarea::placeholder {
+  color: var(--text-faint);
+}
+
+.settings-textarea {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--lh-body);
+  resize: vertical;
+}
+
+.settings-select {
+  appearance: none;
+  cursor: pointer;
+  padding-right: var(--s5);
+}
+
+/* the app's custom Select picks up the same skin inside settings fields */
+.settings-field .select {
+  width: 100%;
+}
+
+.settings-field .select-trigger {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-xs);
+  background: var(--bg-raised);
+  padding: var(--s2) var(--s3);
+}
+
+.settings-field .select-trigger:hover,
+.settings-field .select-trigger:focus-visible {
+  border-color: var(--text-muted);
+}
+
+/* ————— inline errors (severity-aware) ————— */
+
+.settings-error {
+  color: var(--err);
+  font-size: var(--text-xs);
+}
+
+.settings-error-warn {
+  color: var(--warn);
+}
+
+/* ————— actions ————— */
+
 .settings-actions {
   display: flex;
   gap: var(--s2);
   padding-top: var(--s2);
   border-top: 1px solid var(--line);
 }
+
+.settings-actions .btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.settings-actions .btn:disabled:hover {
+  background: var(--bg-raised);
+  border-color: var(--line-strong);
+  transform: none;
+}
+
+.settings-actions .btn-primary:disabled {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ————— lists / grids ————— */
 
 .settings-badge-row {
   display: flex;
@@ -258,17 +411,7 @@
   flex: 1;
 }
 
-.settings-error {
-  color: var(--err);
-  font-size: var(--text-xs);
-}
-
-.settings-textarea {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: var(--lh-body);
-  resize: vertical;
-}
+/* ————— theme gallery ————— */
 
 .settings-themes {
   display: grid;
@@ -314,11 +457,15 @@
   letter-spacing: var(--track-wide);
 }
 
+/* ————— switches ————— */
+
 .settings-switch-row {
   display: flex;
   align-items: center;
   gap: var(--s3);
 }
+
+/* ————— shortcuts table ————— */
 
 .settings-shortcuts {
   width: 100%;
@@ -360,3 +507,86 @@
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .settings-view,
+  .settings-content > * {
+    animation: none;
+  }
+}
+
+/* Loop hunger presets (LoopSection) */
+.settings-preset-row {
+  display: flex;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.settings-preset {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.settings-preset:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.settings-preset-active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--accent-tint);
+}
+
+.settings-preset-label {
+  font-family: var(--font-mono-alt);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+}
+
+.settings-preset-seconds {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+.settings-preset-active .settings-preset-seconds {
+  color: var(--text-muted);
+}
+
+/* Local-server health chips (ModelSection) */
+.settings-probe {
+  font-family: var(--font-mono-alt);
+  font-size: var(--text-xs);
+  letter-spacing: var(--track-wide);
+  text-transform: uppercase;
+  padding: 1px var(--s2);
+  border-radius: var(--r-xs);
+  border: 1px solid var(--line-strong);
+  color: var(--text-muted);
+}
+
+.settings-probe-ok {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: var(--ok-tint);
+}
+
+.settings-probe-loading {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: var(--warn-tint);
+}
+
+.settings-probe-unreachable {
+  color: var(--err);
+  border-color: var(--err);
+  background: var(--err-tint);
+}

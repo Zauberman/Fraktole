@@ -1,6 +1,8 @@
 import {
   joinBase,
   ndjsonPayloads,
+  parseRetryAfterMs,
+  ProviderHttpError,
   type CompleteOpts,
   type ProviderClient,
   type ProviderMsg,
@@ -110,11 +112,13 @@ export class OllamaProvider implements ProviderClient {
         // the server default (5m) evicts a 25GB model, and the reload
         // makes the next prompt look like a hang
         keep_alive: knobs?.keepAlive ?? '1h',
-        ...(knobs?.think !== undefined ? { think: knobs.think } : {}),
+        // think policy: 'on'/'off' force the field; undefined (auto) leaves
+        // the server default. Non-thinking models 400 on true — off is safe.
+        ...(opts.thinking?.mode === 'on' ? { think: true } : opts.thinking?.mode === 'off' ? { think: false } : {}),
       }),
     });
     if (!res.ok || !res.body) {
-      throw new Error(`ollama API error ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      throw new ProviderHttpError('ollama', res.status, parseRetryAfterMs(res.headers.get('retry-after')), (await res.text()).slice(0, 300));
     }
 
     let text = '';

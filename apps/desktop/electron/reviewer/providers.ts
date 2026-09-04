@@ -59,6 +59,15 @@ export interface ProviderMsg {
   contentBlocks?: WireContentBlock[];
 }
 
+/** The user's thinking policy, resolved from the sampler knobs. The
+ *  harness sends it only when the user forced on/off — 'auto' and unset
+ *  both arrive as undefined so the adapter keeps its default behavior. */
+export interface ProviderThinking {
+  mode: 'on' | 'off';
+  /** anthropic only: the extended-thinking budget in tokens. */
+  budgetTokens?: number;
+}
+
 export interface CompleteOpts {
   model: string;
   apiKey: string;
@@ -73,6 +82,11 @@ export interface CompleteOpts {
    *  format accepts (ollama options.*, openai/anthropic standard fields).
    *  Undefined = provider defaults, nothing extra sent. */
   knobs?: SamplerKnobs;
+  /** The thinking policy for adapters that support it. Undefined = adapter
+   *  defaults (anthropic: extended thinking on with its default budget —
+   *  the pre-knob behavior; ollama: nothing sent, server decides; openai:
+   *  reasoningEffort rules instead). */
+  thinking?: ProviderThinking;
   /** Streamed deltas, delivered as they arrive: content text and/or a
    *  thinking delta (the provider's reasoning output). */
   onDelta: (text: string, thinking?: string) => void;
@@ -110,6 +124,38 @@ export interface ProviderResult {
 export interface ProviderClient {
   readonly name: ProviderName;
   complete(opts: CompleteOpts): Promise<ProviderResult>;
+}
+
+/** An HTTP-level failure from a provider. Carries the status so the
+ *  harness classifies retries from data instead of regexing message text,
+ *  plus the server's Retry-After hint (429/5xx) when present. */
+export class ProviderHttpError extends Error {
+  constructor(
+    name: ProviderName,
+    readonly status: number,
+    /** Parsed Retry-After hint in ms, or undefined when the server sent none. */
+    readonly retryAfterMs: number | undefined,
+    body: string,
+  ) {
+    super(`${name} API error ${status}: ${body}`);
+    this.name = 'ProviderHttpError';
+  }
+}
+
+/** Parses a Retry-After header: delta-seconds or an HTTP-date. Caps at
+ *  RETRY_AFTER_CAP_MS so a hostile hint cannot park the loop for minutes. */
+export const RETRY_AFTER_CAP_MS = 120_000;
+export function parseRetryAfterMs(header: string | null | undefined): number | undefined {
+  if (!header) return undefined;
+  const s = header.trim();
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    return Math.min(RETRY_AFTER_CAP_MS, Math.round(Number(s) * 1000));
+  }
+  const date = Date.parse(s);
+  if (!Number.isNaN(date)) {
+    return Math.min(RETRY_AFTER_CAP_MS, Math.max(0, date - Date.now()));
+  }
+  return undefined;
 }
 
 import { AnthropicProvider } from './providers/anthropic.js';

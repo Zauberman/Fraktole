@@ -42,6 +42,7 @@ export const IPC = {
   reviewerSetGoal: 'reviewer:set-goal',
   reviewerGoal: 'reviewer:goal',
   reviewerListModels: 'reviewer:list-models',
+  reviewerProbe: 'reviewer:probe',
   reviewerQuestion: 'reviewer:question',
   reviewerAnswer: 'reviewer:answer',
   reviewerKillNow: 'reviewer:kill-now',
@@ -94,6 +95,7 @@ export type SettingsSection =
   | 'general'
   | 'model'
   | 'sampling'
+  | 'loop'
   | 'agents'
   | 'compose'
   | 'editor'
@@ -211,9 +213,17 @@ export interface SamplerKnobs {
   frequencyPenalty?: number;
   /** ollama only — body.keep_alive (e.g. "5m", "0" = unload) */
   keepAlive?: string;
-  /** ollama only — body.think (force/disable thinking; false is safe on
-   *  any model, true only on thinking-capable ones) */
+  /** DEPRECATED (legacy ollama knob) — migrated to thinkingMode on load.
+   *  Kept in the type only so the ollama adapter's legacy read survives the
+   *  transition release. */
   think?: boolean;
+  /** Thinking policy: 'auto' = provider default (anthropic: extended
+   *  thinking on; ollama: server decides; openai: reasoningEffort rules).
+   *  'on'/'off' force it where the adapter supports it. */
+  thinkingMode?: 'auto' | 'on' | 'off';
+  /** anthropic only — extended-thinking budget in tokens (min 1024). The
+   *  output cap is clamped to at least budget + 4096 when thinking is on. */
+  thinkingBudgetTokens?: number;
 }
 
 export interface Settings {
@@ -255,6 +265,10 @@ export interface Settings {
   /** Model-tuning knobs; every field validated and optional (see
    *  SamplerKnobs). Unset = provider default, nothing sent on the wire. */
   knobs?: SamplerKnobs;
+  /** Loop-carrier poll rate in seconds ("loops hunger"). 2–600; unset =
+   *  15 (the standard preset). The re-check backstop and stall stand-down
+   *  scale with it (see src/shared/loop-cadence.ts). Applies live. */
+  pollSeconds?: number;
   /** The user's custom autonomous loop: name + full directive. When the
    *  custom variant is picked, this prompt replaces the placeholder. */
   customAutonomy?: { name?: string; prompt?: string };
@@ -395,6 +409,27 @@ export interface ReviewerEntry {
   /** assistant only: the model's reasoning output (hidden by default). */
   thinking?: string;
   at: number;
+}
+
+/** reviewer:probe args — the model section's live health check for the
+ *  currently-configured (local) provider. */
+export interface ReviewerProbeArgs {
+  adapter: 'openai' | 'anthropic' | 'ollama';
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+}
+
+/** reviewer:probe result — the probe state, the server's real context
+ *  window (when reported), and the live model inventory. `detail` is a
+ *  single-line human explanation (which endpoint answered, or why not). */
+export interface ReviewerProbeResult {
+  state: 'ok' | 'loading' | 'unreachable';
+  serverContext?: number;
+  models: string[];
+  /** Probe source: 'llamacpp' | 'ollama' | 'openai-compat' | 'unknown'. */
+  kind?: string;
+  detail?: string;
 }
 
 /** reviewer:stream payload — content deltas and/or thinking deltas. */

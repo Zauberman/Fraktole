@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Select } from '../Select.js';
 import { bridge } from '../../ipc.js';
 import type { SessionSummary, UsageSample } from '../../shared/ipc.js';
+import { SectionCard } from './fields.js';
 import { fmtTokens } from './tokens.js';
 import '../../styles/usage.css';
 
@@ -69,48 +70,52 @@ export function UsageSection(): React.JSX.Element {
   );
 
   return (
-    <div className="usage-section">
-      <div className="usage-picker">
-        <Select
-          ariaLabel="session"
-          value={sessionId}
-          placeholder="no sessions yet"
-          onChange={pick}
-          options={(sessions ?? []).map((sess) => ({ value: sess.id, label: sess.name }))}
-        />
-        <button type="button" className="btn btn-sm" onClick={refresh}>
-          refresh
-        </button>
-      </div>
+    <div className="settings-section">
+      <SectionCard title="Token usage" hint="per-session token history for the reviewer harness — pure tokens, no cost">
+        <div className="usage-section">
+          <div className="usage-picker">
+            <Select
+              ariaLabel="session"
+              value={sessionId}
+              placeholder="no sessions yet"
+              onChange={pick}
+              options={(sessions ?? []).map((sess) => ({ value: sess.id, label: sess.name }))}
+            />
+            <button type="button" className="btn btn-sm" onClick={refresh}>
+              refresh
+            </button>
+          </div>
 
-      {sessions === null || history === null ? (
-        <div className="usage-dim">loading…</div>
-      ) : sessions.length === 0 ? (
-        <div className="usage-faint">no sessions yet</div>
-      ) : samples.length === 0 ? (
-        <div className="usage-faint">no turns recorded for this session</div>
-      ) : (
-        <>
-          <div className="usage-totals">
-            <span>
-              in {fmtTokens(totals.in)} · cached {fmtTokens(totals.cached)} · out {fmtTokens(totals.out)}
-            </span>
-            <span className="usage-faint">
-              {samples.length} turns · {fmtDate(samples[0]!.at)} – {fmtDate(samples[samples.length - 1]!.at)}
-            </span>
-          </div>
-          <div className="usage-grid">
-            <div>
-              <div className="usage-chart-title">per turn</div>
-              <TurnBars samples={samples} />
-            </div>
-            <div>
-              <div className="usage-chart-title">cumulative</div>
-              <CumulativeArea samples={samples} />
-            </div>
-          </div>
-        </>
-      )}
+          {sessions === null || history === null ? (
+            <div className="usage-dim">loading…</div>
+          ) : sessions.length === 0 ? (
+            <div className="usage-faint">no sessions yet</div>
+          ) : samples.length === 0 ? (
+            <div className="usage-faint">no turns recorded for this session</div>
+          ) : (
+            <>
+              <div className="usage-totals">
+                <span>
+                  in {fmtTokens(totals.in)} · cached {fmtTokens(totals.cached)} · out {fmtTokens(totals.out)}
+                </span>
+                <span className="usage-faint">
+                  {samples.length} turns · {fmtDate(samples[0]!.at)} – {fmtDate(samples[samples.length - 1]!.at)}
+                </span>
+              </div>
+              <div className="usage-grid">
+                <div>
+                  <div className="usage-chart-title">per turn</div>
+                  <TurnBars samples={samples} />
+                </div>
+                <div>
+                  <div className="usage-chart-title">cumulative</div>
+                  <CumulativeArea samples={samples} />
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </SectionCard>
     </div>
   );
 }

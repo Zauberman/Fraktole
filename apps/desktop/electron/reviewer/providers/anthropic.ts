@@ -1,5 +1,7 @@
 import {
   joinBase,
+  parseRetryAfterMs,
+  ProviderHttpError,
   sseEvents,
   type CompleteOpts,
   type ProviderClient,
@@ -88,12 +90,20 @@ export class AnthropicProvider implements ProviderClient {
   async complete(opts: CompleteOpts): Promise<ProviderResult> {
     const { system, messages } = toMessages(opts.messages);
     const url = joinBase(opts.baseUrl || DEFAULT_BASE, '/v1/messages');
+    // thinking policy: undefined = the pre-knob default (extended thinking
+    // on with the default budget). Off omits the field entirely.
+    const policy = opts.thinking ?? { mode: 'on' as const, budgetTokens: THINKING_BUDGET_TOKENS };
+    const thinkingOn = policy.mode === 'on';
+    const budget = policy.budgetTokens ?? THINKING_BUDGET_TOKENS;
     // extended-thinking tokens count against max_tokens, so the cap must
     // stay strictly larger than the thinking budget — a user-set cap below
-    // the current floor is clamped (silently lowering it would 400)
-    const maxTokens = Math.max(opts.knobs?.maxOutputTokens ?? 8192, 8192);
-    if (opts.knobs?.maxOutputTokens !== undefined && opts.knobs.maxOutputTokens < 8192) {
-      console.log(`anthropic adapter: maxOutputTokens ${opts.knobs.maxOutputTokens} clamped to 8192 (extended-thinking budget)`);
+    // the floor is clamped (silently lowering it would 400). Default floor:
+    // 4096 budget + 4096 text headroom = 8192. Off needs no headroom.
+    const floor = thinkingOn ? budget + 4096 : 0;
+    const userCap = opts.knobs?.maxOutputTokens;
+    const maxTokens = thinkingOn ? Math.max(userCap ?? floor, floor) : userCap ?? 4096;
+    if (thinkingOn && userCap !== undefined && userCap < floor) {
+      console.log(`anthropic adapter: maxOutputTokens ${userCap} clamped to ${floor} (extended-thinking budget ${budget})`);
     }
     const res = await fetch(url, {
       method: 'POST',
@@ -117,11 +127,11 @@ export class AnthropicProvider implements ProviderClient {
         ...(opts.knobs?.temperature !== undefined ? { temperature: opts.knobs.temperature } : {}),
         ...(opts.knobs?.topP !== undefined ? { top_p: opts.knobs.topP } : {}),
         stream: true,
-        thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET_TOKENS },
+        ...(thinkingOn ? { thinking: { type: 'enabled', budget_tokens: budget } } : {}),
       }),
     });
     if (!res.ok || !res.body) {
-      throw new Error(`anthropic API error ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      throw new ProviderHttpError('anthropic', res.status, parseRetryAfterMs(res.headers.get('retry-after')), (await res.text()).slice(0, 300));
     }
 
     let text = '';
