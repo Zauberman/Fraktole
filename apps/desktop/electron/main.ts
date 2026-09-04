@@ -26,6 +26,7 @@ import { searchProject } from './project-search.js';
 import { UsageLog } from './usage-log.js';
 import { initNotify, notifyReviewer } from './notify.js';
 import { SessionRegistry, SessionRuntime } from './session-runtime.js';
+import { deriveLoopCadence } from '../src/shared/loop-cadence.js';
 import { SessionStore } from './sessions.js';
 import { SettingsStore } from './settings.js';
 import { ScrollbackPersist } from './scrollback-persist.js';
@@ -43,9 +44,12 @@ import {
   type SessionSavePayload,
   type Settings,
   type ReviewerEntry,
+  type ReviewerProbeArgs,
+  type ReviewerProbeResult,
   type ReviewerSpawnRequest,
   type TestPageState,
 } from '../src/shared/ipc.js';
+import { probeLocalServer } from './reviewer/local-probe.js';
 import { THEME_IDS, type ThemeId } from '../src/themes.js';
 
 // Consistent identity across dev, local install and packaged builds: WM_CLASS,
@@ -532,8 +536,8 @@ if (!app.requestSingleInstanceLock()) {
           },
           tools,
           emit: {
-            status: (status, error, model, variant) => {
-              mainWindow?.webContents.send(IPC.reviewerStatus, session.id, { status, error, model, variant });
+            status: (status, error, model, variant, detail) => {
+              mainWindow?.webContents.send(IPC.reviewerStatus, session.id, { status, error, model, variant, detail });
               if (status === 'error' && error) {
                 void notifyReviewer({ sessionId: session.id, title: 'Reviewer error', body: error.slice(0, 160) });
               }
@@ -854,6 +858,12 @@ ipcMain.handle(IPC.ptySpawn, async (_e, args: PtySpawnArgs): Promise<PtySpawnRes
         currentTheme = next.theme as ThemeId;
         refreshMenu();
       }
+      // "loops hunger" applies live: every running reviewer swaps its poll
+      // cadence immediately (no restart needed)
+      if (patch.reviewer && 'pollSeconds' in patch.reviewer) {
+        const cadence = deriveLoopCadence(next.reviewer.pollSeconds);
+        for (const rt of registry?.all() ?? []) rt.reviewer.setCadence(cadence);
+      }
       // every live consumer (editor prefs, explorer filter, notification
       // toggle) re-reads from this broadcast instead of re-fetching
       mainWindow?.webContents.send(IPC.settingsChanged, next);
@@ -1166,6 +1176,29 @@ ipcMain.handle(IPC.ptySpawn, async (_e, args: PtySpawnArgs): Promise<PtySpawnRes
         return listModels({ adapter: opts.adapter, apiKey: key, baseUrl: typeof opts?.baseUrl === 'string' ? opts.baseUrl : '' });
       },
     );
+    // live provider health for the model section: probe state + real context
+    // window + model inventory in one round trip; everything is fail-benign
+    ipcMain.handle(IPC.reviewerProbe, async (_e, opts: ReviewerProbeArgs): Promise<ReviewerProbeResult> => {
+      const adapter = opts?.adapter;
+      const baseUrl = typeof opts?.baseUrl === 'string' ? opts.baseUrl : '';
+      const model = typeof opts?.model === 'string' ? opts.model : '';
+      const key = typeof opts?.apiKey === 'string' ? opts.apiKey.trim() : '';
+      if (adapter !== 'openai' && adapter !== 'anthropic' && adapter !== 'ollama') {
+        return { state: 'unreachable', models: [], detail: 'unknown adapter' };
+      }
+      if (adapter === 'anthropic') {
+        const models = key.length > 0 ? await listModels({ adapter, apiKey: key, baseUrl }) : [];
+        return { state: key.length > 0 ? 'ok' : 'unreachable', models, kind: 'unknown', detail: key.length > 0 ? 'anthropic cloud — no local probe' : 'no API key' };
+      }
+      if (adapter !== 'ollama' && key.length === 0) {
+        return { state: 'unreachable', models: [], detail: 'no API key' };
+      }
+      const [probe, models] = await Promise.all([
+        probeLocalServer({ adapter: adapter as 'openai' | 'ollama', baseUrl, model }),
+        listModels({ adapter, apiKey: key, baseUrl }),
+      ]);
+      return { state: probe.state, serverContext: probe.contextTokens, models, kind: probe.kind, detail: probe.detail };
+    });
     ipcMain.handle(IPC.scrollbackGet, async (_e, sessionId: string, agentId: string): Promise<string[] | null> => {
       const rt = registry?.get(sessionId) ?? null;
       // agentId lands in a path join — same single-component rule the remote

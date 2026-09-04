@@ -955,13 +955,32 @@ const main = async () => {
   if (advLabels.length === 0) fail('advanced knobs section has no fields');
   else {
     const has = (p) => advLabels.some((t) => t.includes(p));
-    if (!has('context window') || !has('keep_alive') || !has('thinking (ollama)')) fail(`advanced fields missing ollama knobs: ${advLabels.join(' | ')}`);
+    if (!has('context window') || !has('keep_alive') || !has('thinking')) fail(`advanced fields missing ollama knobs: ${advLabels.join(' | ')}`);
     else ok(`advanced knobs render for ollama (${advLabels.length} fields)`);
   }
   await closeSettings('after ollama pick');
   const persistedLocal = await evalJs(`window.fraktole.getSettings().then((s) => s.reviewer.providerId ?? '')`);
   if (persistedLocal !== 'ollama') fail(`ollama providerId not persisted: ${persistedLocal}`);
   else ok('keyless local provider pick persisted (providerId=ollama)');
+
+  // 5b) the Loop section: hunger presets write pollSeconds and it persists —
+  //     the live-apply wiring (settingsSet → reviewer.setCadence) hangs off
+  //     the same settingsSet path this walk exercises
+  await openModelSettings('for loop walk');
+  await sleep(400);
+  await evalJs(`[...document.querySelectorAll('.settings-view .settings-nav-item')].find((b) => b.textContent.includes('Loop'))?.click(); true`);
+  await sleep(400);
+  const loopPresets = await evalJs(`[...document.querySelectorAll('.settings-view .settings-preset')].map((b) => b.textContent)`);
+  if (loopPresets.length !== 3) fail(`loop hunger presets missing: ${loopPresets.join(' | ')}`);
+  else ok(`loop hunger presets render (lazy/calm/standard)`);
+  await evalJs(`[...document.querySelectorAll('.settings-view .settings-preset')].find((b) => b.textContent.includes('lazy'))?.click(); true`);
+  await sleep(200);
+  await evalJs(settingsSave);
+  await sleep(500);
+  const pollSeconds = await evalJs(`window.fraktole.getSettings().then((s) => s.reviewer.pollSeconds ?? null)`);
+  if (pollSeconds !== 90) fail(`loop hunger pollSeconds not persisted: ${pollSeconds}`);
+  else ok('loop hunger lazy preset persisted (pollSeconds=90, applies live)');
+  await closeSettings('after loop walk');
 
   // 6) local wire: the model knobs ride the /api/chat payload end-to-end —
   //    options.num_ctx / num_predict / temperature, top-level think, and

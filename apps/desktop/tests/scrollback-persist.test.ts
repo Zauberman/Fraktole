@@ -130,8 +130,21 @@ describe('ScrollbackPersist', () => {
     lineMap.set('tile-1', ['a']);
     const persist = makePersist(dir);
     persist.note('tile-1');
-    await new Promise((r) => setTimeout(r, 60));
-    const entries = await readdir(join(dir, 'scrollback'));
+    // wait for the flush to LAND instead of a fixed sleep — a loaded
+    // machine can stretch the debounced write past any fixed window
+    const deadline = Date.now() + 5000;
+    let entries: string[] = [];
+    for (;;) {
+      try {
+        entries = await readdir(join(dir, 'scrollback'));
+      } catch {
+        // the flush has not created the directory yet — keep polling
+        entries = [];
+      }
+      if (entries.includes('agent-1.json')) break;
+      if (Date.now() > deadline) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
     expect(entries).toEqual(['agent-1.json']);
   });
 });

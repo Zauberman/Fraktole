@@ -55,6 +55,7 @@ describe('SettingsStore knobs whitelist', () => {
       frequencyPenalty: -0.5,
       keepAlive: '5m',
       think: false,
+      thinkingMode: 'off', // legacy boolean `think` migrates one-way
     });
   });
 
@@ -118,5 +119,30 @@ describe('SettingsStore knobs whitelist', () => {
     const { reviewer } = await s.get();
     expect(reviewer.knobs).toEqual({ temperature: 0.3, contextTokens: 32768 });
     expect(reviewer.apiKey).toBe('old'); // patch merges, never wipes
+  });
+
+  it('validates pollSeconds (2–600, integers only, dropped otherwise)', async () => {
+    const ok = await storeWith({ reviewer: { pollSeconds: 90 } });
+    expect((await ok.get()).reviewer.pollSeconds).toBe(90);
+    for (const bad of [1, 601, 15.5, 'fast', true, -3]) {
+      const s = await storeWith({ reviewer: { pollSeconds: bad } });
+      expect((await s.get()).reviewer.pollSeconds).toBeUndefined();
+    }
+  });
+
+  it('validates thinkingMode and thinkingBudgetTokens, migrates legacy think', async () => {
+    const on = await storeWith({ reviewer: { knobs: { thinkingMode: 'on', thinkingBudgetTokens: 8192 } } });
+    expect((await on.get()).reviewer.knobs).toEqual({ thinkingMode: 'on', thinkingBudgetTokens: 8192 });
+    // legacy boolean migrate: true → on, false → off
+    const legacy = await storeWith({ reviewer: { knobs: { think: true } } });
+    expect((await legacy.get()).reviewer.knobs).toEqual({ think: true, thinkingMode: 'on' });
+    // an explicit thinkingMode wins over the legacy boolean
+    const both = await storeWith({ reviewer: { knobs: { think: false, thinkingMode: 'on' } } });
+    expect((await both.get()).reviewer.knobs).toEqual({ think: false, thinkingMode: 'on' });
+    // out-of-range budget and junk modes drop individually
+    const junk = await storeWith({ reviewer: { knobs: { thinkingMode: 'maybe', thinkingBudgetTokens: 512, temperature: 0.4 } } });
+    expect((await junk.get()).reviewer.knobs).toEqual({ temperature: 0.4 });
+    const big = await storeWith({ reviewer: { knobs: { thinkingBudgetTokens: 40000 } } });
+    expect((await big.get()).reviewer.knobs).toBeUndefined();
   });
 });

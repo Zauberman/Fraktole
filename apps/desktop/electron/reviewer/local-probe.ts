@@ -14,6 +14,8 @@ export interface LocalProbeResult {
    *  no answer at all. */
   state: 'ok' | 'loading' | 'unreachable';
   kind: 'llamacpp' | 'ollama' | 'openai-compat' | 'unknown';
+  /** Single-line human explanation of what answered (or why nothing did). */
+  detail?: string;
 }
 
 export interface ProbeTarget {
@@ -35,7 +37,7 @@ export async function probeLocalServer(
   timeoutMs: number = PROBE_TIMEOUT_MS,
 ): Promise<LocalProbeResult> {
   const base = target.baseUrl.trim().replace(/\/+$/, '');
-  if (base.length === 0) return { contextTokens: undefined, state: 'unreachable', kind: 'unknown' };
+  if (base.length === 0) return { contextTokens: undefined, state: 'unreachable', kind: 'unknown', detail: 'no base URL configured' };
   const ask = async (url: string, init?: RequestInit): Promise<Response> => {
     return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   };
@@ -46,19 +48,29 @@ export async function probeLocalServer(
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: target.model }),
       });
-      if (!res.ok) return { contextTokens: undefined, state: 'unreachable', kind: 'ollama' };
+      if (!res.ok) {
+        return { contextTokens: undefined, state: 'unreachable', kind: 'ollama', detail: `/api/show → HTTP ${res.status}` };
+      }
       const json = (await res.json()) as { model_info?: Record<string, unknown> };
-      return { contextTokens: pickContext(json.model_info ?? {}), state: 'ok', kind: 'ollama' };
+      const ctx = pickContext(json.model_info ?? {});
+      return {
+        contextTokens: ctx,
+        state: 'ok',
+        kind: 'ollama',
+        detail: ctx !== undefined ? `ollama /api/show — context window ${ctx}` : `ollama /api/show — no context window reported`,
+      };
     }
     // openai-adapter locals: llama.cpp /props first (authoritative per-slot ctx),
     // then the OpenAI-compatible /v1/models metadata
     try {
       const props = await ask(`${base}/props`);
-      if (props.status === 503) return { contextTokens: undefined, state: 'loading', kind: 'llamacpp' };
+      if (props.status === 503) return { contextTokens: undefined, state: 'loading', kind: 'llamacpp', detail: 'llama.cpp is loading the model' };
       if (props.ok) {
         const json = (await props.json()) as { default_generation_settings?: { n_ctx?: number } };
         const n = json.default_generation_settings?.n_ctx;
-        if (typeof n === 'number' && n > 0) return { contextTokens: n, state: 'ok', kind: 'llamacpp' };
+        if (typeof n === 'number' && n > 0) {
+          return { contextTokens: n, state: 'ok', kind: 'llamacpp', detail: `llama.cpp /props — context window ${n}` };
+        }
       }
     } catch {
       // no /props (LM Studio, vLLM, LocalAI…) — fall through to /v1/models
@@ -74,16 +86,26 @@ export async function probeLocalServer(
         // the SMALLEST candidate so the budget never exceeds the real limit
         const candidates = [first.n_ctx, meta.n_ctx, meta.n_ctx_train, first.max_model_len, json.max_model_len, first.context_length];
         const seen = candidates.filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0);
-        if (seen.length > 0) return { contextTokens: Math.min(...seen), state: 'ok', kind: 'openai-compat' };
-        return { contextTokens: undefined, state: 'ok', kind: 'openai-compat' };
+        if (seen.length > 0) {
+          return {
+            contextTokens: Math.min(...seen),
+            state: 'ok',
+            kind: 'openai-compat',
+            detail: `openai-compatible /models — context window ${Math.min(...seen)}`,
+          };
+        }
+        return { contextTokens: undefined, state: 'ok', kind: 'openai-compat', detail: 'openai-compatible /models — answered (no context window reported)' };
       }
-      if (models.status >= 500) return { contextTokens: undefined, state: 'loading', kind: 'openai-compat' };
+      if (models.status >= 500) {
+        return { contextTokens: undefined, state: 'loading', kind: 'openai-compat', detail: `/models → HTTP ${models.status} (still loading)` };
+      }
     } catch {
       // unreachable
     }
-    return { contextTokens: undefined, state: 'unreachable', kind: 'unknown' };
-  } catch {
-    return { contextTokens: undefined, state: 'unreachable', kind: 'unknown' };
+    return { contextTokens: undefined, state: 'unreachable', kind: 'unknown', detail: 'no answer — is the server running?' };
+  } catch (err) {
+    const why = err instanceof Error && err.message.length > 0 ? err.message : 'no answer';
+    return { contextTokens: undefined, state: 'unreachable', kind: 'unknown', detail: why.slice(0, 120) };
   }
 }
 

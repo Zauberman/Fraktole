@@ -1,4 +1,5 @@
 import { SHORTCUTS, shortcutsByScope, type ShortcutScope } from '../../shortcuts.js';
+import { SectionCard } from './fields.js';
 
 const SCOPES: Array<{ id: ShortcutScope; label: string }> = [
   { id: 'global', label: 'global' },
@@ -18,8 +19,7 @@ export function ShortcutsSection(): React.JSX.Element {
         commands.
       </p>
       {SCOPES.map((s) => (
-        <div key={s.id} className="settings-field settings-field-wide">
-          {s.label}
+        <SectionCard key={s.id} title={s.label}>
           <table className="settings-shortcuts">
             <tbody>
               {shortcutsByScope(s.id).map((sc) => (
@@ -30,7 +30,7 @@ export function ShortcutsSection(): React.JSX.Element {
               ))}
             </tbody>
           </table>
-        </div>
+        </SectionCard>
       ))}
       <span className="settings-hint">{SHORTCUTS.length} bindings registered</span>
     </div>

@@ -153,6 +153,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
   const { sessionId, visible, onOpenSettings } = props;
   const [status, setStatus] = useState<ReviewerStatus>('offline');
   const [statusError, setStatusError] = useState<string | undefined>(undefined);
+  const [statusDetail, setStatusDetail] = useState<string | undefined>(undefined);
   const [runningModel, setRunningModel] = useState<string | undefined>(undefined);
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -262,6 +263,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
       bridge.onReviewerStatus(sessionId, (s) => {
         setStatus(s.status as ReviewerStatus);
         setStatusError(s.error);
+        setStatusDetail(s.detail);
         setRunningModel(s.model);
         setVariant(s.variant ?? null);
       }),
@@ -599,6 +601,7 @@ export function ReviewerTab(props: ReviewerTabProps): React.JSX.Element {
           <div className="reviewer-note reviewer-note-error">{statusError ?? 'reviewer not configured — open config'}</div>
         )}
         {status === 'error' && statusError && <div className="reviewer-note reviewer-note-error">{statusError}</div>}
+        {status === 'running' && statusDetail && <div className="reviewer-note">{statusDetail}</div>}
         {items.length === 0 && status !== 'unconfigured' && status !== 'error' && (
           <div className="reviewer-empty">
             <div className="reviewer-empty-mark">reviewer</div>
